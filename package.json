@@ -1,0 +1,26 @@
+{
+  "name": "irrigation-report-automation",
+  "version": "0.1.0",
+  "description": "Browser automation for IoTCrops irrigation report data extraction",
+  "type": "module",
+  "main": "irrigation-click-test.js",
+  "scripts": {
+    "start": "node irrigation-playwright.js",
+    "vibium": "node irrigation-click-test.js",
+    "test": "node irrigation-playwright.js"
+  },
+  "keywords": [
+    "automation",
+    "agtech",
+    "iot",
+    "irrigation",
+    "browser-automation"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@vibium/win32-x64": "^0.1.2",
+    "playwright": "^1.57.0",
+    "vibium": "latest"
+  }
+}
