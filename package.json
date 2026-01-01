@@ -19,8 +19,6 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
-    "@vibium/win32-x64": "^0.1.2",
-    "playwright": "^1.57.0",
-    "vibium": "latest"
+    "playwright": "^1.57.0"
   }
 }

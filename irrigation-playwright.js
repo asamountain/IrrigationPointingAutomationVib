@@ -427,263 +427,387 @@ async function main() {
         // Wait longer for Highcharts to initialize
         await page.waitForTimeout(3000);
         
-        // Find actual spike points in the Highcharts data
+        // Professional chart point detection API  
         const clickResults = await page.evaluate((needs) => {
           const results = [];
           
-          // Access Highcharts chart object
+          // ============================================
+          // METHOD 1: Try Highcharts API (Most Accurate)
+          // ============================================
           let chart = null;
-          
-          // Try multiple ways to access Highcharts
           if (window.Highcharts && window.Highcharts.charts) {
             chart = window.Highcharts.charts.find(c => c !== undefined);
           }
           
-          // Fallback: look for chart in global scope
-          if (!chart) {
-            // Check if there's a chart stored in a React component or other framework
-            const chartContainer = document.querySelector('.highcharts-container');
-            if (chartContainer && chartContainer.chart) {
-              chart = chartContainer.chart;
+          if (chart && chart.series && chart.series[0]) {
+            results.push({ message: '✅ Highcharts API accessible' });
+            
+            const series = chart.series[0];
+            const dataPoints = series.data;
+            
+            if (dataPoints.length > 0) {
+              // Find irrigation spikes (Y-value drops)
+              const spikes = [];
+              for (let i = 1; i < dataPoints.length; i++) {
+                const prevY = dataPoints[i - 1].y;
+                const currY = dataPoints[i].y;
+                const drop = prevY - currY;
+                
+                // Significant drop = irrigation event
+                if (drop > 5) {
+                  spikes.push({
+                    index: i,
+                    point: dataPoints[i],
+                    x: dataPoints[i].x,
+                    y: currY,
+                    plotX: dataPoints[i].plotX + chart.plotLeft,
+                    plotY: dataPoints[i].plotY + chart.plotTop,
+                    drop: drop,
+                    time: dataPoints[i].category || dataPoints[i].x
+                  });
+                }
+              }
+              
+              if (spikes.length > 0) {
+                results.push({ message: `Found ${spikes.length} irrigation spikes via API` });
+                
+                const firstSpike = spikes[0];
+                const lastSpike = spikes[spikes.length - 1];
+                
+              // Click first spike
+              if (needs.needsFirstClick) {
+                firstSpike.point.select(true, false);
+                firstSpike.point.firePointEvent('click');
+                results.push({ 
+                  action: '✅ API: Clicked FIRST spike', 
+                  x: Math.round(firstSpike.plotX), 
+                  y: Math.round(firstSpike.plotY),
+                  time: firstSpike.time
+                });
+              }
+              
+              // Click last spike (use a different approach to ensure it registers)
+              if (needs.needsLastClick) {
+                // Deselect first spike first
+                if (needs.needsFirstClick) {
+                  firstSpike.point.select(false, false);
+                }
+                
+                lastSpike.point.select(true, false);
+                lastSpike.point.firePointEvent('click');
+                results.push({ 
+                  action: '✅ API: Clicked LAST spike', 
+                  x: Math.round(lastSpike.plotX), 
+                  y: Math.round(lastSpike.plotY),
+                  time: lastSpike.time
+                });
+              }
+                
+                return results;
+              }
             }
           }
           
-          // If still no chart, use SVG path analysis as fallback
-          if (!chart || !chart.series || !chart.series[0]) {
-            return { error: 'Highcharts API not accessible, will try SVG path analysis' };
+          // ============================================
+          // METHOD 2: SVG Path Analysis (Fallback)
+          // ============================================
+          results.push({ message: '⚠️ Highcharts API not accessible, using SVG path analysis' });
+          
+          // Find the series path
+          const seriesPath = document.querySelector('.highcharts-series path[data-z-index="1"]');
+          if (!seriesPath) {
+            return { error: 'No series path found in SVG' };
           }
           
-          const series = chart.series[0];
-          const dataPoints = series.data;
-          
-          if (dataPoints.length === 0) {
-            return { error: 'No data points in series' };
+          const pathData = seriesPath.getAttribute('d');
+          if (!pathData) {
+            return { error: 'Path data attribute not found' };
           }
           
-          // Find spikes: look for large drops in Y value (irrigation events)
-          const spikes = [];
-          for (let i = 1; i < dataPoints.length; i++) {
-            const prevY = dataPoints[i - 1].y;
-            const currY = dataPoints[i].y;
-            const drop = prevY - currY;
+          // Parse SVG path coordinates (handles M, L, and C commands)
+          const coordinates = [];
+          
+          // Extract all numbers from the path
+          const numbers = pathData.match(/[\d.-]+/g);
+          if (!numbers || numbers.length < 6) {
+            return { error: `Path has insufficient data: ${numbers ? numbers.length : 0} numbers` };
+          }
+          
+          // Parse coordinates (every 2 numbers = one point)
+          for (let i = 0; i < numbers.length - 1; i += 2) {
+            coordinates.push({
+              x: parseFloat(numbers[i]),
+              y: parseFloat(numbers[i + 1])
+            });
+          }
+          
+          // For Bézier curves (C command), only use the end points (every 3rd point)
+          // This gives us the actual plotted points, not the control points
+          const plottedPoints = [];
+          plottedPoints.push(coordinates[0]); // First M command point
+          for (let i = 3; i < coordinates.length; i += 3) {
+            plottedPoints.push(coordinates[i]); // End point of each C command
+          }
+          
+          // Use plotted points for spike detection
+          const finalCoords = plottedPoints.length > 10 ? plottedPoints : coordinates;
+          
+          results.push({ 
+            message: `Parsed ${finalCoords.length} plot points from SVG path (from ${coordinates.length} total coords)` 
+          });
+          
+          // Debug: Show sample coordinates
+          if (finalCoords.length > 0) {
+            results.push({
+              message: `Sample points: [0]=(${Math.round(finalCoords[0].x)},${Math.round(finalCoords[0].y)}), [${Math.floor(finalCoords.length/2)}]=(${Math.round(finalCoords[Math.floor(finalCoords.length/2)].x)},${Math.round(finalCoords[Math.floor(finalCoords.length/2)].y)})`
+            });
+          }
+          
+          if (finalCoords.length < 3) {
+            return { error: `Not enough coordinates to find spikes: ${finalCoords.length} points` };
+          }
+          
+          // HSSP Method: Find Highest Slope Start Points (irrigation event starts)
+          
+          // Get Y-range for context
+          const allY = finalCoords.map(c => c.y);
+          const maxY = Math.max(...allY);
+          const minY = Math.min(...allY);
+          const yRange = maxY - minY;
+          
+          results.push({ 
+            message: `Y range: ${Math.round(minY)} to ${Math.round(maxY)} (span: ${Math.round(yRange)})` 
+          });
+          
+          // Step 1: Find irrigation events (visual spikes UP = LOW Y values in SVG)
+          const peaks = [];
+          for (let i = 5; i < finalCoords.length - 5; i++) {
+            // Look at wider window (5 points each side)
+            const prev = finalCoords.slice(Math.max(0, i-5), i);
+            const next = finalCoords.slice(i+1, Math.min(finalCoords.length, i+6));
+            const curr = finalCoords[i];
             
-            // If drop is significant (more than 5 units), it's a spike
-            if (drop > 5) {
-              const point = dataPoints[i];
-              const coords = chart.pointer.getCoordinates({ chartX: point.plotX + chart.plotLeft, chartY: point.plotY + chart.plotTop });
-              
-              spikes.push({
+            // Get average of neighbors
+            const avgPrev = prev.reduce((sum, p) => sum + p.y, 0) / prev.length;
+            const avgNext = next.reduce((sum, p) => sum + p.y, 0) / next.length;
+            
+            // Irrigation spike = LOWER Y than neighbors (visual spike UP)
+            const prominence = Math.min(avgPrev, avgNext) - curr.y;
+            
+            // Threshold: 2% of Y range
+            if (prominence > yRange * 0.02) {
+              peaks.push({
                 index: i,
-                x: point.x,
-                y: point.y,
-                plotX: point.plotX + chart.plotLeft,
-                plotY: point.plotY + chart.plotTop,
-                drop: drop,
-                category: point.category || point.x
+                x: curr.x,
+                y: curr.y,
+                prominence: prominence
               });
             }
           }
           
-          if (spikes.length === 0) {
-            return { error: 'No spikes found in data' };
+          results.push({ 
+            message: `Found ${peaks.length} peaks (irrigation events)` 
+          });
+          
+          // Debug: Show peak locations
+          if (peaks.length > 0 && peaks.length <= 10) {
+            const peaksSummary = peaks.map((p, i) => `[${i}]=idx${p.index}(${Math.round(p.x)},${Math.round(p.y)})`).join(', ');
+            results.push({ message: `Peak locations (raw): ${peaksSummary}` });
+          }
+          
+          // De-duplicate adjacent peaks (keep highest within each cluster)
+          const uniquePeaks = [];
+          let i = 0;
+          while (i < peaks.length) {
+            let clusterHighest = peaks[i];
+            let j = i + 1;
+            
+            // Find all adjacent peaks (within 3 indices AND similar Y-values)
+            while (j < peaks.length) {
+              const indexDiff = peaks[j].index - clusterHighest.index;
+              const yDiff = Math.abs(peaks[j].y - clusterHighest.y);
+              
+              // Same cluster if very close in both index and Y-value
+              if (indexDiff <= 3 || (indexDiff <= 8 && yDiff < yRange * 0.1)) {
+                if (peaks[j].y > clusterHighest.y) {
+                  clusterHighest = peaks[j];
+                }
+                j++;
+              } else {
+                break;  // Different cluster
+              }
+            }
+            
+            uniquePeaks.push(clusterHighest);
+            i = j;
           }
           
           results.push({ 
-            message: `Found ${spikes.length} irrigation spikes`,
-            spikes: spikes.map(s => ({ 
-              category: s.category, 
-              y: s.y, 
-              drop: Math.round(s.drop * 100) / 100 
-            }))
+            message: `After de-duplication: ${uniquePeaks.length} unique irrigation events` 
           });
           
-          // Get first and last spikes
-          const firstSpike = spikes[0];
-          const lastSpike = spikes[spikes.length - 1];
-          
-          results.push({
-            firstSpike: { x: firstSpike.plotX, y: firstSpike.plotY, category: firstSpike.category },
-            lastSpike: { x: lastSpike.plotX, y: lastSpike.plotY, category: lastSpike.category }
-          });
-          
-          // Click first spike if needed
-          if (needs.needsFirstClick && firstSpike) {
-            // Trigger click on the actual data point
-            firstSpike.point = dataPoints[firstSpike.index];
+          // Step 2: For each unique peak, find HSSP (where DROP starts)
+          const spikes = [];
+          for (let pIdx = 0; pIdx < uniquePeaks.length; pIdx++) {
+            const peak = uniquePeaks[pIdx];
+            let hsspIndex = peak.index;
+            let maxDrop = 0;  // Most negative slope
             
-            const clickEvent = new MouseEvent('click', {
-              bubbles: true,
-              cancelable: true,
-              view: window,
-              clientX: firstSpike.plotX,
-              clientY: firstSpike.plotY
-            });
+            // Look backwards up to 30 points to find where steepest DROP starts
+            const lookbackLimit = Math.max(0, peak.index - 30);
             
-            // Also call the point's select method if available
-            if (dataPoints[firstSpike.index].select) {
-              dataPoints[firstSpike.index].select(true);
+            for (let j = peak.index - 1; j > lookbackLimit; j--) {
+              const slopeDrop = finalCoords[j].y - finalCoords[j + 1].y;  // Positive = dropping
+              
+              // Find where Y drops most steeply (irrigation starts)
+              if (slopeDrop > maxDrop) {
+                maxDrop = slopeDrop;
+                hsspIndex = j;
+              }
             }
             
-            // Dispatch click event at the coordinates
-            document.elementFromPoint(firstSpike.plotX, firstSpike.plotY)?.dispatchEvent(clickEvent);
+            spikes.push({
+              index: hsspIndex,
+              x: finalCoords[hsspIndex].x,
+              y: finalCoords[hsspIndex].y,
+              peakIndex: peak.index,
+              peakY: peak.y,
+              maxDrop: maxDrop,
+              lookbackRange: `${lookbackLimit} to ${peak.index}`
+            });
             
-            results.push({ 
-              action: 'Clicked FIRST spike', 
-              x: Math.round(firstSpike.plotX), 
-              y: Math.round(firstSpike.plotY),
-              time: firstSpike.category
+            results.push({
+              message: `Irrigation ${pIdx}: min_Y=${Math.round(peak.y)} at idx=${peak.index} → HSSP at idx=${hsspIndex}, Y=${Math.round(finalCoords[hsspIndex].y)}, drop=${Math.round(maxDrop)}`
             });
           }
           
-          // Click last spike if needed
-          if (needs.needsLastClick && lastSpike) {
+          results.push({ 
+            message: `Found ${spikes.length} HSSP points (irrigation start points)` 
+          });
+          
+          // Debug: Show all HSSP coordinates
+          if (spikes.length > 0 && spikes.length <= 10) {
+            const coordsSummary = spikes.map((s, i) => `[${i}]=(${Math.round(s.x)},${Math.round(s.y)})`).join(', ');
+            results.push({ message: `All HSSPs: ${coordsSummary}` });
+          }
+          
+          if (spikes.length === 0) {
+            results.push({ error: 'No irrigation start points (HSSP) found - check peak detection threshold' });
+            return results;
+          }
+          
+          // Get chart container for coordinate conversion
+          const chartContainer = document.querySelector('.highcharts-container');
+          const containerRect = chartContainer.getBoundingClientRect();
+          
+          const firstHSSP = spikes[0];
+          const lastHSSP = spikes[spikes.length - 1];
+          
+          // For last irrigation, find the point RIGHT AFTER the valley (where recovery starts)
+          const lastValley = uniquePeaks[uniquePeaks.length - 1];
+          const lastEndIndex = Math.min(lastValley.index + 1, finalCoords.length - 1);
+          const lastEnd = finalCoords[lastEndIndex];
+          
+          results.push({
+            message: `Selecting: First HSSP idx=${firstHSSP.index}, Last END idx=${lastEndIndex} (right after valley at idx=${lastValley.index})`
+          });
+          
+          // Convert SVG coordinates to screen coordinates
+          const firstX = containerRect.left + firstHSSP.x;
+          const firstY = containerRect.top + firstHSSP.y;
+          const lastX = containerRect.left + lastEnd.x;
+          const lastY = containerRect.top + lastEnd.y;
+          
+          // Click first irrigation: Focus first field, then click chart
+          if (needs.needsFirstClick) {
+            // Focus the first time input field
+            const firstInput = document.querySelector('input[type="time"]');
+            if (firstInput) {
+              firstInput.focus();
+              firstInput.click();
+              results.push({ message: 'Focused first time input field' });
+            }
+            
+            // Click the chart
             const clickEvent = new MouseEvent('click', {
               bubbles: true,
               cancelable: true,
               view: window,
-              clientX: lastSpike.plotX,
-              clientY: lastSpike.plotY
+              clientX: firstX,
+              clientY: firstY
             });
-            
-            if (dataPoints[lastSpike.index].select) {
-              dataPoints[lastSpike.index].select(true);
+            const elem = document.elementFromPoint(firstX, firstY);
+            if (elem) {
+              elem.dispatchEvent(clickEvent);
+              results.push({ 
+                action: '✅ HSSP: Clicked FIRST irrigation start', 
+                x: Math.round(firstX), 
+                y: Math.round(firstY),
+                svgCoord: `(${Math.round(firstHSSP.x)}, ${Math.round(firstHSSP.y)})`,
+                drop: Math.round(firstHSSP.maxDrop)
+              });
+            }
+          }
+          
+          // Click last irrigation: Focus last field, then click chart
+          if (needs.needsLastClick) {
+            // Focus the LAST time input field (querySelectorAll returns array)
+            const timeInputs = document.querySelectorAll('input[type="time"]');
+            const lastInput = timeInputs[timeInputs.length - 1];
+            if (lastInput) {
+              lastInput.focus();
+              lastInput.click();
+              results.push({ message: 'Focused last time input field' });
             }
             
-            document.elementFromPoint(lastSpike.plotX, lastSpike.plotY)?.dispatchEvent(clickEvent);
-            
-            results.push({ 
-              action: 'Clicked LAST spike', 
-              x: Math.round(lastSpike.plotX), 
-              y: Math.round(lastSpike.plotY),
-              time: lastSpike.category
+            // Click the chart
+            const clickEvent = new MouseEvent('click', {
+              bubbles: true,
+              cancelable: true,
+              view: window,
+              clientX: lastX,
+              clientY: lastY
             });
+            const elem = document.elementFromPoint(lastX, lastY);
+            if (elem) {
+              elem.dispatchEvent(clickEvent);
+              results.push({ 
+                action: '✅ END: Clicked LAST irrigation end (after peak)', 
+                x: Math.round(lastX), 
+                y: Math.round(lastY),
+                svgCoord: `(${Math.round(lastEnd.x)}, ${Math.round(lastEnd.y)})`,
+                afterValley: `valley at idx=${lastValley.index}`
+              });
+            }
           }
           
           return results;
         }, tableStatus);
         
-        if (clickResults.error && clickResults.error.includes('not accessible')) {
-          console.log(`  ⚠️  ${clickResults.error}`);
-          console.log(`  → Trying SVG path analysis fallback...\n`);
-          
-          // Fallback: Click directly on visible spike in SVG
-          const svgClickResult = await page.evaluate((needs) => {
-            const results = [];
-            
-            // Find the chart line (series path)
-            const seriesPaths = document.querySelectorAll('.highcharts-series path, path[class*="series"]');
-            if (seriesPaths.length === 0) {
-              return { error: 'No series paths found in SVG' };
-            }
-            
-            // Get the main line path
-            const mainPath = Array.from(seriesPaths).find(p => {
-              const d = p.getAttribute('d');
-              return d && d.length > 100; // Main line path will be long
-            });
-            
-            if (!mainPath) {
-              return { error: 'Could not find main series path' };
-            }
-            
-            const pathData = mainPath.getAttribute('d');
-            const rect = mainPath.getBoundingClientRect();
-            
-            // Parse path to find spike locations (where line goes down sharply)
-            // For now, use simple heuristic: left 20% and right 20% of visible path
-            const chartContainer = document.querySelector('.highcharts-container');
-            const containerRect = chartContainer.getBoundingClientRect();
-            
-            // First spike: 15% from left, at 70% down (near bottom of spike)
-            const firstX = containerRect.left + containerRect.width * 0.15;
-            const firstY = containerRect.top + containerRect.height * 0.70;
-            
-            // Last spike: 85% from left (near right side), at 70% down
-            const lastX = containerRect.left + containerRect.width * 0.85;
-            const lastY = containerRect.top + containerRect.height * 0.70;
-            
-            results.push({
-              message: 'Using SVG coordinate estimation',
-              chartWidth: Math.round(containerRect.width),
-              chartHeight: Math.round(containerRect.height)
-            });
-            
-            // Click first spike if needed
-            if (needs.needsFirstClick) {
-              const clickEvent = new MouseEvent('click', {
-                bubbles: true,
-                cancelable: true,
-                view: window,
-                clientX: firstX,
-                clientY: firstY
-              });
-              
-              const elem = document.elementFromPoint(firstX, firstY);
-              if (elem) {
-                elem.dispatchEvent(clickEvent);
-                results.push({ 
-                  action: 'SVG: Clicked FIRST spike area', 
-                  x: Math.round(firstX), 
-                  y: Math.round(firstY),
-                  element: elem.tagName
-                });
-              }
-            }
-            
-            // Click last spike if needed  
-            if (needs.needsLastClick) {
-              const clickEvent = new MouseEvent('click', {
-                bubbles: true,
-                cancelable: true,
-                view: window,
-                clientX: lastX,
-                clientY: lastY
-              });
-              
-              const elem = document.elementFromPoint(lastX, lastY);
-              if (elem) {
-                elem.dispatchEvent(clickEvent);
-                results.push({ 
-                  action: 'SVG: Clicked LAST spike area', 
-                  x: Math.round(lastX), 
-                  y: Math.round(lastY),
-                  element: elem.tagName
-                });
-              }
-            }
-            
-            return results;
-          }, tableStatus);
-          
-          if (svgClickResult.error) {
-            console.log(`  ❌ SVG Error: ${svgClickResult.error}`);
-          } else {
-            svgClickResult.forEach(result => {
-              if (result.action) {
-                console.log(`  ✅ ${result.action} at (${result.x}, ${result.y})`);
-              } else if (result.message) {
-                console.log(`  → ${result.message}: ${result.chartWidth}x${result.chartHeight}px`);
-              }
-            });
-          }
-          
-        } else if (clickResults.error) {
+        if (clickResults.error) {
           console.log(`  ❌ Error: ${clickResults.error}`);
         } else {
           clickResults.forEach(result => {
             if (result.action) {
-              console.log(`  ✅ ${result.action} at (${Math.round(result.x)}, ${Math.round(result.y)})`);
-            } else if (result.plotBandBox) {
-              console.log(`  → Yellow zone: x=${Math.round(result.plotBandBox.x)}, width=${Math.round(result.plotBandBox.width)}`);
+              console.log(`  ${result.action}`);
+              if (result.time) console.log(`     → Time: ${result.time}`);
+              if (result.svgCoord) console.log(`     → SVG Coord: ${result.svgCoord}`);
+              if (result.drop) console.log(`     → Max Drop: ${result.drop} (steepness)`);
+              if (result.afterValley) console.log(`     → Position: ${result.afterValley}`);
+            } else if (result.message) {
+              console.log(`  → ${result.message}`);
             }
           });
         }
         
-        await page.waitForTimeout(2000); // Wait for tables to update
+        await page.waitForTimeout(4000); // Wait longer for tables to update after clicking
         
       } else {
         console.log('  ✅ Both tables already have data, skipping clicks\n');
       }
+      
+      // Wait for UI to fully update after clicks
+      await page.waitForTimeout(4000);
       
       // Take screenshot after clicking
       const step6Screenshot = path.join(CONFIG.screenshotDir, `6-after-clicks-${timestamp}.png`);
@@ -693,44 +817,155 @@ async function main() {
       // Extract final table values
       console.log('📊 Step 7: Extracting irrigation data from tables...');
       
+      // Wait a moment for tables to update after clicks
+      await page.waitForTimeout(3000);
+      
       const finalData = await page.evaluate(() => {
-        const firstTimeLabel = '구역 1 첫 급액시간 1';
-        const lastTimeLabel = '구역 1 마지막 급액시간 1';
+        const results = {
+          firstIrrigationTime: null,
+          lastIrrigationTime: null,
+          debug: []
+        };
         
-        const cells = Array.from(document.querySelectorAll('td, div, span'));
-        let firstTimeValue = null;
-        let lastTimeValue = null;
+        // Strategy 1: Look for time input fields (type="time")
+        const timeInputs = Array.from(document.querySelectorAll('input[type="time"]'));
+        results.debug.push(`Found ${timeInputs.length} time input fields`);
         
-        cells.forEach((cell, idx) => {
-          const text = cell.textContent.trim();
-          if (text.includes(firstTimeLabel)) {
-            const nextCell = cells[idx + 1];
-            if (nextCell) {
-              firstTimeValue = nextCell.textContent.trim();
+        // For each time input, look backwards in the DOM to find its label
+        timeInputs.forEach((input, idx) => {
+          const value = input.value;
+          results.debug.push(`Time input ${idx + 1}: value="${value || 'EMPTY'}"`);
+          
+          // Find the parent container
+          let container = input.closest('div');
+          if (container) {
+            // Look for text content in the same container or its siblings
+            const containerText = container.textContent || '';
+            results.debug.push(`Container text: "${containerText.substring(0, 50)}..."`);
+            
+            // Check if this is the "first irrigation time" field
+            if (containerText.includes('첫 급액') || containerText.includes('첫급액')) {
+              results.firstIrrigationTime = value;
+              results.debug.push(`✅ Matched FIRST time: "${value}"`);
             }
-          }
-          if (text.includes(lastTimeLabel)) {
-            const nextCell = cells[idx + 1];
-            if (nextCell) {
-              lastTimeValue = nextCell.textContent.trim();
+            // Check if this is the "last irrigation time" field
+            else if (containerText.includes('마지막 급액') || containerText.includes('마지막급액')) {
+              results.lastIrrigationTime = value;
+              results.debug.push(`✅ Matched LAST time: "${value}"`);
             }
           }
         });
         
-        return {
-          firstIrrigationTime: firstTimeValue,
-          lastIrrigationTime: lastTimeValue
-        };
+        // If still not found, fallback to generic search
+        if (!results.firstIrrigationTime || !results.lastIrrigationTime) {
+          results.debug.push('Trying fallback strategy...');
+          // Strategy 2: Look for table cells with time format
+          const allText = Array.from(document.querySelectorAll('td, div, span, p'));
+          allText.forEach((elem, idx) => {
+          const text = elem.textContent.trim();
+          
+          // If we find the label
+          if (text.includes('구역 1 첫 급액') && text.includes('시간')) {
+            results.debug.push(`Found first label: "${text}"`);
+            
+            // Look in siblings, parent, or nearby elements
+            const parent = elem.parentElement;
+            if (parent) {
+              const siblings = Array.from(parent.children);
+              siblings.forEach(sib => {
+                const sibText = sib.textContent.trim();
+                if (sibText.match(/\d{2}:\d{2}/) && !sibText.includes('급액')) {
+                  results.firstIrrigationTime = sibText;
+                  results.debug.push(`Found first time in sibling: "${sibText}"`);
+                }
+              });
+            }
+            
+            // Try next element
+            const next = allText[idx + 1];
+            if (next && next.textContent.match(/\d{2}:\d{2}/)) {
+              results.firstIrrigationTime = next.textContent.trim();
+              results.debug.push(`Found first time in next element: "${next.textContent.trim()}"`);
+            }
+          }
+          
+          if (text.includes('구역 1 마지막 급액') && text.includes('시간')) {
+            results.debug.push(`Found last label: "${text}"`);
+            
+            const parent = elem.parentElement;
+            if (parent) {
+              const siblings = Array.from(parent.children);
+              siblings.forEach(sib => {
+                const sibText = sib.textContent.trim();
+                if (sibText.match(/\d{2}:\d{2}/) && !sibText.includes('급액')) {
+                  results.lastIrrigationTime = sibText;
+                  results.debug.push(`Found last time in sibling: "${sibText}"`);
+                }
+              });
+            }
+            
+            const next = allText[idx + 1];
+            if (next && next.textContent.match(/\d{2}:\d{2}/)) {
+              results.lastIrrigationTime = next.textContent.trim();
+              results.debug.push(`Found last time in next element: "${next.textContent.trim()}"`);
+            }
+          }
+          }); // End forEach
+        
+          // Strategy 3: If still not found, look for ANY elements with time format in the right panel
+          if (!results.firstIrrigationTime || !results.lastIrrigationTime) {
+            const timeElements = allText.filter(elem => {
+              const text = elem.textContent.trim();
+              return text.match(/^\d{2}:\d{2}$/);
+            });
+            
+            results.debug.push(`Found ${timeElements.length} elements with time format`);
+            
+            if (timeElements.length >= 2) {
+              // Assume first time-format element is "첫 급액시간"
+              if (!results.firstIrrigationTime) {
+                results.firstIrrigationTime = timeElements[0].textContent.trim();
+                results.debug.push(`Using first time element: "${results.firstIrrigationTime}"`);
+              }
+              // Assume last time-format element is "마지막 급액시간"
+              if (!results.lastIrrigationTime) {
+                results.lastIrrigationTime = timeElements[timeElements.length - 1].textContent.trim();
+                results.debug.push(`Using last time element: "${results.lastIrrigationTime}"`);
+              }
+            }
+          } // End Strategy 3 if block
+        } // End fallback if block
+        
+        return results;
       });
       
+      console.log(`  → Debug info: ${finalData.debug.join(' | ')}`);
       console.log(`  → 첫 급액시간 1: ${finalData.firstIrrigationTime || 'NOT FOUND'}`);
       console.log(`  → 마지막 급액시간 1: ${finalData.lastIrrigationTime || 'NOT FOUND'}\n`);
       
       // Save data to JSON
       if (finalData.firstIrrigationTime || finalData.lastIrrigationTime) {
+        const reportData = {
+          extractedAt: new Date().toISOString(),
+          manager: CONFIG.targetName,
+          url: page.url(),
+          data: {
+            firstIrrigationTime: finalData.firstIrrigationTime,
+            lastIrrigationTime: finalData.lastIrrigationTime
+          }
+        };
+        
         const dataFile = path.join(CONFIG.outputDir, `irrigation-data-${timestamp}.json`);
-        fs.writeFileSync(dataFile, JSON.stringify(finalData, null, 2));
+        fs.writeFileSync(dataFile, JSON.stringify(reportData, null, 2));
         console.log(`  💾 Data saved to: ${dataFile}\n`);
+      } else {
+        console.log(`  ⚠️  No irrigation time data found - not saving JSON file`);
+        
+        // Save HTML for debugging
+        const htmlContent = await page.content();
+        const htmlFile = path.join(CONFIG.outputDir, `debug-page-${timestamp}.html`);
+        fs.writeFileSync(htmlFile, htmlContent);
+        console.log(`  🔍 Saved page HTML for debugging: ${htmlFile}\n`);
       }
       
     } catch (error) {
