@@ -703,104 +703,82 @@ async function main() {
           const firstHSSP = spikes[0];
           const lastHSSP = spikes[spikes.length - 1];
           
-          // For last irrigation, find the point RIGHT AFTER the valley (where recovery starts)
+          // For last irrigation, use the valley (lowest point = peak of irrigation)
           const lastValley = uniquePeaks[uniquePeaks.length - 1];
-          const lastEndIndex = Math.min(lastValley.index + 1, finalCoords.length - 1);
-          const lastEnd = finalCoords[lastEndIndex];
+          
+          // Only set lastClick if there are multiple irrigation events
+          const hasMultipleEvents = uniquePeaks.length >= 2;
           
           results.push({
-            message: `Selecting: First HSSP idx=${firstHSSP.index}, Last END idx=${lastEndIndex} (right after valley at idx=${lastValley.index})`
+            message: `Selecting: First HSSP idx=${firstHSSP.index}, Last VALLEY idx=${lastValley.index}`
           });
+          
+          if (!hasMultipleEvents) {
+            results.push({
+              message: `Only 1 irrigation event detected - skipping "last" click (UI limitation)`
+            });
+          }
           
           // Convert SVG coordinates to screen coordinates
           const firstX = containerRect.left + firstHSSP.x;
           const firstY = containerRect.top + firstHSSP.y;
-          const lastX = containerRect.left + lastEnd.x;
-          const lastY = containerRect.top + lastEnd.y;
+          const lastX = containerRect.left + lastValley.x;
+          const lastY = containerRect.top + lastValley.y;
           
-          // Click first irrigation: Focus first field, then click chart
-          if (needs.needsFirstClick) {
-            // Focus the first time input field
-            const firstInput = document.querySelector('input[type="time"]');
-            if (firstInput) {
-              firstInput.focus();
-              firstInput.click();
-              results.push({ message: 'Focused first time input field' });
-            }
-            
-            // Click the chart
-            const clickEvent = new MouseEvent('click', {
-              bubbles: true,
-              cancelable: true,
-              view: window,
-              clientX: firstX,
-              clientY: firstY
-            });
-            const elem = document.elementFromPoint(firstX, firstY);
-            if (elem) {
-              elem.dispatchEvent(clickEvent);
-              results.push({ 
-                action: '✅ HSSP: Clicked FIRST irrigation start', 
-                x: Math.round(firstX), 
-                y: Math.round(firstY),
-                svgCoord: `(${Math.round(firstHSSP.x)}, ${Math.round(firstHSSP.y)})`,
-                drop: Math.round(firstHSSP.maxDrop)
-              });
-            }
-          }
-          
-          // Click last irrigation: Focus last field, then click chart
-          if (needs.needsLastClick) {
-            // Focus the LAST time input field (querySelectorAll returns array)
-            const timeInputs = document.querySelectorAll('input[type="time"]');
-            const lastInput = timeInputs[timeInputs.length - 1];
-            if (lastInput) {
-              lastInput.focus();
-              lastInput.click();
-              results.push({ message: 'Focused last time input field' });
-            }
-            
-            // Click the chart
-            const clickEvent = new MouseEvent('click', {
-              bubbles: true,
-              cancelable: true,
-              view: window,
-              clientX: lastX,
-              clientY: lastY
-            });
-            const elem = document.elementFromPoint(lastX, lastY);
-            if (elem) {
-              elem.dispatchEvent(clickEvent);
-              results.push({ 
-                action: '✅ END: Clicked LAST irrigation end (after peak)', 
-                x: Math.round(lastX), 
-                y: Math.round(lastY),
-                svgCoord: `(${Math.round(lastEnd.x)}, ${Math.round(lastEnd.y)})`,
-                afterValley: `valley at idx=${lastValley.index}`
-              });
-            }
-          }
+          // Return coordinates for Playwright to click (more reliable than JS events)
+          return {
+            needsFirstClick: needs.needsFirstClick,
+            needsLastClick: needs.needsLastClick && hasMultipleEvents, // Only click last if multiple events
+            firstCoords: needs.needsFirstClick ? { x: Math.round(firstX), y: Math.round(firstY), svgX: Math.round(firstHSSP.x), svgY: Math.round(firstHSSP.y), drop: Math.round(firstHSSP.maxDrop) } : null,
+            lastCoords: (needs.needsLastClick && hasMultipleEvents) ? { x: Math.round(lastX), y: Math.round(lastY), svgX: Math.round(lastValley.x), svgY: Math.round(lastValley.y), valleyIdx: lastValley.index } : null,
+            debug: results
+          };
           
           return results;
         }, tableStatus);
         
-        if (clickResults.error) {
-          console.log(`  ❌ Error: ${clickResults.error}`);
-        } else {
-          clickResults.forEach(result => {
-            if (result.action) {
-              console.log(`  ${result.action}`);
-              if (result.time) console.log(`     → Time: ${result.time}`);
-              if (result.svgCoord) console.log(`     → SVG Coord: ${result.svgCoord}`);
-              if (result.drop) console.log(`     → Max Drop: ${result.drop} (steepness)`);
-              if (result.afterValley) console.log(`     → Position: ${result.afterValley}`);
-            } else if (result.message) {
-              console.log(`  → ${result.message}`);
-            }
+        // Display debug info
+        if (clickResults.debug) {
+          clickResults.debug.forEach(msg => {
+            if (msg.message) console.log(`  → ${msg.message}`);
           });
         }
         
-        await page.waitForTimeout(4000); // Wait longer for tables to update after clicking
+        // Now perform REAL Playwright mouse clicks for more reliable interaction
+        if (clickResults.needsFirstClick && clickResults.firstCoords) {
+          const coords = clickResults.firstCoords;
+          console.log(`  ✅ HSSP: Clicking FIRST irrigation start at (${coords.x}, ${coords.y})`);
+          console.log(`     → SVG Coord: (${coords.svgX}, ${coords.svgY})`);
+          console.log(`     → Max Drop: ${coords.drop} (steepness)`);
+          
+          // Focus first input field
+          await page.click('input[type="time"]:nth-of-type(1)');
+          await page.waitForTimeout(500);
+          
+          // Click chart with Playwright mouse
+          await page.mouse.click(coords.x, coords.y);
+          await page.waitForTimeout(3000); // Wait for UI to update before second click
+        }
+        
+        if (clickResults.needsLastClick && clickResults.lastCoords) {
+          const coords = clickResults.lastCoords;
+          console.log(`  ✅ PEAK: Clicking LAST irrigation peak at (${coords.x}, ${coords.y})`);
+          console.log(`     → SVG Coord: (${coords.svgX}, ${coords.svgY})`);
+          console.log(`     → Position: valley (lowest Y) at idx=${coords.valleyIdx}`);
+          
+          // Focus LAST input field
+          const timeInputs = await page.$$('input[type="time"]');
+          if (timeInputs.length > 1) {
+            await timeInputs[timeInputs.length - 1].click();
+            await page.waitForTimeout(500);
+          }
+          
+          // Click chart with Playwright mouse
+          await page.mouse.click(coords.x, coords.y);
+          await page.waitForTimeout(2000); // Wait for UI to update
+        }
+        
+        await page.waitForTimeout(2000); // Final wait for tables to fully update
         
       } else {
         console.log('  ✅ Both tables already have data, skipping clicks\n');
