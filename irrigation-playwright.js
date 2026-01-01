@@ -273,49 +273,79 @@ async function main() {
       console.log(`  ⚠️  Error clicking "승진" radio: ${error.message}\n`);
     }
     
-    // Step 5: Click the top farm in the left list
-    console.log('🏭 Step 5: Clicking top farm in left list...');
+    // Step 5: Get all farms from the list and loop through them
+    console.log('🏭 Step 5: Getting list of all farms...');
     
+    let farmList = [];
     try {
-      // Use JavaScript to click the element (more reliable)
-      const farmClicked = await page.evaluate(() => {
-        // Try specific XPath-like selection
+      farmList = await page.evaluate(() => {
+        const farms = [];
         const tabs = document.querySelector('[id*="tabs"][id*="content-point"]');
         if (tabs) {
-          // Navigate to the specific div structure
-          const targetDiv = tabs.querySelector('div > div:first-child > div:nth-child(2) > div:nth-child(2)');
-          if (targetDiv) {
-            targetDiv.click();
-            return 'XPath-like selector';
-          }
+          // Get all farm items in the list
+          const farmDivs = tabs.querySelectorAll('div > div:first-child > div:nth-child(2) > div');
+          farmDivs.forEach((div, idx) => {
+            const text = div.textContent.trim();
+            if (text && text.length > 0) {
+              farms.push({ index: idx + 1, name: text });
+            }
+          });
         }
-        
-        // Fallback: find first clickable farm item in list
-        const farmList = document.querySelectorAll('[class*="farm"], [class*="point"], [role="button"]');
-        if (farmList.length > 0) {
-          farmList[0].click();
-          return 'First farm item';
-        }
-        
-        return false;
+        return farms;
       });
       
+      console.log(`  ✅ Found ${farmList.length} farms`);
+      farmList.forEach((farm, idx) => {
+        console.log(`     [${idx + 1}] ${farm.name}`);
+      });
+      console.log('');
+    } catch (error) {
+      console.log(`  ⚠️  Error getting farm list: ${error.message}`);
+      console.log('  → Will try processing just the first farm\n');
+      farmList = [{ index: 1, name: 'First Farm (fallback)' }];
+    }
+    
+    // Array to store all farm data
+    const allFarmData = [];
+    
+    // Loop through each farm
+    const maxFarmsToProcess = 3; // Limit to first 3 farms for faster testing
+    const farmsToProcess = farmList.slice(0, maxFarmsToProcess);
+    
+    for (let farmIdx = 0; farmIdx < farmsToProcess.length; farmIdx++) {
+      const currentFarm = farmsToProcess[farmIdx];
+      console.log(`\n${'='.repeat(70)}`);
+      console.log(`🏭 Processing Farm ${farmIdx + 1}/${farmsToProcess.length}: ${currentFarm.name}`);
+      console.log(`${'='.repeat(70)}\n`);
+      
+      // Click the farm
+      try {
+        const farmClicked = await page.evaluate((farmIndex) => {
+          const tabs = document.querySelector('[id*="tabs"][id*="content-point"]');
+          if (tabs) {
+            const targetDiv = tabs.querySelector(`div > div:first-child > div:nth-child(2) > div:nth-child(${farmIndex})`);
+            if (targetDiv) {
+              targetDiv.click();
+              return true;
+            }
+          }
+        return false;
+        }, currentFarm.index);
+      
       if (farmClicked) {
-        console.log(`  ✅ Clicked top farm via JavaScript (method: ${farmClicked})`);
+          console.log(`  ✅ Clicked farm "${currentFarm.name}"`);
         await page.waitForTimeout(3000); // Wait for chart to load
-        
-        const step5Screenshot = path.join(CONFIG.screenshotDir, `5-selected-farm-${timestamp}.png`);
-        await page.screenshot({ path: step5Screenshot, fullPage: true });
-        console.log(`  📸 Screenshot: ${step5Screenshot}\n`);
       } else {
-        console.log('  ⚠️  Could not find top farm element\n');
+          console.log(`  ⚠️  Could not click farm "${currentFarm.name}", skipping...\n`);
+          continue;
       }
     } catch (error) {
-      console.log(`  ⚠️  Error clicking top farm: ${error.message}\n`);
+        console.log(`  ⚠️  Error clicking farm: ${error.message}, skipping...\n`);
+        continue;
     }
     
     // Step 6: Check table fields and click irrigation points if needed
-    console.log('💧 Step 6: Checking irrigation time tables...');
+    console.log('💧 Checking irrigation time tables...');
     
     try {
       await page.waitForTimeout(2000); // Wait for page to stabilize
@@ -441,33 +471,33 @@ async function main() {
           
           if (chart && chart.series && chart.series[0]) {
             results.push({ message: '✅ Highcharts API accessible' });
-            
-            const series = chart.series[0];
-            const dataPoints = series.data;
-            
+          
+          const series = chart.series[0];
+          const dataPoints = series.data;
+          
             if (dataPoints.length > 0) {
               // Find irrigation spikes (Y-value drops)
-              const spikes = [];
-              for (let i = 1; i < dataPoints.length; i++) {
-                const prevY = dataPoints[i - 1].y;
-                const currY = dataPoints[i].y;
-                const drop = prevY - currY;
-                
+          const spikes = [];
+          for (let i = 1; i < dataPoints.length; i++) {
+            const prevY = dataPoints[i - 1].y;
+            const currY = dataPoints[i].y;
+            const drop = prevY - currY;
+            
                 // Significant drop = irrigation event
-                if (drop > 5) {
-                  spikes.push({
-                    index: i,
+            if (drop > 5) {
+              spikes.push({
+                index: i,
                     point: dataPoints[i],
                     x: dataPoints[i].x,
                     y: currY,
                     plotX: dataPoints[i].plotX + chart.plotLeft,
                     plotY: dataPoints[i].plotY + chart.plotTop,
-                    drop: drop,
+                drop: drop,
                     time: dataPoints[i].category || dataPoints[i].x
-                  });
-                }
-              }
-              
+              });
+            }
+          }
+          
               if (spikes.length > 0) {
                 results.push({ message: `Found ${spikes.length} irrigation spikes via API` });
                 
@@ -478,7 +508,7 @@ async function main() {
               if (needs.needsFirstClick) {
                 firstSpike.point.select(true, false);
                 firstSpike.point.firePointEvent('click');
-                results.push({ 
+          results.push({ 
                   action: '✅ API: Clicked FIRST spike', 
                   x: Math.round(firstSpike.plotX), 
                   y: Math.round(firstSpike.plotY),
@@ -495,7 +525,7 @@ async function main() {
                 
                 lastSpike.point.select(true, false);
                 lastSpike.point.firePointEvent('click');
-                results.push({ 
+          results.push({
                   action: '✅ API: Clicked LAST spike', 
                   x: Math.round(lastSpike.plotX), 
                   y: Math.round(lastSpike.plotY),
@@ -551,8 +581,8 @@ async function main() {
           
           // Use plotted points for spike detection
           const finalCoords = plottedPoints.length > 10 ? plottedPoints : coordinates;
-          
-          results.push({ 
+            
+            results.push({ 
             message: `Parsed ${finalCoords.length} plot points from SVG path (from ${coordinates.length} total coords)` 
           });
           
@@ -574,8 +604,8 @@ async function main() {
           const maxY = Math.max(...allY);
           const minY = Math.min(...allY);
           const yRange = maxY - minY;
-          
-          results.push({ 
+            
+            results.push({ 
             message: `Y range: ${Math.round(minY)} to ${Math.round(maxY)} (span: ${Math.round(yRange)})` 
           });
           
@@ -641,8 +671,8 @@ async function main() {
             uniquePeaks.push(clusterHighest);
             i = j;
           }
-          
-          results.push({ 
+            
+            results.push({
             message: `After de-duplication: ${uniquePeaks.length} unique irrigation events` 
           });
           
@@ -676,7 +706,7 @@ async function main() {
               lookbackRange: `${lookbackLimit} to ${peak.index}`
             });
             
-            results.push({
+                results.push({ 
               message: `Irrigation ${pIdx}: min_Y=${Math.round(peak.y)} at idx=${peak.index} → HSSP at idx=${hsspIndex}, Y=${Math.round(finalCoords[hsspIndex].y)}, drop=${Math.round(maxDrop)}`
             });
           }
@@ -716,7 +746,7 @@ async function main() {
             message: `Selecting: First HSSP idx=${firstHSSP.index}, Last VALLEY idx=${lastValley.index}`
           });
           
-          results.push({
+                results.push({ 
             message: `Click offset: ${clickOffsetY}px ABOVE chart line (Highcharts clickable area)`
           });
           
@@ -740,10 +770,10 @@ async function main() {
             lastCoords: (needs.needsLastClick && hasMultipleEvents) ? { x: Math.round(lastX), y: Math.round(lastY), svgX: Math.round(lastValley.x), svgY: Math.round(lastValley.y), valleyIdx: lastValley.index } : null,
             debug: results
           };
+            
+            return results;
+          }, tableStatus);
           
-          return results;
-        }, tableStatus);
-        
         // Display debug info
         if (clickResults.debug) {
           clickResults.debug.forEach(msg => {
@@ -930,34 +960,46 @@ async function main() {
       console.log(`  → 첫 급액시간 1: ${finalData.firstIrrigationTime || 'NOT FOUND'}`);
       console.log(`  → 마지막 급액시간 1: ${finalData.lastIrrigationTime || 'NOT FOUND'}\n`);
       
-      // Save data to JSON
+      // Add farm data to collection
+      const farmData = {
+        farmName: currentFarm.name,
+        farmIndex: farmIdx + 1,
+        url: page.url(),
+        firstIrrigationTime: finalData.firstIrrigationTime || null,
+        lastIrrigationTime: finalData.lastIrrigationTime || null,
+        extractedAt: new Date().toISOString()
+      };
+      allFarmData.push(farmData);
+      
       if (finalData.firstIrrigationTime || finalData.lastIrrigationTime) {
-        const reportData = {
-          extractedAt: new Date().toISOString(),
-          manager: CONFIG.targetName,
-          url: page.url(),
-          data: {
-            firstIrrigationTime: finalData.firstIrrigationTime,
-            lastIrrigationTime: finalData.lastIrrigationTime
-          }
-        };
-        
-        const dataFile = path.join(CONFIG.outputDir, `irrigation-data-${timestamp}.json`);
-        fs.writeFileSync(dataFile, JSON.stringify(reportData, null, 2));
-        console.log(`  💾 Data saved to: ${dataFile}\n`);
+        console.log(`  ✅ Data collected for farm "${currentFarm.name}"\n`);
       } else {
-        console.log(`  ⚠️  No irrigation time data found - not saving JSON file`);
-        
-        // Save HTML for debugging
-        const htmlContent = await page.content();
-        const htmlFile = path.join(CONFIG.outputDir, `debug-page-${timestamp}.html`);
-        fs.writeFileSync(htmlFile, htmlContent);
-        console.log(`  🔍 Saved page HTML for debugging: ${htmlFile}\n`);
+        console.log(`  ⚠️  No irrigation time data found for this farm\n`);
       }
       
     } catch (error) {
       console.log(`  ⚠️  Error in data extraction: ${error.message}\n`);
     }
+    
+      // Take screenshot after processing this farm
+      const farmScreenshot = path.join(CONFIG.screenshotDir, `farm-${farmIdx + 1}-${timestamp}.png`);
+      await page.screenshot({ path: farmScreenshot, fullPage: true });
+      console.log(`  📸 Screenshot: ${farmScreenshot}\n`);
+      
+    } // End farm loop
+    
+    // Save all collected farm data
+    console.log('\n💾 Saving all farm data...');
+    const allDataFile = path.join(CONFIG.outputDir, `all-farms-data-${timestamp}.json`);
+    const summaryData = {
+      extractedAt: new Date().toISOString(),
+      manager: CONFIG.targetName,
+      totalFarms: allFarmData.length,
+      farmsWithData: allFarmData.filter(f => f.firstIrrigationTime || f.lastIrrigationTime).length,
+      farms: allFarmData
+    };
+    fs.writeFileSync(allDataFile, JSON.stringify(summaryData, null, 2));
+    console.log(`✅ Saved data for ${allFarmData.length} farms to: ${allDataFile}\n`);
     
     // Step 8: Final screenshot
     const finalScreenshot = path.join(CONFIG.screenshotDir, `8-final-state-${timestamp}.png`);
@@ -965,19 +1007,30 @@ async function main() {
     console.log(`📸 Final screenshot saved: ${finalScreenshot}\n`);
     
     // Success summary
-    console.log('✅ Week 3 - Data Extraction Complete!');
+    console.log('✅ Multi-Farm Data Extraction Complete!');
+    console.log('\n📋 Summary:');
+    console.log(`   • Total farms processed: ${allFarmData.length}`);
+    console.log(`   • Farms with data: ${summaryData.farmsWithData}`);
+    console.log(`   • Manager: ${CONFIG.targetName}`);
+    
+    // Show summary table
+    console.log('\n📊 Farm Details:');
+    allFarmData.forEach((farm, idx) => {
+      const first = farm.firstIrrigationTime || '--:--';
+      const last = farm.lastIrrigationTime || '--:--';
+      const status = (farm.firstIrrigationTime || farm.lastIrrigationTime) ? '✅' : '⚠️';
+      console.log(`   ${status} [${idx + 1}] ${farm.farmName}`);
+      console.log(`      First: ${first} | Last: ${last}`);
+    });
+    
     console.log('\n📋 What Was Accomplished:');
     console.log('   1. ✅ Navigated to report page');
     console.log('   2. ✅ Selected "승진" manager');
-    console.log('   3. ✅ Clicked top farm in list');
-    console.log('   4. ✅ Checked irrigation time tables');
-    console.log('   5. ✅ Clicked chart points to fill empty tables');
+    console.log(`   3. ✅ Processed ${allFarmData.length} farms`);
+    console.log('   4. ✅ Checked irrigation time tables for each farm');
+    console.log('   5. ✅ Clicked chart points using HSSP algorithm');
     console.log('   6. ✅ Extracted data and saved to JSON');
-    console.log('   7. ✅ Captured 8 screenshots of the process');
-    console.log('\n📋 Next Steps:');
-    console.log('   1. Review screenshots to verify data extraction');
-    console.log('   2. Loop through multiple farms');
-    console.log('   3. Handle farms that already have data\n');
+    console.log('   7. ✅ Captured screenshots of the process\n');
     
   } catch (error) {
     console.error('❌ Error during automation:', error);
