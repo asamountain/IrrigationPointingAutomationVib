@@ -709,8 +709,15 @@ async function main() {
           // Only set lastClick if there are multiple irrigation events
           const hasMultipleEvents = uniquePeaks.length >= 2;
           
+          // IMPORTANT: Click ABOVE the line (lower Y) to hit Highcharts clickable area
+          const clickOffsetY = 15; // pixels above the chart line
+          
           results.push({
             message: `Selecting: First HSSP idx=${firstHSSP.index}, Last VALLEY idx=${lastValley.index}`
+          });
+          
+          results.push({
+            message: `Click offset: ${clickOffsetY}px ABOVE chart line (Highcharts clickable area)`
           });
           
           if (!hasMultipleEvents) {
@@ -721,9 +728,9 @@ async function main() {
           
           // Convert SVG coordinates to screen coordinates
           const firstX = containerRect.left + firstHSSP.x;
-          const firstY = containerRect.top + firstHSSP.y;
+          const firstY = containerRect.top + firstHSSP.y - clickOffsetY;
           const lastX = containerRect.left + lastValley.x;
-          const lastY = containerRect.top + lastValley.y;
+          const lastY = containerRect.top + lastValley.y - clickOffsetY;
           
           // Return coordinates for Playwright to click (more reliable than JS events)
           return {
@@ -747,8 +754,9 @@ async function main() {
         // Now perform REAL Playwright mouse clicks for more reliable interaction
         if (clickResults.needsFirstClick && clickResults.firstCoords) {
           const coords = clickResults.firstCoords;
-          console.log(`  ✅ HSSP: Clicking FIRST irrigation start at (${coords.x}, ${coords.y})`);
-          console.log(`     → SVG Coord: (${coords.svgX}, ${coords.svgY})`);
+          console.log(`  ✅ HSSP: Clicking FIRST irrigation start`);
+          console.log(`     → Screen Coord: (${coords.x}, ${coords.y}) - 15px ABOVE line`);
+          console.log(`     → SVG Line Coord: (${coords.svgX}, ${coords.svgY})`);
           console.log(`     → Max Drop: ${coords.drop} (steepness)`);
           
           // Focus first input field
@@ -762,8 +770,9 @@ async function main() {
         
         if (clickResults.needsLastClick && clickResults.lastCoords) {
           const coords = clickResults.lastCoords;
-          console.log(`  ✅ PEAK: Clicking LAST irrigation peak at (${coords.x}, ${coords.y})`);
-          console.log(`     → SVG Coord: (${coords.svgX}, ${coords.svgY})`);
+          console.log(`  ✅ PEAK: Clicking LAST irrigation peak`);
+          console.log(`     → Screen Coord: (${coords.x}, ${coords.y}) - 15px ABOVE line`);
+          console.log(`     → SVG Line Coord: (${coords.svgX}, ${coords.svgY})`);
           console.log(`     → Position: valley (lowest Y) at idx=${coords.valleyIdx}`);
           
           // Focus LAST input field
