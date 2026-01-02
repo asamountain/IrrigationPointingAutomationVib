@@ -10,6 +10,7 @@
 import { chromium } from 'playwright';
 import fs from 'fs';
 import path from 'path';
+import DashboardServer from './dashboard-server.js';
 
 // Configuration (move to config.js later)
 const CONFIG = {
@@ -32,6 +33,18 @@ const CONFIG = {
 
 // Training data file
 const TRAINING_FILE = './training/training-data.json';
+
+// Global dashboard instance (will be set in main)
+let globalDashboard = null;
+
+// Helper function to take screenshots and update dashboard
+async function takeScreenshot(page, screenshotPath) {
+  await page.screenshot({ path: screenshotPath, fullPage: true });
+  if (globalDashboard) {
+    globalDashboard.updateScreenshot(screenshotPath);
+  }
+  return screenshotPath;
+}
 
 // Load existing learning data for auto-correction
 function loadLearningOffsets() {
@@ -79,23 +92,36 @@ function loadLearningOffsets() {
 async function main() {
   console.log('🚀 Starting Irrigation Report Automation (Playwright)...\n');
   
+  // Initialize and start dashboard server
+  const dashboard = new DashboardServer();
+  globalDashboard = dashboard; // Set global instance
+  const dashboardUrl = await dashboard.start();
+  dashboard.log('Irrigation automation starting...', 'info');
+  dashboard.setManager(CONFIG.targetName);
+  
   // Load learned offsets from previous training
   const learnedOffsets = loadLearningOffsets();
   if (learnedOffsets.count > 0) {
     console.log(`🎓 Loaded learning data from ${learnedOffsets.count} training sessions`);
     console.log(`   → Applying corrections: First(${learnedOffsets.firstX.toFixed(1)}, ${learnedOffsets.firstY.toFixed(1)}), Last(${learnedOffsets.lastX.toFixed(1)}, ${learnedOffsets.lastY.toFixed(1)})\n`);
+    dashboard.log(`Loaded learning data from ${learnedOffsets.count} training sessions`, 'success');
   }
   
   // Show selected manager
   console.log(`👤 Selected Manager: ${CONFIG.targetName}`);
   if (CONFIG.watchMode) {
     console.log(`👁️  WATCH MODE: Script will observe but not interfere`);
+    dashboard.log('Watch mode enabled', 'info');
   } else if (CONFIG.chartLearningMode) {
     console.log(`🎓 LEARNING MODE: Will pause for corrections`);
+    dashboard.log('Learning mode enabled', 'info');
   }
   console.log();
 
   // Launch browser with maximized window
+  dashboard.updateStatus('🚀 Launching browser...', 'running');
+  dashboard.updateStep('Initializing browser', 5);
+  
   const browser = await chromium.launch({
     headless: false,
     args: [
@@ -109,7 +135,18 @@ async function main() {
     screen: { width: 1920, height: 1080 }
   });
   
+  // Open automation page
   const page = await context.newPage();
+  
+  // Open dashboard in a new tab
+  const dashboardPage = await context.newPage();
+  await dashboardPage.goto(dashboardUrl);
+  await dashboardPage.bringToFront();
+  await page.waitForTimeout(1000); // Let dashboard load
+  await page.bringToFront(); // Bring automation back to front
+  
+  dashboard.log('Browser launched successfully', 'success');
+  dashboard.log('Dashboard opened in new tab', 'success');
   
   // Maximize the window using CDP
   const session = await page.context().newCDPSession(page);
@@ -122,6 +159,10 @@ async function main() {
   try {
     // Step 1: Navigate to IoFarm admin report page
     console.log('📍 Step 1: Navigating to admin.iofarm.com/report/...');
+    dashboard.updateStatus('🌐 Navigating to report page...', 'running');
+    dashboard.updateStep('Step 1: Navigating to report page', 10);
+    dashboard.log('Navigating to admin.iofarm.com/report/', 'info');
+    
     await page.goto(CONFIG.url, { waitUntil: 'networkidle' });
     
     // Wait a few seconds as requested
@@ -131,12 +172,14 @@ async function main() {
     // Show current URL
     const currentUrl1 = page.url();
     console.log(`  → Current URL: ${currentUrl1}`);
+    dashboard.log(`Current URL: ${currentUrl1}`, 'info');
     
     // Take screenshot to verify we're on the right page
     const timestamp = new Date().toISOString().replace(/:/g, '-').split('.')[0];
     const screenshotPath = path.join(CONFIG.screenshotDir, `1-homepage-${timestamp}.png`);
-    await page.screenshot({ path: screenshotPath, fullPage: true });
+    await takeScreenshot(page, screenshotPath);
     console.log(`✅ Report page loaded. Screenshot saved: ${screenshotPath}\n`);
+    dashboard.log('Report page loaded successfully', 'success');
     
     // Step 2: Check if login is needed, if so, login
     console.log('🔐 Step 2: Checking if login is required...');
@@ -1716,11 +1759,19 @@ async function main() {
     console.error('❌ Error during automation:', error);
     console.error('   Stack trace:', error.stack);
     
+    if (dashboard) {
+      dashboard.updateStatus('❌ Error occurred', 'error');
+      dashboard.log(`Error: ${error.message}`, 'error');
+    }
+    
     // Try to take error screenshot
     try {
       const errorScreenshot = path.join(CONFIG.screenshotDir, `error-${Date.now()}.png`);
-      await page.screenshot({ path: errorScreenshot, fullPage: true });
+      await takeScreenshot(page, errorScreenshot);
       console.log(`📸 Error screenshot saved: ${errorScreenshot}`);
+      if (dashboard) {
+        dashboard.log('Error screenshot captured', 'info');
+      }
     } catch (screenshotError) {
       console.log('   Could not save error screenshot');
     }
@@ -1729,14 +1780,28 @@ async function main() {
     // Keep browser open for inspection
     console.log('\n🔚 Automation complete. Browser will stay open for inspection...');
     console.log('   → Check the browser DevTools Console tab to see webpage logs');
-    console.log('   → Close the browser manually when done\n');
+    console.log('   → Close the browser manually when done');
+    console.log('   → Dashboard will remain accessible');
+    console.log('   → Close terminal to stop everything\n');
+    
+    if (dashboard) {
+      dashboard.updateStatus('✅ Automation Complete', 'running');
+      dashboard.updateStep('Completed successfully', 100);
+      dashboard.log('Automation finished. Browser staying open for inspection.', 'success');
+    }
+    
     // await browser.close(); // Commented out - close manually to inspect results
+    // Note: Dashboard server will keep running until terminal is closed
   }
 }
 
 // Run the automation
 main().catch(error => {
   console.error('Fatal error:', error);
+  if (globalDashboard) {
+    globalDashboard.log(`Fatal error: ${error.message}`, 'error');
+    globalDashboard.updateStatus('❌ Fatal Error', 'error');
+  }
   process.exit(1);
 });
 
