@@ -18,15 +18,19 @@ const CONFIG = {
   password: 'jojin1234!!',
   targetName: '승진', // Wait for "승진's irrigation" to show up
   outputDir: './data',
-  screenshotDir: './screenshots'
+  screenshotDir: './screenshots',
+  chartLearningMode: process.env.CHART_LEARNING === 'true' // Enable with: $env:CHART_LEARNING="true"; npm start
 };
 
 // Ensure output directories exist
-[CONFIG.outputDir, CONFIG.screenshotDir].forEach(dir => {
+[CONFIG.outputDir, CONFIG.screenshotDir, './training'].forEach(dir => {
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
 });
+
+// Training data file
+const TRAINING_FILE = './training/training-data.json';
 
 async function main() {
   console.log('🚀 Starting Irrigation Report Automation (Playwright)...\n');
@@ -1023,6 +1027,130 @@ async function main() {
         // Show separation info
         if (clickResults.separationPercent !== undefined) {
           console.log(`     ✅ First (START) and Last (END) separated by ${clickResults.separationPercent}% of chart`);
+        }
+        
+        // CHART LEARNING MODE: Show detected points and allow user correction
+        if (CONFIG.chartLearningMode && clickResults.firstCoords && clickResults.lastCoords) {
+          console.log(`\n     🎓 CHART LEARNING MODE ACTIVE`);
+          console.log(`        Algorithm detected:`);
+          console.log(`        → FIRST: SVG(${clickResults.firstCoords.svgX}, ${clickResults.firstCoords.svgY})`);
+          console.log(`        → LAST: SVG(${clickResults.lastCoords.svgX}, ${clickResults.lastCoords.svgY})`);
+          
+          // Draw visual indicators on chart
+          await page.evaluate((first, last) => {
+            const chartContainer = document.querySelector('.highcharts-container');
+            if (!chartContainer) return;
+            
+            const svg = chartContainer.querySelector('svg');
+            
+            // Draw first point (green)
+            const circle1 = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+            circle1.setAttribute('cx', first.svgX);
+            circle1.setAttribute('cy', first.svgY);
+            circle1.setAttribute('r', '12');
+            circle1.setAttribute('stroke', 'green');
+            circle1.setAttribute('stroke-width', '3');
+            circle1.setAttribute('fill', 'none');
+            circle1.setAttribute('opacity', '0.8');
+            svg.appendChild(circle1);
+            
+            // Draw last point (red)
+            const circle2 = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+            circle2.setAttribute('cx', last.svgX);
+            circle2.setAttribute('cy', last.svgY);
+            circle2.setAttribute('r', '12');
+            circle2.setAttribute('stroke', 'red');
+            circle2.setAttribute('stroke-width', '3');
+            circle2.setAttribute('fill', 'none');
+            circle2.setAttribute('opacity', '0.8');
+            svg.appendChild(circle2);
+            
+            // Setup click recorder
+            window.learningClicks = [];
+            const clickHandler = (e) => {
+              if (chartContainer.contains(e.target)) {
+                const rect = chartContainer.getBoundingClientRect();
+                window.learningClicks.push({
+                  svgX: e.clientX - rect.left,
+                  svgY: e.clientY - rect.top,
+                  screenX: e.clientX,
+                  screenY: e.clientY
+                });
+                
+                // Visual feedback
+                const userCircle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+                userCircle.setAttribute('cx', e.clientX - rect.left);
+                userCircle.setAttribute('cy', e.clientY - rect.top);
+                userCircle.setAttribute('r', '8');
+                userCircle.setAttribute('fill', window.learningClicks.length === 1 ? 'lime' : 'orange');
+                userCircle.setAttribute('opacity', '0.9');
+                svg.appendChild(userCircle);
+                
+                console.log(`✅ [BROWSER] Recorded user click #${window.learningClicks.length}: (${Math.round(e.clientX - rect.left)}, ${Math.round(e.clientY - rect.top)})`);
+              }
+            };
+            document.addEventListener('click', clickHandler);
+            window.removeClickHandler = () => document.removeEventListener('click', clickHandler);
+          }, clickResults.firstCoords, clickResults.lastCoords);
+          
+          console.log(`\n        🟢 Green circle = Algorithm's FIRST point`);
+          console.log(`        🔴 Red circle = Algorithm's LAST point`);
+          console.log(`\n        If correct: Press F8 to continue`);
+          console.log(`        If wrong: Click correct points, THEN press F8`);
+          console.log(`                 (Click 1 = Correct FIRST, Click 2 = Correct LAST)\n`);
+          
+          // Pause for user interaction
+          await page.pause();
+          
+          // Collect user corrections
+          const userCorrections = await page.evaluate(() => {
+            const clicks = window.learningClicks || [];
+            if (window.removeClickHandler) window.removeClickHandler();
+            return clicks;
+          });
+          
+          // Save training data
+          const trainingEntry = {
+            timestamp: new Date().toISOString(),
+            date: displayedDate,
+            farm: currentFarm.name,
+            algorithmDetection: {
+              first: { svgX: clickResults.firstCoords.svgX, svgY: clickResults.firstCoords.svgY },
+              last: { svgX: clickResults.lastCoords.svgX, svgY: clickResults.lastCoords.svgY }
+            },
+            userCorrections: userCorrections.length > 0 ? {
+              first: userCorrections[0] || null,
+              last: userCorrections[1] || null
+            } : null,
+            feedback: userCorrections.length === 0 ? 'User accepted algorithm detection' : `User made ${userCorrections.length} corrections`
+          };
+          
+          // Append to training file
+          let trainingData = [];
+          if (fs.existsSync(TRAINING_FILE)) {
+            trainingData = JSON.parse(fs.readFileSync(TRAINING_FILE));
+          }
+          trainingData.push(trainingEntry);
+          fs.writeFileSync(TRAINING_FILE, JSON.stringify(trainingData, null, 2));
+          
+          if (userCorrections.length > 0) {
+            console.log(`\n     📝 Recorded ${userCorrections.length} user corrections`);
+            console.log(`        Saved to training/training-data.json`);
+            
+            // Calculate differences
+            if (userCorrections.length >= 1) {
+              const firstDiffX = userCorrections[0].svgX - clickResults.firstCoords.svgX;
+              const firstDiffY = userCorrections[0].svgY - clickResults.firstCoords.svgY;
+              console.log(`        First point offset: X=${Math.round(firstDiffX)}px, Y=${Math.round(firstDiffY)}px`);
+            }
+            if (userCorrections.length >= 2) {
+              const lastDiffX = userCorrections[1].svgX - clickResults.lastCoords.svgX;
+              const lastDiffY = userCorrections[1].svgY - clickResults.lastCoords.svgY;
+              console.log(`        Last point offset: X=${Math.round(lastDiffX)}px, Y=${Math.round(lastDiffY)}px\n`);
+            }
+          } else {
+            console.log(`\n     ✅ User accepted algorithm detection (no corrections)\n`);
+          }
         }
         
         // Now perform REAL Playwright mouse clicks for more reliable interaction
