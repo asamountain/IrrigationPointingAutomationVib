@@ -33,7 +33,8 @@ async function main() {
   
   // Launch browser
   const browser = await chromium.launch({ 
-    headless: false // Set to true for production
+    headless: false, // Set to true for production
+    devtools: true   // Open DevTools to see console logs
   });
   const context = await browser.newContext();
   const page = await context.newPage();
@@ -308,6 +309,14 @@ async function main() {
     // Array to store all farm data
     const allFarmData = [];
     
+    // Date range: Last 5 days to today (6 days total)
+    const totalDaysToCheck = 6;
+    
+    console.log('\n📅 Date Range Configuration:');
+    console.log(`   → Range: 5 days ago → today`);
+    console.log(`   → Total days to check: ${totalDaysToCheck}`);
+    console.log(`   → Method: Click "Previous period" 5 times, then iterate forward\n`);
+    
     // Loop through each farm
     const maxFarmsToProcess = 3; // Limit to first 3 farms for faster testing
     const farmsToProcess = farmList.slice(0, maxFarmsToProcess);
@@ -344,14 +353,70 @@ async function main() {
         continue;
     }
     
-    // Step 6: Check table fields and click irrigation points if needed
-    console.log('💧 Checking irrigation time tables...');
-    
+    // Step: Navigate to 5 days ago using "Previous period" button
+    console.log(`\n  🔙 Navigating to 5 days ago...`);
     try {
-      await page.waitForTimeout(2000); // Wait for page to stabilize
+      // Click "이전 기간" (Previous period) button 5 times
+      for (let i = 0; i < 5; i++) {
+        const clicked = await page.evaluate(() => {
+          const prevButton = document.querySelector('button[aria-label="이전 기간"]');
+          if (prevButton) {
+            prevButton.click();
+            console.log(`✅ [BROWSER] Clicked "Previous period" button`);
+            return true;
+          }
+          console.error('❌ [BROWSER] Previous period button not found');
+          return false;
+        });
+        
+        if (clicked) {
+          console.log(`     ✅ Clicked "Previous period" (${i + 1}/5)`);
+          await page.waitForTimeout(1500); // Wait for chart to update
+        } else {
+          console.log(`     ⚠️  Could not find "Previous period" button`);
+          break;
+        }
+      }
+      console.log(`  ✅ Navigated back 5 days\n`);
+    } catch (navError) {
+      console.log(`  ⚠️  Error navigating dates: ${navError.message}\n`);
+    }
+    
+    // Loop through dates for this farm (5 days ago to today)
+    let dateIdx = 0;
+    const farmDateData = []; // Store data for all dates of this farm
+    
+    for (let dayOffset = 0; dayOffset < totalDaysToCheck; dayOffset++) {
+      dateIdx++;
       
-      // Check the two table fields - look specifically in the right panel
-      const tableStatus = await page.evaluate(() => {
+      // Get the current date from the date picker button
+      const displayedDate = await page.evaluate(() => {
+        const buttons = Array.from(document.querySelectorAll('button.chakra-button'));
+        const dateButton = buttons.find(btn => {
+          const hasSvg = btn.querySelector('svg rect[x="3"][y="4"][width="18"][height="18"]');
+          const hasDateText = btn.textContent.includes('년') && btn.textContent.includes('일');
+          return hasSvg && hasDateText;
+        });
+        
+        if (dateButton) {
+          const dateText = dateButton.textContent.trim();
+          console.log(`📅 [BROWSER] Current displayed date: ${dateText}`);
+          return dateText;
+        }
+        return 'Unknown Date';
+      });
+      
+      console.log(`\n  📅 Date ${dateIdx}/${totalDaysToCheck}: ${displayedDate}`);
+      console.log(`  ${'─'.repeat(60)}`);
+      
+      // Step 2: Check if tables are already filled for this date
+      console.log('  💧 Checking irrigation time tables...');
+      
+      try {
+        await page.waitForTimeout(2000); // Wait for data to load for this date
+        
+        // Check the two table fields - look specifically in the right panel
+        const tableStatus = await page.evaluate(() => {
         const results = { debug: [] };
         
         // Target exact labels
@@ -441,17 +506,59 @@ async function main() {
         };
       });
       
-      console.log(`  → Debug: ${tableStatus.debug.join(', ')}`);
-      console.log(`  → 첫 급액시간: "${tableStatus.firstTime || 'EMPTY'}"`);
-      console.log(`  → 마지막 급액시간: "${tableStatus.lastTime || 'EMPTY'}"`);
-      console.log(`  → Needs first click: ${tableStatus.needsFirstClick}`);
-      console.log(`  → Needs last click: ${tableStatus.needsLastClick}\n`);
-      
-      console.log(`  → 첫 급액시간: "${tableStatus.firstTime || 'EMPTY'}"`);
-      console.log(`  → 마지막 급액시간: "${tableStatus.lastTime || 'EMPTY'}"`);
-      
-      // If either field is empty, click the chart points
-      if (tableStatus.needsFirstClick || tableStatus.needsLastClick) {
+        console.log(`     → Debug: ${tableStatus.debug.join(', ')}`);
+        console.log(`     → 첫 급액시간: "${tableStatus.firstTime || 'EMPTY'}"`);
+        console.log(`     → 마지막 급액시간: "${tableStatus.lastTime || 'EMPTY'}"`);
+        console.log(`     → Needs first click: ${tableStatus.needsFirstClick}`);
+        console.log(`     → Needs last click: ${tableStatus.needsLastClick}\n`);
+        
+        // Check if tables are already completely filled
+        const tablesAlreadyFilled = !tableStatus.needsFirstClick && !tableStatus.needsLastClick;
+        
+        if (tablesAlreadyFilled) {
+          console.log(`     ✅ Tables already filled for this date - skipping HSSP detection`);
+          console.log(`        → First: ${tableStatus.firstTime}`);
+          console.log(`        → Last: ${tableStatus.lastTime}\n`);
+          
+          // Store the existing data without running detection
+          const dateData = {
+            date: displayedDate,
+            firstIrrigationTime: tableStatus.firstTime,
+            lastIrrigationTime: tableStatus.lastTime,
+            extractedAt: new Date().toISOString(),
+            alreadyFilled: true
+          };
+          farmDateData.push(dateData);
+          
+          // Take screenshot
+          const skipScreenshot = path.join(CONFIG.screenshotDir, `farm-${farmIdx + 1}-date-${dateIdx}-skipped-${timestamp}.png`);
+          await page.screenshot({ path: skipScreenshot, fullPage: true });
+          console.log(`     📸 Screenshot: ${skipScreenshot}\n`);
+          
+          // Move to next date using "Next period" button (except for last date)
+          if (dayOffset < totalDaysToCheck - 1) {
+            console.log(`     ⏭️  Moving to next date...`);
+            const nextClicked = await page.evaluate(() => {
+              const nextButton = document.querySelector('button[aria-label="다음 기간"]');
+              if (nextButton) {
+                nextButton.click();
+                console.log(`✅ [BROWSER] Clicked "Next period" button`);
+                return true;
+              }
+              return false;
+            });
+            
+            if (nextClicked) {
+              console.log(`     ✅ Moved to next date`);
+              await page.waitForTimeout(2000);
+            }
+          }
+          
+          continue; // Skip to next date
+        }
+        
+        // If either field is empty, click the chart points
+        if (tableStatus.needsFirstClick || tableStatus.needsLastClick) {
         console.log('  ⚠️  Tables need data, clicking chart points...\n');
         
         // Wait longer for Highcharts to initialize
@@ -460,6 +567,11 @@ async function main() {
         // Professional chart point detection API  
         const clickResults = await page.evaluate((needs) => {
           const results = [];
+          
+          // Log to browser console for debugging
+          console.log('🔍 [BROWSER] Starting irrigation point detection...');
+          console.log('🔍 [BROWSER] Needs first click:', needs.needsFirstClick);
+          console.log('🔍 [BROWSER] Needs last click:', needs.needsLastClick);
           
           // ============================================
           // METHOD 1: Try Highcharts API (Most Accurate)
@@ -471,6 +583,7 @@ async function main() {
           
           if (chart && chart.series && chart.series[0]) {
             results.push({ message: '✅ Highcharts API accessible' });
+            console.log('✅ [BROWSER] Highcharts API accessible');
           
           const series = chart.series[0];
           const dataPoints = series.data;
@@ -542,12 +655,15 @@ async function main() {
           // METHOD 2: SVG Path Analysis (Fallback)
           // ============================================
           results.push({ message: '⚠️ Highcharts API not accessible, using SVG path analysis' });
+          console.log('⚠️ [BROWSER] Highcharts API not accessible, using SVG path analysis');
           
           // Find the series path
           const seriesPath = document.querySelector('.highcharts-series path[data-z-index="1"]');
           if (!seriesPath) {
+            console.error('❌ [BROWSER] No series path found in SVG');
             return { error: 'No series path found in SVG' };
           }
+          console.log('✅ [BROWSER] Found series path in SVG');
           
           const pathData = seriesPath.getAttribute('d');
           if (!pathData) {
@@ -638,43 +754,58 @@ async function main() {
           results.push({ 
             message: `Found ${peaks.length} peaks (irrigation events)` 
           });
+          console.log(`📊 [BROWSER] Found ${peaks.length} peaks (irrigation events)`);
           
           // Debug: Show peak locations
           if (peaks.length > 0 && peaks.length <= 10) {
             const peaksSummary = peaks.map((p, i) => `[${i}]=idx${p.index}(${Math.round(p.x)},${Math.round(p.y)})`).join(', ');
             results.push({ message: `Peak locations (raw): ${peaksSummary}` });
+            console.log(`📍 [BROWSER] Peak locations: ${peaksSummary}`);
           }
           
-          // De-duplicate adjacent peaks (keep highest within each cluster)
+          // De-duplicate adjacent peaks (keep lowest Y = highest visual peak within each cluster)
           const uniquePeaks = [];
           let i = 0;
           while (i < peaks.length) {
-            let clusterHighest = peaks[i];
+            let clusterLowest = peaks[i]; // Lowest Y = highest visual spike
             let j = i + 1;
             
-            // Find all adjacent peaks (within 3 indices AND similar Y-values)
+            // Find all adjacent peaks (within proximity threshold)
             while (j < peaks.length) {
-              const indexDiff = peaks[j].index - clusterHighest.index;
-              const yDiff = Math.abs(peaks[j].y - clusterHighest.y);
+              const indexDiff = peaks[j].index - clusterLowest.index;
+              const xDiff = Math.abs(peaks[j].x - clusterLowest.x);
+              const yDiff = Math.abs(peaks[j].y - clusterLowest.y);
               
-              // Same cluster if very close in both index and Y-value
-              if (indexDiff <= 3 || (indexDiff <= 8 && yDiff < yRange * 0.1)) {
-                if (peaks[j].y > clusterHighest.y) {
-                  clusterHighest = peaks[j];
+              // Calculate X-axis total span for relative distance
+              const xSpan = finalCoords[finalCoords.length - 1].x - finalCoords[0].x;
+              const xDiffPercent = (xDiff / xSpan) * 100;
+              
+              // Same cluster if:
+              // 1. Very close in index (≤5 points) OR
+              // 2. Close in X-axis (<5% of chart) AND similar Y (within 10% of range)
+              if (indexDiff <= 5 || (xDiffPercent < 5 && yDiff < yRange * 0.1)) {
+                // Keep the LOWEST Y value (highest visual spike)
+                if (peaks[j].y < clusterLowest.y) {
+                  clusterLowest = peaks[j];
                 }
                 j++;
               } else {
-                break;  // Different cluster
+                break;  // Different cluster - significantly separated
               }
             }
             
-            uniquePeaks.push(clusterHighest);
+            uniquePeaks.push(clusterLowest);
             i = j;
           }
             
+          const removedDuplicates = peaks.length - uniquePeaks.length;
             results.push({
-            message: `After de-duplication: ${uniquePeaks.length} unique irrigation events` 
+            message: `After de-duplication: ${uniquePeaks.length} unique irrigation events (removed ${removedDuplicates} duplicates)` 
           });
+          console.log(`🎯 [BROWSER] After de-duplication: ${uniquePeaks.length} unique irrigation events`);
+          if (removedDuplicates > 0) {
+            console.log(`   → Removed ${removedDuplicates} duplicate/overlapping peaks`);
+          }
           
           // Step 2: For each unique peak, find HSSP (where DROP starts)
           const spikes = [];
@@ -714,14 +845,17 @@ async function main() {
           results.push({ 
             message: `Found ${spikes.length} HSSP points (irrigation start points)` 
           });
+          console.log(`✅ [BROWSER] Found ${spikes.length} HSSP points (irrigation start points)`);
           
           // Debug: Show all HSSP coordinates
           if (spikes.length > 0 && spikes.length <= 10) {
             const coordsSummary = spikes.map((s, i) => `[${i}]=(${Math.round(s.x)},${Math.round(s.y)})`).join(', ');
             results.push({ message: `All HSSPs: ${coordsSummary}` });
+            console.log(`📍 [BROWSER] All HSSPs: ${coordsSummary}`);
           }
           
           if (spikes.length === 0) {
+            console.error('❌ [BROWSER] No irrigation start points (HSSP) found');
             results.push({ error: 'No irrigation start points (HSSP) found - check peak detection threshold' });
             return results;
           }
@@ -736,8 +870,18 @@ async function main() {
           // For last irrigation, use the valley (lowest point = peak of irrigation)
           const lastValley = uniquePeaks[uniquePeaks.length - 1];
           
-          // Only set lastClick if there are multiple irrigation events
+          // Check if there are multiple irrigation events
           const hasMultipleEvents = uniquePeaks.length >= 2;
+          
+          // Calculate X-axis separation between first and last
+          const xSeparation = Math.abs(lastValley.x - firstHSSP.x);
+          const totalXRange = finalCoords[finalCoords.length - 1].x - finalCoords[0].x;
+          const separationPercent = (xSeparation / totalXRange) * 100;
+          
+          // Minimum separation threshold: 15% of total X range
+          // (e.g., if chart spans 24 hours, events must be ~3.6 hours apart)
+          const minSeparationPercent = 15;
+          const tooClose = separationPercent < minSeparationPercent;
           
           // IMPORTANT: Click ABOVE the line (lower Y) to hit Highcharts clickable area
           const clickOffsetY = 15; // pixels above the chart line
@@ -746,14 +890,21 @@ async function main() {
             message: `Selecting: First HSSP idx=${firstHSSP.index}, Last VALLEY idx=${lastValley.index}`
           });
           
-                results.push({ 
+          results.push({
+            message: `Separation: ${Math.round(xSeparation)}px (${Math.round(separationPercent)}% of chart)`
+          });
+          console.log(`📏 [BROWSER] First-Last separation: ${Math.round(xSeparation)}px (${Math.round(separationPercent)}% of chart)`);
+          
+          results.push({ 
             message: `Click offset: ${clickOffsetY}px ABOVE chart line (Highcharts clickable area)`
           });
           
-          if (!hasMultipleEvents) {
+          if (!hasMultipleEvents || tooClose) {
+            const reason = !hasMultipleEvents ? 'Only 1 event' : `Events too close (<${minSeparationPercent}%)`;
             results.push({
-              message: `Only 1 irrigation event detected - skipping "last" click (UI limitation)`
+              message: `${reason} - using same point for both first and last`
             });
+            console.log(`⚠️ [BROWSER] ${reason} - treating as single irrigation event`);
           }
           
           // Convert SVG coordinates to screen coordinates
@@ -762,12 +913,36 @@ async function main() {
           const lastX = containerRect.left + lastValley.x;
           const lastY = containerRect.top + lastValley.y - clickOffsetY;
           
+          console.log(`🎯 [BROWSER] Final click coordinates:`);
+          console.log(`   → FIRST: Screen(${Math.round(firstX)}, ${Math.round(firstY)}) SVG(${Math.round(firstHSSP.x)}, ${Math.round(firstHSSP.y)})`);
+          console.log(`   → LAST: Screen(${Math.round(lastX)}, ${Math.round(lastY)}) SVG(${Math.round(lastValley.x)}, ${Math.round(lastValley.y)})`);
+          if (!hasMultipleEvents) {
+            console.log(`   ⚠️ Single event detected - using same point for both fields`);
+          }
+          
           // Return coordinates for Playwright to click (more reliable than JS events)
+          // When only 1 event OR events too close: use same coordinates for both first and last
+          const treatAsSingleEvent = !hasMultipleEvents || tooClose;
+          
           return {
             needsFirstClick: needs.needsFirstClick,
-            needsLastClick: needs.needsLastClick && hasMultipleEvents, // Only click last if multiple events
-            firstCoords: needs.needsFirstClick ? { x: Math.round(firstX), y: Math.round(firstY), svgX: Math.round(firstHSSP.x), svgY: Math.round(firstHSSP.y), drop: Math.round(firstHSSP.maxDrop) } : null,
-            lastCoords: (needs.needsLastClick && hasMultipleEvents) ? { x: Math.round(lastX), y: Math.round(lastY), svgX: Math.round(lastValley.x), svgY: Math.round(lastValley.y), valleyIdx: lastValley.index } : null,
+            needsLastClick: needs.needsLastClick && !treatAsSingleEvent, // Skip last click if single event or too close
+            firstCoords: needs.needsFirstClick ? { 
+              x: Math.round(firstX), 
+              y: Math.round(firstY), 
+              svgX: Math.round(firstHSSP.x), 
+              svgY: Math.round(firstHSSP.y), 
+              drop: Math.round(firstHSSP.maxDrop) 
+            } : null,
+            lastCoords: needs.needsLastClick && !treatAsSingleEvent ? { 
+              x: Math.round(lastX), 
+              y: Math.round(lastY), 
+              svgX: Math.round(lastValley.x), 
+              svgY: Math.round(lastValley.y), 
+              valleyIdx: lastValley.index 
+            } : null,
+            singleEvent: treatAsSingleEvent,
+            separationPercent: Math.round(separationPercent),
             debug: results
           };
             
@@ -779,6 +954,16 @@ async function main() {
           clickResults.debug.forEach(msg => {
             if (msg.message) console.log(`  → ${msg.message}`);
           });
+        }
+        
+        // Show separation info
+        if (clickResults.singleEvent !== undefined) {
+          if (clickResults.singleEvent) {
+            console.log(`  ⚠️  Single event detected (separation: ${clickResults.separationPercent || 0}%)`);
+            console.log(`     → Will use same point for both first and last irrigation times`);
+          } else {
+            console.log(`  ✅ Multiple events detected (separation: ${clickResults.separationPercent}%)`);
+          }
         }
         
         // Now perform REAL Playwright mouse clicks for more reliable interaction
@@ -796,6 +981,22 @@ async function main() {
           // Click chart with Playwright mouse
           await page.mouse.click(coords.x, coords.y);
           await page.waitForTimeout(3000); // Wait for UI to update before second click
+          
+          // If single event, copy first value to last field automatically
+          if (clickResults.singleEvent && tableStatus.needsLastClick) {
+            console.log(`  📋 Single event: Copying first time to last time field...`);
+            await page.evaluate(() => {
+              const timeInputs = Array.from(document.querySelectorAll('input[type="time"]'));
+              if (timeInputs.length >= 2 && timeInputs[0].value) {
+                timeInputs[timeInputs.length - 1].value = timeInputs[0].value;
+                // Trigger change event so UI updates
+                const event = new Event('input', { bubbles: true });
+                timeInputs[timeInputs.length - 1].dispatchEvent(event);
+                console.log(`✅ [BROWSER] Copied time: ${timeInputs[0].value}`);
+              }
+            });
+            await page.waitForTimeout(1000);
+          }
         }
         
         if (clickResults.needsLastClick && clickResults.lastCoords) {
@@ -820,19 +1021,19 @@ async function main() {
         await page.waitForTimeout(2000); // Final wait for tables to fully update
         
       } else {
-        console.log('  ✅ Both tables already have data, skipping clicks\n');
-      }
-      
-      // Wait for UI to fully update after clicks
-      await page.waitForTimeout(4000);
-      
-      // Take screenshot after clicking
-      const step6Screenshot = path.join(CONFIG.screenshotDir, `6-after-clicks-${timestamp}.png`);
-      await page.screenshot({ path: step6Screenshot, fullPage: true });
-      console.log(`  📸 Screenshot: ${step6Screenshot}\n`);
-      
-      // Extract final table values
-      console.log('📊 Step 7: Extracting irrigation data from tables...');
+          console.log('     ✅ Some tables already have data, minimal clicks needed\n');
+        }
+        
+        // Wait for UI to fully update after clicks
+        await page.waitForTimeout(4000);
+        
+        // Take screenshot after clicking
+        const step6Screenshot = path.join(CONFIG.screenshotDir, `farm-${farmIdx + 1}-date-${dateIdx}-after-clicks-${timestamp}.png`);
+        await page.screenshot({ path: step6Screenshot, fullPage: true });
+        console.log(`     📸 Screenshot: ${step6Screenshot}\n`);
+        
+        // Extract final table values
+        console.log('     📊 Extracting irrigation data from tables...');
       
       // Wait a moment for tables to update after clicks
       await page.waitForTimeout(3000);
@@ -844,9 +1045,12 @@ async function main() {
           debug: []
         };
         
+        console.log('📊 [BROWSER] Extracting irrigation time data from tables...');
+        
         // Strategy 1: Look for time input fields (type="time")
         const timeInputs = Array.from(document.querySelectorAll('input[type="time"]'));
         results.debug.push(`Found ${timeInputs.length} time input fields`);
+        console.log(`📊 [BROWSER] Found ${timeInputs.length} time input fields`);
         
         // For each time input, look backwards in the DOM to find its label
         timeInputs.forEach((input, idx) => {
@@ -864,11 +1068,13 @@ async function main() {
             if (containerText.includes('첫 급액') || containerText.includes('첫급액')) {
               results.firstIrrigationTime = value;
               results.debug.push(`✅ Matched FIRST time: "${value}"`);
+              console.log(`✅ [BROWSER] Found FIRST irrigation time: "${value}"`);
             }
             // Check if this is the "last irrigation time" field
             else if (containerText.includes('마지막 급액') || containerText.includes('마지막급액')) {
               results.lastIrrigationTime = value;
               results.debug.push(`✅ Matched LAST time: "${value}"`);
+              console.log(`✅ [BROWSER] Found LAST irrigation time: "${value}"`);
             }
           }
         });
@@ -953,38 +1159,78 @@ async function main() {
           } // End Strategy 3 if block
         } // End fallback if block
         
+        console.log('📋 [BROWSER] Extraction complete:');
+        console.log(`   → First time: ${results.firstIrrigationTime || 'NOT FOUND'}`);
+        console.log(`   → Last time: ${results.lastIrrigationTime || 'NOT FOUND'}`);
+        
         return results;
       });
       
-      console.log(`  → Debug info: ${finalData.debug.join(' | ')}`);
-      console.log(`  → 첫 급액시간 1: ${finalData.firstIrrigationTime || 'NOT FOUND'}`);
-      console.log(`  → 마지막 급액시간 1: ${finalData.lastIrrigationTime || 'NOT FOUND'}\n`);
-      
-      // Add farm data to collection
-      const farmData = {
-        farmName: currentFarm.name,
-        farmIndex: farmIdx + 1,
-        url: page.url(),
-        firstIrrigationTime: finalData.firstIrrigationTime || null,
-        lastIrrigationTime: finalData.lastIrrigationTime || null,
-        extractedAt: new Date().toISOString()
-      };
-      allFarmData.push(farmData);
-      
-      if (finalData.firstIrrigationTime || finalData.lastIrrigationTime) {
-        console.log(`  ✅ Data collected for farm "${currentFarm.name}"\n`);
-      } else {
-        console.log(`  ⚠️  No irrigation time data found for this farm\n`);
+        console.log(`  → Debug info: ${finalData.debug.join(' | ')}`);
+        console.log(`  → 첫 급액시간 1: ${finalData.firstIrrigationTime || 'NOT FOUND'}`);
+        console.log(`  → 마지막 급액시간 1: ${finalData.lastIrrigationTime || 'NOT FOUND'}\n`);
+        
+        // Add this date's data to collection
+        const dateData = {
+          date: displayedDate,
+          firstIrrigationTime: finalData.firstIrrigationTime || null,
+          lastIrrigationTime: finalData.lastIrrigationTime || null,
+          extractedAt: new Date().toISOString()
+        };
+        farmDateData.push(dateData);
+        
+        if (finalData.firstIrrigationTime || finalData.lastIrrigationTime) {
+          console.log(`     ✅ Data collected for ${displayedDate}\n`);
+        } else {
+          console.log(`     ⚠️  No irrigation time data found for this date\n`);
+        }
+        
+      } catch (error) {
+        console.log(`     ⚠️  Error in data extraction: ${error.message}\n`);
       }
       
-    } catch (error) {
-      console.log(`  ⚠️  Error in data extraction: ${error.message}\n`);
-    }
+      // Take screenshot after processing this date
+      const dateScreenshot = path.join(CONFIG.screenshotDir, `farm-${farmIdx + 1}-date-${dateIdx}-${timestamp}.png`);
+      await page.screenshot({ path: dateScreenshot, fullPage: true });
+      console.log(`     📸 Screenshot: ${dateScreenshot}\n`);
+      
+      // Move to next date using "Next period" button (except for last date)
+      if (dayOffset < totalDaysToCheck - 1) {
+        console.log(`     ⏭️  Moving to next date...`);
+        const nextClicked = await page.evaluate(() => {
+          const nextButton = document.querySelector('button[aria-label="다음 기간"]');
+          if (nextButton) {
+            nextButton.click();
+            console.log(`✅ [BROWSER] Clicked "Next period" button`);
+            return true;
+          }
+          console.error('❌ [BROWSER] Next period button not found');
+          return false;
+        });
+        
+        if (nextClicked) {
+          console.log(`     ✅ Moved to next date`);
+          await page.waitForTimeout(2000); // Wait for chart to update
+        } else {
+          console.log(`     ⚠️  Could not find "Next period" button`);
+        }
+      }
+      
+    } // End date loop
     
-      // Take screenshot after processing this farm
-      const farmScreenshot = path.join(CONFIG.screenshotDir, `farm-${farmIdx + 1}-${timestamp}.png`);
-      await page.screenshot({ path: farmScreenshot, fullPage: true });
-      console.log(`  📸 Screenshot: ${farmScreenshot}\n`);
+    // Add all dates data for this farm to collection
+    const farmData = {
+      farmName: currentFarm.name,
+      farmIndex: farmIdx + 1,
+      totalDates: farmDateData.length,
+      datesWithData: farmDateData.filter(d => d.firstIrrigationTime || d.lastIrrigationTime).length,
+      dates: farmDateData
+    };
+    allFarmData.push(farmData);
+    
+    console.log(`\n  ✅ Completed all dates for farm "${currentFarm.name}"`);
+    console.log(`     → Processed ${farmDateData.length} dates`);
+    console.log(`     → Data found for ${farmData.datesWithData} dates\n`);
       
     } // End farm loop
     
@@ -994,8 +1240,15 @@ async function main() {
     const summaryData = {
       extractedAt: new Date().toISOString(),
       manager: CONFIG.targetName,
+      dateRange: {
+        description: '5 days ago to today',
+        totalDays: totalDaysToCheck,
+        method: 'Previous/Next period buttons'
+      },
       totalFarms: allFarmData.length,
-      farmsWithData: allFarmData.filter(f => f.firstIrrigationTime || f.lastIrrigationTime).length,
+      farmsWithData: allFarmData.filter(f => f.datesWithData > 0).length,
+      totalDatesProcessed: allFarmData.reduce((sum, f) => sum + f.totalDates, 0),
+      totalDatesWithData: allFarmData.reduce((sum, f) => sum + f.datesWithData, 0),
       farms: allFarmData
     };
     fs.writeFileSync(allDataFile, JSON.stringify(summaryData, null, 2));
@@ -1016,21 +1269,35 @@ async function main() {
     // Show summary table
     console.log('\n📊 Farm Details:');
     allFarmData.forEach((farm, idx) => {
-      const first = farm.firstIrrigationTime || '--:--';
-      const last = farm.lastIrrigationTime || '--:--';
-      const status = (farm.firstIrrigationTime || farm.lastIrrigationTime) ? '✅' : '⚠️';
+      const status = farm.datesWithData > 0 ? '✅' : '⚠️';
       console.log(`   ${status} [${idx + 1}] ${farm.farmName}`);
-      console.log(`      First: ${first} | Last: ${last}`);
+      console.log(`      Dates processed: ${farm.totalDates} | Data found: ${farm.datesWithData}`);
+      
+      // Show first few dates as examples
+      const sampleDates = farm.dates.slice(0, 3);
+      sampleDates.forEach((dateData, dIdx) => {
+        const first = dateData.firstIrrigationTime || '--:--';
+        const last = dateData.lastIrrigationTime || '--:--';
+        const dateStatus = (dateData.firstIrrigationTime || dateData.lastIrrigationTime) ? '✓' : '✗';
+        console.log(`        ${dateStatus} ${dateData.date}: First ${first} | Last ${last}`);
+      });
+      
+      if (farm.dates.length > 3) {
+        console.log(`        ... and ${farm.dates.length - 3} more dates`);
+      }
     });
     
     console.log('\n📋 What Was Accomplished:');
     console.log('   1. ✅ Navigated to report page');
     console.log('   2. ✅ Selected "승진" manager');
     console.log(`   3. ✅ Processed ${allFarmData.length} farms`);
-    console.log('   4. ✅ Checked irrigation time tables for each farm');
-    console.log('   5. ✅ Clicked chart points using HSSP algorithm');
-    console.log('   6. ✅ Extracted data and saved to JSON');
-    console.log('   7. ✅ Captured screenshots of the process\n');
+    console.log(`   4. ✅ Checked ${summaryData.dateRange.totalDays} days per farm (last 5 days)`);
+    console.log(`   5. ✅ Total dates processed: ${summaryData.totalDatesProcessed}`);
+    console.log(`   6. ✅ Dates with data: ${summaryData.totalDatesWithData}`);
+    console.log('   7. ✅ Skipped dates with pre-filled tables (efficient!)');
+    console.log('   8. ✅ Used HSSP algorithm for irrigation point detection');
+    console.log('   9. ✅ Extracted data and saved to JSON');
+    console.log('   10. ✅ Captured screenshots of the process\n');
     
   } catch (error) {
     console.error('❌ Error during automation:', error);
@@ -1046,10 +1313,11 @@ async function main() {
     }
     
   } finally {
-    // Clean up
-    console.log('\n🔚 Closing browser...');
-    await browser.close();
-    console.log('✅ Done!\n');
+    // Keep browser open for inspection
+    console.log('\n🔚 Automation complete. Browser will stay open for inspection...');
+    console.log('   → Check the browser DevTools Console tab to see webpage logs');
+    console.log('   → Close the browser manually when done\n');
+    // await browser.close(); // Commented out - close manually to inspect results
   }
 }
 
