@@ -1092,75 +1092,150 @@ async function main() {
         // CHART LEARNING MODE: Show detected points and allow user correction
         if (CONFIG.chartLearningMode && clickResults.firstCoords && clickResults.lastCoords) {
           console.log(`\n     🎓 CHART LEARNING MODE ACTIVE`);
-          console.log(`        Algorithm detected:`);
-          console.log(`        → FIRST: SVG(${clickResults.firstCoords.svgX}, ${clickResults.firstCoords.svgY})`);
-          console.log(`        → LAST: SVG(${clickResults.lastCoords.svgX}, ${clickResults.lastCoords.svgY})`);
+          console.log(`        Algorithm will click at:`);
+          console.log(`        → FIRST: Screen(${clickResults.firstCoords.x}, ${clickResults.firstCoords.y})`);
+          console.log(`        → LAST: Screen(${clickResults.lastCoords.x}, ${clickResults.lastCoords.y})`);
           
-          // Draw visual indicators on chart
+          // Take screenshot BEFORE showing markers
+          const beforeScreenshot = path.join(CONFIG.screenshotDir, `learning-before-${Date.now()}.png`);
+          await page.screenshot({ path: beforeScreenshot, fullPage: false });
+          console.log(`        📸 Chart screenshot: ${beforeScreenshot}`);
+          
+          // Draw BIG visible indicators on the page using HTML overlays
           await page.evaluate((first, last) => {
-            const chartContainer = document.querySelector('.highcharts-container');
-            if (!chartContainer) return;
+            // Create overlay container
+            const overlay = document.createElement('div');
+            overlay.id = 'learning-overlay';
+            overlay.style.cssText = 'position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; pointer-events: none; z-index: 999999;';
             
-            const svg = chartContainer.querySelector('svg');
+            // Draw FIRST point marker (GREEN)
+            const firstMarker = document.createElement('div');
+            firstMarker.style.cssText = `
+              position: absolute;
+              left: ${first.x - 30}px;
+              top: ${first.y - 30}px;
+              width: 60px;
+              height: 60px;
+              border: 5px solid lime;
+              border-radius: 50%;
+              background: rgba(0, 255, 0, 0.2);
+              pointer-events: none;
+              animation: pulse 1s infinite;
+            `;
             
-            // Draw first point (green)
-            const circle1 = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-            circle1.setAttribute('cx', first.svgX);
-            circle1.setAttribute('cy', first.svgY);
-            circle1.setAttribute('r', '12');
-            circle1.setAttribute('stroke', 'green');
-            circle1.setAttribute('stroke-width', '3');
-            circle1.setAttribute('fill', 'none');
-            circle1.setAttribute('opacity', '0.8');
-            svg.appendChild(circle1);
+            // Add label
+            const firstLabel = document.createElement('div');
+            firstLabel.textContent = 'FIRST';
+            firstLabel.style.cssText = `
+              position: absolute;
+              left: ${first.x - 30}px;
+              top: ${first.y - 50}px;
+              background: lime;
+              color: black;
+              padding: 5px 10px;
+              border-radius: 5px;
+              font-weight: bold;
+              font-size: 14px;
+              pointer-events: none;
+            `;
             
-            // Draw last point (red)
-            const circle2 = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-            circle2.setAttribute('cx', last.svgX);
-            circle2.setAttribute('cy', last.svgY);
-            circle2.setAttribute('r', '12');
-            circle2.setAttribute('stroke', 'red');
-            circle2.setAttribute('stroke-width', '3');
-            circle2.setAttribute('fill', 'none');
-            circle2.setAttribute('opacity', '0.8');
-            svg.appendChild(circle2);
+            // Draw LAST point marker (RED)
+            const lastMarker = document.createElement('div');
+            lastMarker.style.cssText = `
+              position: absolute;
+              left: ${last.x - 30}px;
+              top: ${last.y - 30}px;
+              width: 60px;
+              height: 60px;
+              border: 5px solid red;
+              border-radius: 50%;
+              background: rgba(255, 0, 0, 0.2);
+              pointer-events: none;
+              animation: pulse 1s infinite;
+            `;
+            
+            // Add label
+            const lastLabel = document.createElement('div');
+            lastLabel.textContent = 'LAST';
+            lastLabel.style.cssText = `
+              position: absolute;
+              left: ${last.x - 30}px;
+              top: ${last.y - 50}px;
+              background: red;
+              color: white;
+              padding: 5px 10px;
+              border-radius: 5px;
+              font-weight: bold;
+              font-size: 14px;
+              pointer-events: none;
+            `;
+            
+            // Add pulsing animation
+            const style = document.createElement('style');
+            style.textContent = `
+              @keyframes pulse {
+                0%, 100% { transform: scale(1); opacity: 1; }
+                50% { transform: scale(1.2); opacity: 0.7; }
+              }
+            `;
+            
+            document.head.appendChild(style);
+            overlay.appendChild(firstMarker);
+            overlay.appendChild(firstLabel);
+            overlay.appendChild(lastMarker);
+            overlay.appendChild(lastLabel);
+            document.body.appendChild(overlay);
             
             // Setup click recorder
             window.learningClicks = [];
             const clickHandler = (e) => {
-              if (chartContainer.contains(e.target)) {
-                const rect = chartContainer.getBoundingClientRect();
-                window.learningClicks.push({
-                  svgX: e.clientX - rect.left,
-                  svgY: e.clientY - rect.top,
-                  screenX: e.clientX,
-                  screenY: e.clientY
-                });
-                
-                // Visual feedback
-                const userCircle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-                userCircle.setAttribute('cx', e.clientX - rect.left);
-                userCircle.setAttribute('cy', e.clientY - rect.top);
-                userCircle.setAttribute('r', '8');
-                userCircle.setAttribute('fill', window.learningClicks.length === 1 ? 'lime' : 'orange');
-                userCircle.setAttribute('opacity', '0.9');
-                svg.appendChild(userCircle);
-                
-                console.log(`✅ [BROWSER] Recorded user click #${window.learningClicks.length}: (${Math.round(e.clientX - rect.left)}, ${Math.round(e.clientY - rect.top)})`);
+              window.learningClicks.push({
+                svgX: e.clientX,
+                svgY: e.clientY,
+                screenX: e.clientX,
+                screenY: e.clientY
+              });
+              
+              // Visual feedback for user clicks
+              const userMarker = document.createElement('div');
+              userMarker.style.cssText = `
+                position: absolute;
+                left: ${e.clientX - 20}px;
+                top: ${e.clientY - 20}px;
+                width: 40px;
+                height: 40px;
+                border: 4px solid ${window.learningClicks.length === 1 ? 'yellow' : 'orange'};
+                border-radius: 50%;
+                background: rgba(255, 255, 0, 0.3);
+                pointer-events: none;
+                z-index: 999999;
+              `;
+              overlay.appendChild(userMarker);
+              
+              console.log(`✅ [BROWSER] Recorded user click #${window.learningClicks.length}: (${Math.round(e.clientX)}, ${Math.round(e.clientY)})`);
+            };
+            document.addEventListener('click', clickHandler, true);
+            window.removeClickHandler = () => {
+              document.removeEventListener('click', clickHandler, true);
+              if (overlay && overlay.parentNode) {
+                overlay.parentNode.removeChild(overlay);
               }
             };
-            document.addEventListener('click', clickHandler);
-            window.removeClickHandler = () => document.removeEventListener('click', clickHandler);
           }, clickResults.firstCoords, clickResults.lastCoords);
           
-          console.log(`\n        🟢 Green circle = Algorithm's FIRST point`);
-          console.log(`        🔴 Red circle = Algorithm's LAST point`);
-          console.log(`\n        If correct: Press F8 to continue`);
-          console.log(`        If wrong: Click correct points, THEN press F8`);
-          console.log(`                 (Click 1 = Correct FIRST, Click 2 = Correct LAST)\n`);
+          await page.waitForTimeout(1000); // Let markers appear
           
-          // Pause for user interaction
-          await page.pause();
+          console.log(`\n        🟢 LOOK AT THE BROWSER!`);
+          console.log(`        → Green pulsing circle = Algorithm's FIRST point`);
+          console.log(`        → Red pulsing circle = Algorithm's LAST point`);
+          console.log(`\n        📋 OPTIONS:`);
+          console.log(`        1. If CORRECT → Just wait 30 seconds (auto-continue)`);
+          console.log(`        2. If WRONG → Click correct FIRST, then LAST, then wait`);
+          console.log(`           (Yellow circle = your FIRST, Orange = your LAST)\n`);
+          
+          // Wait 30 seconds for user to make corrections
+          console.log(`        ⏱️  Waiting 30 seconds for corrections...`);
+          await page.waitForTimeout(30000);
           
           // Collect user corrections
           const userCorrections = await page.evaluate(() => {
