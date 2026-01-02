@@ -98,10 +98,23 @@ async function main() {
   // Launch browser
   const browser = await chromium.launch({
     headless: false, // Set to true for production
-    devtools: CONFIG.chartLearningMode || CONFIG.watchMode   // Open DevTools in learning/watch mode
+    devtools: false   // Don't auto-open DevTools (it blocks the view)
   });
-  const context = await browser.newContext();
+  const context = await browser.newContext({
+    viewport: { width: 1920, height: 1080 } // Full HD viewport for better visibility
+  });
   const page = await context.newPage();
+  
+  // Open DevTools console only in learning mode (docked at bottom)
+  if (CONFIG.chartLearningMode || CONFIG.watchMode) {
+    const cdpSession = await page.context().newCDPSession(page);
+    await cdpSession.send('Emulation.setDeviceMetricsOverride', {
+      width: 1920,
+      height: 1080,
+      deviceScaleFactor: 1,
+      mobile: false
+    });
+  }
   
   try {
     // Step 1: Navigate to IoFarm admin report page
@@ -1103,71 +1116,103 @@ async function main() {
           
           // Draw BIG visible indicators on the page using HTML overlays
           await page.evaluate((first, last) => {
+            // Create instruction banner at top
+            const banner = document.createElement('div');
+            banner.style.cssText = `
+              position: fixed;
+              top: 0;
+              left: 0;
+              width: 100%;
+              background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+              color: white;
+              padding: 20px;
+              text-align: center;
+              font-size: 20px;
+              font-weight: bold;
+              z-index: 1000000;
+              box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+              font-family: Arial, sans-serif;
+            `;
+            banner.innerHTML = `
+              🎓 LEARNING MODE ACTIVE 🎓<br>
+              <span style="font-size: 16px; font-weight: normal;">
+                🟢 Green circle = Algorithm's FIRST point | 🔴 Red circle = Algorithm's LAST point<br>
+                ✅ Correct? Just wait 30 seconds | ❌ Wrong? Click correct spots (Yellow then Orange)
+              </span>
+            `;
+            document.body.appendChild(banner);
+            
             // Create overlay container
             const overlay = document.createElement('div');
             overlay.id = 'learning-overlay';
             overlay.style.cssText = 'position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; pointer-events: none; z-index: 999999;';
             
-            // Draw FIRST point marker (GREEN)
+            // Draw FIRST point marker (GREEN) - HUGE and visible
             const firstMarker = document.createElement('div');
             firstMarker.style.cssText = `
               position: absolute;
-              left: ${first.x - 30}px;
-              top: ${first.y - 30}px;
-              width: 60px;
-              height: 60px;
-              border: 5px solid lime;
+              left: ${first.x - 50}px;
+              top: ${first.y - 50}px;
+              width: 100px;
+              height: 100px;
+              border: 8px solid lime;
               border-radius: 50%;
-              background: rgba(0, 255, 0, 0.2);
+              background: rgba(0, 255, 0, 0.3);
               pointer-events: none;
               animation: pulse 1s infinite;
+              box-shadow: 0 0 30px rgba(0, 255, 0, 0.8);
             `;
             
-            // Add label
+            // Add label with arrow
             const firstLabel = document.createElement('div');
-            firstLabel.textContent = 'FIRST';
+            firstLabel.innerHTML = '↓ FIRST START ↓';
             firstLabel.style.cssText = `
               position: absolute;
-              left: ${first.x - 30}px;
-              top: ${first.y - 50}px;
+              left: ${first.x - 70}px;
+              top: ${first.y - 80}px;
               background: lime;
               color: black;
-              padding: 5px 10px;
-              border-radius: 5px;
+              padding: 10px 15px;
+              border-radius: 8px;
               font-weight: bold;
-              font-size: 14px;
+              font-size: 18px;
               pointer-events: none;
+              box-shadow: 0 4px 8px rgba(0,0,0,0.3);
+              font-family: Arial, sans-serif;
             `;
             
-            // Draw LAST point marker (RED)
+            // Draw LAST point marker (RED) - HUGE and visible
             const lastMarker = document.createElement('div');
             lastMarker.style.cssText = `
               position: absolute;
-              left: ${last.x - 30}px;
-              top: ${last.y - 30}px;
-              width: 60px;
-              height: 60px;
-              border: 5px solid red;
+              left: ${last.x - 50}px;
+              top: ${last.y - 50}px;
+              width: 100px;
+              height: 100px;
+              border: 8px solid red;
               border-radius: 50%;
-              background: rgba(255, 0, 0, 0.2);
+              background: rgba(255, 0, 0, 0.3);
               pointer-events: none;
               animation: pulse 1s infinite;
+              box-shadow: 0 0 30px rgba(255, 0, 0, 0.8);
             `;
             
-            // Add label
+            // Add label with arrow
             const lastLabel = document.createElement('div');
-            lastLabel.textContent = 'LAST';
+            lastLabel.innerHTML = '↓ LAST END ↓';
             lastLabel.style.cssText = `
               position: absolute;
-              left: ${last.x - 30}px;
-              top: ${last.y - 50}px;
+              left: ${last.x - 65}px;
+              top: ${last.y - 80}px;
               background: red;
               color: white;
-              padding: 5px 10px;
-              border-radius: 5px;
+              padding: 10px 15px;
+              border-radius: 8px;
               font-weight: bold;
-              font-size: 14px;
+              font-size: 18px;
               pointer-events: none;
+              box-shadow: 0 4px 8px rgba(0,0,0,0.3);
+              font-family: Arial, sans-serif;
             `;
             
             // Add pulsing animation
@@ -1223,18 +1268,59 @@ async function main() {
             };
           }, clickResults.firstCoords, clickResults.lastCoords);
           
+          // Add countdown timer
+          await page.evaluate(() => {
+            const timer = document.createElement('div');
+            timer.id = 'countdown-timer';
+            timer.style.cssText = `
+              position: fixed;
+              top: 100px;
+              right: 20px;
+              background: rgba(0, 0, 0, 0.8);
+              color: white;
+              padding: 20px 30px;
+              border-radius: 10px;
+              font-size: 48px;
+              font-weight: bold;
+              z-index: 1000001;
+              font-family: 'Arial', monospace;
+              box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+            `;
+            timer.textContent = '30';
+            document.body.appendChild(timer);
+            
+            let countdown = 30;
+            const interval = setInterval(() => {
+              countdown--;
+              timer.textContent = countdown;
+              if (countdown <= 0) {
+                clearInterval(interval);
+                timer.textContent = 'GO!';
+                timer.style.background = 'rgba(0, 255, 0, 0.8)';
+                timer.style.color = 'black';
+              } else if (countdown <= 10) {
+                timer.style.background = 'rgba(255, 0, 0, 0.8)';
+                timer.style.fontSize = '60px';
+              }
+            }, 1000);
+          });
+          
           await page.waitForTimeout(1000); // Let markers appear
           
-          console.log(`\n        🟢 LOOK AT THE BROWSER!`);
-          console.log(`        → Green pulsing circle = Algorithm's FIRST point`);
-          console.log(`        → Red pulsing circle = Algorithm's LAST point`);
-          console.log(`\n        📋 OPTIONS:`);
-          console.log(`        1. If CORRECT → Just wait 30 seconds (auto-continue)`);
-          console.log(`        2. If WRONG → Click correct FIRST, then LAST, then wait`);
-          console.log(`           (Yellow circle = your FIRST, Orange = your LAST)\n`);
+          console.log(`\n        🟢 🔴 LOOK AT THE BROWSER WINDOW! 🔴 🟢`);
+          console.log(`        ═══════════════════════════════════════`);
+          console.log(`        You should see:`);
+          console.log(`        • Purple banner at top with instructions`);
+          console.log(`        • HUGE green circle (100px) = FIRST START`);
+          console.log(`        • HUGE red circle (100px) = LAST END`);
+          console.log(`        • Big countdown timer (top-right corner)`);
+          console.log(`\n        📋 WHAT TO DO:`);
+          console.log(`        ✅ Circles correct? → Just wait for countdown`);
+          console.log(`        ❌ Circles wrong? → Click correct spots before timer ends`);
+          console.log(`           (Yellow circle = your FIRST, Orange = your LAST)`);
+          console.log(`\n        ⏱️  Waiting 30 seconds for corrections...`);
           
           // Wait 30 seconds for user to make corrections
-          console.log(`        ⏱️  Waiting 30 seconds for corrections...`);
           await page.waitForTimeout(30000);
           
           // Collect user corrections
