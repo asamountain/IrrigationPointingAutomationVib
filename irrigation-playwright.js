@@ -16,10 +16,11 @@ const CONFIG = {
   url: 'https://admin.iofarm.com/report/',
   username: 'admin@admin.com',
   password: 'jojin1234!!',
-  targetName: '승진', // Wait for "승진's irrigation" to show up
+  targetName: process.env.MANAGER || '승진', // Choose manager: $env:MANAGER="진우" or "승진"
   outputDir: './data',
   screenshotDir: './screenshots',
-  chartLearningMode: process.env.CHART_LEARNING === 'true' // Enable with: $env:CHART_LEARNING="true"; npm start
+  chartLearningMode: process.env.CHART_LEARNING === 'true', // Enable with: $env:CHART_LEARNING="true"; npm start
+  watchMode: process.env.WATCH_MODE === 'true' // Simple watch mode: $env:WATCH_MODE="true"; npm start
 };
 
 // Ensure output directories exist
@@ -32,13 +33,72 @@ const CONFIG = {
 // Training data file
 const TRAINING_FILE = './training/training-data.json';
 
+// Load existing learning data for auto-correction
+function loadLearningOffsets() {
+  if (!fs.existsSync(TRAINING_FILE)) {
+    return { firstX: 0, firstY: 0, lastX: 0, lastY: 0, count: 0 };
+  }
+  
+  try {
+    const trainingData = JSON.parse(fs.readFileSync(TRAINING_FILE));
+    const corrected = trainingData.filter(entry => entry.userCorrections);
+    
+    if (corrected.length === 0) {
+      return { firstX: 0, firstY: 0, lastX: 0, lastY: 0, count: 0 };
+    }
+    
+    let firstXTotal = 0, firstYTotal = 0, firstCount = 0;
+    let lastXTotal = 0, lastYTotal = 0, lastCount = 0;
+    
+    corrected.forEach(entry => {
+      if (entry.userCorrections.first) {
+        firstXTotal += entry.userCorrections.first.svgX - entry.algorithmDetection.first.svgX;
+        firstYTotal += entry.userCorrections.first.svgY - entry.algorithmDetection.first.svgY;
+        firstCount++;
+      }
+      if (entry.userCorrections.last) {
+        lastXTotal += entry.userCorrections.last.svgX - entry.algorithmDetection.last.svgX;
+        lastYTotal += entry.userCorrections.last.svgY - entry.algorithmDetection.last.svgY;
+        lastCount++;
+      }
+    });
+    
+    return {
+      firstX: firstCount > 0 ? firstXTotal / firstCount : 0,
+      firstY: firstCount > 0 ? firstYTotal / firstCount : 0,
+      lastX: lastCount > 0 ? lastXTotal / lastCount : 0,
+      lastY: lastCount > 0 ? lastYTotal / lastCount : 0,
+      count: corrected.length
+    };
+  } catch (err) {
+    console.log('⚠️  Could not load learning data:', err.message);
+    return { firstX: 0, firstY: 0, lastX: 0, lastY: 0, count: 0 };
+  }
+}
+
 async function main() {
   console.log('🚀 Starting Irrigation Report Automation (Playwright)...\n');
   
+  // Load learned offsets from previous training
+  const learnedOffsets = loadLearningOffsets();
+  if (learnedOffsets.count > 0) {
+    console.log(`🎓 Loaded learning data from ${learnedOffsets.count} training sessions`);
+    console.log(`   → Applying corrections: First(${learnedOffsets.firstX.toFixed(1)}, ${learnedOffsets.firstY.toFixed(1)}), Last(${learnedOffsets.lastX.toFixed(1)}, ${learnedOffsets.lastY.toFixed(1)})\n`);
+  }
+  
+  // Show selected manager
+  console.log(`👤 Selected Manager: ${CONFIG.targetName}`);
+  if (CONFIG.watchMode) {
+    console.log(`👁️  WATCH MODE: Script will observe but not interfere`);
+  } else if (CONFIG.chartLearningMode) {
+    console.log(`🎓 LEARNING MODE: Will pause for corrections`);
+  }
+  console.log();
+
   // Launch browser
-  const browser = await chromium.launch({ 
+  const browser = await chromium.launch({
     headless: false, // Set to true for production
-    devtools: true   // Open DevTools to see console logs
+    devtools: CONFIG.chartLearningMode || CONFIG.watchMode   // Open DevTools in learning/watch mode
   });
   const context = await browser.newContext();
   const page = await context.newPage();
@@ -1155,7 +1215,16 @@ async function main() {
         
         // Now perform REAL Playwright mouse clicks for more reliable interaction
         if (clickResults.needsFirstClick && clickResults.firstCoords) {
-          const coords = clickResults.firstCoords;
+          let coords = clickResults.firstCoords;
+          
+          // Apply learned corrections if available
+          if (learnedOffsets.count > 0 && !CONFIG.chartLearningMode) {
+            const correctedX = coords.x + learnedOffsets.firstX;
+            const correctedY = coords.y + learnedOffsets.firstY;
+            console.log(`     🎓 Applying learned correction: (${learnedOffsets.firstX.toFixed(1)}, ${learnedOffsets.firstY.toFixed(1)})`);
+            coords = { ...coords, x: Math.round(correctedX), y: Math.round(correctedY) };
+          }
+          
           console.log(`     ✅ Clicking FIRST irrigation time (START of irrigation)`);
           console.log(`        → Screen Coord: (${coords.x}, ${coords.y}) - 15px ABOVE line`);
           console.log(`        → SVG Line Coord: (${coords.svgX}, ${coords.svgY})`);
@@ -1171,7 +1240,16 @@ async function main() {
         }
         
         if (clickResults.needsLastClick && clickResults.lastCoords) {
-          const coords = clickResults.lastCoords;
+          let coords = clickResults.lastCoords;
+          
+          // Apply learned corrections if available
+          if (learnedOffsets.count > 0 && !CONFIG.chartLearningMode) {
+            const correctedX = coords.x + learnedOffsets.lastX;
+            const correctedY = coords.y + learnedOffsets.lastY;
+            console.log(`     🎓 Applying learned correction: (${learnedOffsets.lastX.toFixed(1)}, ${learnedOffsets.lastY.toFixed(1)})`);
+            coords = { ...coords, x: Math.round(correctedX), y: Math.round(correctedY) };
+          }
+          
           console.log(`     ✅ Clicking LAST irrigation time (END of irrigation)`);
           console.log(`        → Screen Coord: (${coords.x}, ${coords.y}) - 15px ABOVE line`);
           console.log(`        → SVG Line Coord: (${coords.svgX}, ${coords.svgY})`);
