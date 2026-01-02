@@ -516,9 +516,10 @@ async function main() {
         const tablesAlreadyFilled = !tableStatus.needsFirstClick && !tableStatus.needsLastClick;
         
         if (tablesAlreadyFilled) {
-          console.log(`     ✅ Tables already filled for this date - skipping HSSP detection`);
-          console.log(`        → First: ${tableStatus.firstTime}`);
-          console.log(`        → Last: ${tableStatus.lastTime}\n`);
+          console.log(`     ✅ Tables already filled for this date - NO MODIFICATION NEEDED`);
+          console.log(`        → Existing First: ${tableStatus.firstTime}`);
+          console.log(`        → Existing Last: ${tableStatus.lastTime}`);
+          console.log(`        → Skipping HSSP algorithm (preserving existing data)\n`);
           
           // Store the existing data without running detection
           const dateData = {
@@ -725,169 +726,207 @@ async function main() {
             message: `Y range: ${Math.round(minY)} to ${Math.round(maxY)} (span: ${Math.round(yRange)})` 
           });
           
-          // Step 1: Find irrigation events (visual spikes UP = LOW Y values in SVG)
-          const peaks = [];
-          for (let i = 5; i < finalCoords.length - 5; i++) {
-            // Look at wider window (5 points each side)
-            const prev = finalCoords.slice(Math.max(0, i-5), i);
-            const next = finalCoords.slice(i+1, Math.min(finalCoords.length, i+6));
-            const curr = finalCoords[i];
+          // NEW APPROACH: Find steep DROPS (irrigation events)
+          // Irrigation = sudden decrease in water level = Y increases (visual drop)
+          
+          const drops = [];
+          const smoothWindow = 3; // Smooth over 3 points to reduce noise
+          
+          // Calculate smoothed Y values
+          const smoothedY = [];
+          for (let i = 0; i < finalCoords.length; i++) {
+            const start = Math.max(0, i - smoothWindow);
+            const end = Math.min(finalCoords.length, i + smoothWindow + 1);
+            const window = finalCoords.slice(start, end);
+            const avg = window.reduce((sum, p) => sum + p.y, 0) / window.length;
+            smoothedY.push(avg);
+          }
+          
+          // Find significant drops (Y increasing = water level dropping)
+          for (let i = 15; i < finalCoords.length - 15; i++) {
+            // Look back 10 points to see if there's a significant drop
+            const before = smoothedY.slice(i - 10, i);
+            const after = smoothedY.slice(i, i + 10);
             
-            // Get average of neighbors
-            const avgPrev = prev.reduce((sum, p) => sum + p.y, 0) / prev.length;
-            const avgNext = next.reduce((sum, p) => sum + p.y, 0) / next.length;
+            const avgBefore = before.reduce((sum, y) => sum + y, 0) / before.length;
+            const avgAfter = after.reduce((sum, y) => sum + y, 0) / after.length;
             
-            // Irrigation spike = LOWER Y than neighbors (visual spike UP)
-            const prominence = Math.min(avgPrev, avgNext) - curr.y;
+            // Drop = avgAfter is HIGHER than avgBefore (remember: higher Y = lower water = drop)
+            const dropAmount = avgAfter - avgBefore;
+            const dropPercent = (dropAmount / yRange) * 100;
             
-            // Threshold: 2% of Y range
-            if (prominence > yRange * 0.02) {
-              peaks.push({
+            // Significant drop: at least 8% of Y range
+            if (dropAmount > yRange * 0.08) {
+              drops.push({
                 index: i,
-                x: curr.x,
-                y: curr.y,
-                prominence: prominence
+                x: finalCoords[i].x,
+                y: finalCoords[i].y,
+                dropAmount: dropAmount,
+                dropPercent: dropPercent.toFixed(1),
+                beforeY: avgBefore,
+                afterY: avgAfter
               });
             }
           }
           
-          results.push({ 
-            message: `Found ${peaks.length} peaks (irrigation events)` 
-          });
-          console.log(`📊 [BROWSER] Found ${peaks.length} peaks (irrigation events)`);
+          console.log(`🔍 [BROWSER] Found ${drops.length} significant drops (≥8% Y-range)`);
           
-          // Debug: Show peak locations
-          if (peaks.length > 0 && peaks.length <= 10) {
-            const peaksSummary = peaks.map((p, i) => `[${i}]=idx${p.index}(${Math.round(p.x)},${Math.round(p.y)})`).join(', ');
-            results.push({ message: `Peak locations (raw): ${peaksSummary}` });
-            console.log(`📍 [BROWSER] Peak locations: ${peaksSummary}`);
+          if (drops.length === 0) {
+            console.log(`⚠️ [BROWSER] No irrigation drops detected - may have no irrigation this date`);
+            results.push({ message: 'No irrigation drops found' });
           }
           
-          // De-duplicate adjacent peaks (keep lowest Y = highest visual peak within each cluster)
-          const uniquePeaks = [];
-          let i = 0;
-          while (i < peaks.length) {
-            let clusterLowest = peaks[i]; // Lowest Y = highest visual spike
-            let j = i + 1;
+          // De-duplicate adjacent drops (merge drops within 10% of X-span)
+          const uniqueDrops = [];
+          const xSpan = finalCoords[finalCoords.length - 1].x - finalCoords[0].x;
+          
+          for (let i = 0; i < drops.length; i++) {
+            const drop = drops[i];
             
-            // Find all adjacent peaks (within proximity threshold)
-            while (j < peaks.length) {
-              const indexDiff = peaks[j].index - clusterLowest.index;
-              const xDiff = Math.abs(peaks[j].x - clusterLowest.x);
-              const yDiff = Math.abs(peaks[j].y - clusterLowest.y);
-              
-              // Calculate X-axis total span for relative distance
-              const xSpan = finalCoords[finalCoords.length - 1].x - finalCoords[0].x;
+            // Check if this drop is close to any existing unique drop
+            let isDuplicate = false;
+            for (const existingDrop of uniqueDrops) {
+              const xDiff = Math.abs(drop.x - existingDrop.x);
               const xDiffPercent = (xDiff / xSpan) * 100;
               
-              // Same cluster if:
-              // 1. Very close in index (≤5 points) OR
-              // 2. Close in X-axis (<5% of chart) AND similar Y (within 10% of range)
-              if (indexDiff <= 5 || (xDiffPercent < 5 && yDiff < yRange * 0.1)) {
-                // Keep the LOWEST Y value (highest visual spike)
-                if (peaks[j].y < clusterLowest.y) {
-                  clusterLowest = peaks[j];
+              // If within 10% X-distance, consider it the same irrigation event
+              if (xDiffPercent < 10) {
+                isDuplicate = true;
+                // Keep the one with bigger drop
+                if (drop.dropAmount > existingDrop.dropAmount) {
+                  uniqueDrops[uniqueDrops.indexOf(existingDrop)] = drop;
                 }
-                j++;
-              } else {
-                break;  // Different cluster - significantly separated
+                break;
               }
             }
             
-            uniquePeaks.push(clusterLowest);
-            i = j;
-          }
-            
-          const removedDuplicates = peaks.length - uniquePeaks.length;
-            results.push({
-            message: `After de-duplication: ${uniquePeaks.length} unique irrigation events (removed ${removedDuplicates} duplicates)` 
-          });
-          console.log(`🎯 [BROWSER] After de-duplication: ${uniquePeaks.length} unique irrigation events`);
-          if (removedDuplicates > 0) {
-            console.log(`   → Removed ${removedDuplicates} duplicate/overlapping peaks`);
+            if (!isDuplicate) {
+              uniqueDrops.push(drop);
+            }
           }
           
-          // Step 2: For each unique peak, find HSSP (where DROP starts)
-          const spikes = [];
-          for (let pIdx = 0; pIdx < uniquePeaks.length; pIdx++) {
-            const peak = uniquePeaks[pIdx];
-            let hsspIndex = peak.index;
-            let maxDrop = 0;  // Most negative slope
+          console.log(`🎯 [BROWSER] After de-duplication: ${uniqueDrops.length} unique irrigation events`);
+          if (drops.length > uniqueDrops.length) {
+            console.log(`   → Removed ${drops.length - uniqueDrops.length} duplicate drops`);
+          }
+          
+          // Sort by X position (time order - left to right)
+          uniqueDrops.sort((a, b) => a.x - b.x);
+          
+          // For each drop, find START (before drop) and END (after recovery)
+          const irrigationEvents = [];
+          
+          for (let dIdx = 0; dIdx < uniqueDrops.length; dIdx++) {
+            const drop = uniqueDrops[dIdx];
+            const dropIndex = drop.index;
             
-            // Look backwards up to 30 points to find where steepest DROP starts
-            const lookbackLimit = Math.max(0, peak.index - 30);
+            // 1. Find START: Look backwards to find where water level was HIGH (before irrigation)
+            let startIndex = dropIndex;
+            let highestYBefore = drop.y;
             
-            for (let j = peak.index - 1; j > lookbackLimit; j--) {
-              const slopeDrop = finalCoords[j].y - finalCoords[j + 1].y;  // Positive = dropping
+            for (let j = dropIndex - 1; j >= Math.max(0, dropIndex - 20); j--) {
+              const currentY = smoothedY[j];
+              if (currentY < highestYBefore) {
+                highestYBefore = currentY;
+                startIndex = j;
+              }
+            }
+            
+            // 2. Find END: Look forward to find where water level RECOVERS (after irrigation)
+            let endIndex = dropIndex;
+            let highestYAfter = drop.y;
+            
+            for (let j = dropIndex + 1; j < Math.min(finalCoords.length, dropIndex + 30); j++) {
+              const currentY = smoothedY[j];
+              // Find where water level is high again (recovered from irrigation)
+              if (currentY < highestYAfter) {
+                highestYAfter = currentY;
+                endIndex = j;
+              }
+            }
+            
+            // Validate
+            const startValid = startIndex < dropIndex;
+            const endValid = endIndex > dropIndex;
+            
+            if (startValid && endValid) {
+              irrigationEvents.push({
+                startIndex: startIndex,
+                startX: finalCoords[startIndex].x,
+                startY: finalCoords[startIndex].y,
+                endIndex: endIndex,
+                endX: finalCoords[endIndex].x,
+                endY: finalCoords[endIndex].y,
+                dropAmount: drop.dropAmount,
+                dropPercent: drop.dropPercent
+              });
               
-              // Find where Y drops most steeply (irrigation starts)
-              if (slopeDrop > maxDrop) {
-                maxDrop = slopeDrop;
-                hsspIndex = j;
-              }
+              console.log(`✅ [BROWSER] Irrigation ${dIdx + 1}: Start idx=${startIndex} (X=${Math.round(finalCoords[startIndex].x)}), End idx=${endIndex} (X=${Math.round(finalCoords[endIndex].x)}), drop=${drop.dropPercent}%`);
+            } else {
+              console.log(`⚠️ [BROWSER] Irrigation ${dIdx + 1}: Could not find valid start/end points, skipping`);
             }
-            
-            spikes.push({
-              index: hsspIndex,
-              x: finalCoords[hsspIndex].x,
-              y: finalCoords[hsspIndex].y,
-              peakIndex: peak.index,
-              peakY: peak.y,
-              maxDrop: maxDrop,
-              lookbackRange: `${lookbackLimit} to ${peak.index}`
-            });
-            
-                results.push({ 
-              message: `Irrigation ${pIdx}: min_Y=${Math.round(peak.y)} at idx=${peak.index} → HSSP at idx=${hsspIndex}, Y=${Math.round(finalCoords[hsspIndex].y)}, drop=${Math.round(maxDrop)}`
-            });
           }
           
-          results.push({ 
-            message: `Found ${spikes.length} HSSP points (irrigation start points)` 
+          results.push({
+            message: `Found ${irrigationEvents.length} valid irrigation events with start/end points`
           });
-          console.log(`✅ [BROWSER] Found ${spikes.length} HSSP points (irrigation start points)`);
           
-          // Debug: Show all HSSP coordinates
-          if (spikes.length > 0 && spikes.length <= 10) {
-            const coordsSummary = spikes.map((s, i) => `[${i}]=(${Math.round(s.x)},${Math.round(s.y)})`).join(', ');
-            results.push({ message: `All HSSPs: ${coordsSummary}` });
-            console.log(`📍 [BROWSER] All HSSPs: ${coordsSummary}`);
+          if (irrigationEvents.length === 0) {
+            console.error('❌ [BROWSER] No valid irrigation events found');
+            return {
+              needsFirstClick: false,
+              needsLastClick: false,
+              error: 'No valid irrigation events',
+              debug: results
+            };
           }
           
-          if (spikes.length === 0) {
-            console.error('❌ [BROWSER] No irrigation start points (HSSP) found');
-            results.push({ error: 'No irrigation start points (HSSP) found - check peak detection threshold' });
-            return results;
-          }
+          // FIRST irrigation = START of first event
+          // LAST irrigation = END of last event
+          const firstEvent = irrigationEvents[0];
+          const lastEvent = irrigationEvents[irrigationEvents.length - 1];
+          
+          const spikes = [
+            {
+              index: firstEvent.startIndex,
+              x: firstEvent.startX,
+              y: firstEvent.startY,
+              dropAmount: firstEvent.dropAmount,
+              dropPercent: firstEvent.dropPercent,
+              type: 'FIRST_START'
+            },
+            {
+              index: lastEvent.endIndex,
+              x: lastEvent.endX,
+              y: lastEvent.endY,
+              dropAmount: lastEvent.dropAmount,
+              dropPercent: lastEvent.dropPercent,
+              type: 'LAST_END'
+            }
+          ];
+          
+          console.log(`📌 [BROWSER] Using FIRST irrigation START (idx=${firstEvent.startIndex}) and LAST irrigation END (idx=${lastEvent.endIndex})`);
+          
           
           // Get chart container for coordinate conversion
           const chartContainer = document.querySelector('.highcharts-container');
           const containerRect = chartContainer.getBoundingClientRect();
           
-          const firstHSSP = spikes[0];
-          const lastHSSP = spikes[spikes.length - 1];
+          const firstPoint = spikes[0]; // FIRST irrigation START
+          const lastPoint = spikes[1]; // LAST irrigation END
           
-          // For last irrigation, use the valley (lowest point = peak of irrigation)
-          const lastValley = uniquePeaks[uniquePeaks.length - 1];
-          
-          // Check if there are multiple irrigation events
-          const hasMultipleEvents = uniquePeaks.length >= 2;
-          
-          // Calculate X-axis separation between first and last
-          const xSeparation = Math.abs(lastValley.x - firstHSSP.x);
+          // Calculate X-axis separation between first start and last end
+          const xSeparation = Math.abs(lastPoint.x - firstPoint.x);
           const totalXRange = finalCoords[finalCoords.length - 1].x - finalCoords[0].x;
           const separationPercent = (xSeparation / totalXRange) * 100;
           
-          // Minimum separation threshold: 15% of total X range
-          // (e.g., if chart spans 24 hours, events must be ~3.6 hours apart)
-          const minSeparationPercent = 15;
-          const tooClose = separationPercent < minSeparationPercent;
+          console.log(`📊 [BROWSER] First (START) vs Last (END) separation: ${Math.round(separationPercent)}%`);
           
           // IMPORTANT: Click ABOVE the line (lower Y) to hit Highcharts clickable area
           const clickOffsetY = 15; // pixels above the chart line
           
           results.push({
-            message: `Selecting: First HSSP idx=${firstHSSP.index}, Last VALLEY idx=${lastValley.index}`
+            message: `Selecting: FIRST START at idx=${firstPoint.index}, LAST END at idx=${lastPoint.index}`
           });
           
           results.push({
@@ -899,49 +938,38 @@ async function main() {
             message: `Click offset: ${clickOffsetY}px ABOVE chart line (Highcharts clickable area)`
           });
           
-          if (!hasMultipleEvents || tooClose) {
-            const reason = !hasMultipleEvents ? 'Only 1 event' : `Events too close (<${minSeparationPercent}%)`;
-            results.push({
-              message: `${reason} - using same point for both first and last`
-            });
-            console.log(`⚠️ [BROWSER] ${reason} - treating as single irrigation event`);
-          }
-          
           // Convert SVG coordinates to screen coordinates
-          const firstX = containerRect.left + firstHSSP.x;
-          const firstY = containerRect.top + firstHSSP.y - clickOffsetY;
-          const lastX = containerRect.left + lastValley.x;
-          const lastY = containerRect.top + lastValley.y - clickOffsetY;
+          const firstX = containerRect.left + firstPoint.x;
+          const firstY = containerRect.top + firstPoint.y - clickOffsetY;
+          const lastX = containerRect.left + lastPoint.x;
+          const lastY = containerRect.top + lastPoint.y - clickOffsetY;
           
           console.log(`🎯 [BROWSER] Final click coordinates:`);
-          console.log(`   → FIRST: Screen(${Math.round(firstX)}, ${Math.round(firstY)}) SVG(${Math.round(firstHSSP.x)}, ${Math.round(firstHSSP.y)})`);
-          console.log(`   → LAST: Screen(${Math.round(lastX)}, ${Math.round(lastY)}) SVG(${Math.round(lastValley.x)}, ${Math.round(lastValley.y)})`);
-          if (!hasMultipleEvents) {
-            console.log(`   ⚠️ Single event detected - using same point for both fields`);
-          }
+          console.log(`   → FIRST (START): idx=${firstPoint.index} Screen(${Math.round(firstX)}, ${Math.round(firstY)}) SVG(${Math.round(firstPoint.x)}, ${Math.round(firstPoint.y)})`);
+          console.log(`   → LAST (END): idx=${lastPoint.index} Screen(${Math.round(lastX)}, ${Math.round(lastY)}) SVG(${Math.round(lastPoint.x)}, ${Math.round(lastPoint.y)})`);
           
-          // Return coordinates for Playwright to click (more reliable than JS events)
-          // When only 1 event OR events too close: use same coordinates for both first and last
-          const treatAsSingleEvent = !hasMultipleEvents || tooClose;
-          
+          // Return coordinates for Playwright to click
+          // ALWAYS click both points - they are different (START vs END)
           return {
             needsFirstClick: needs.needsFirstClick,
-            needsLastClick: needs.needsLastClick && !treatAsSingleEvent, // Skip last click if single event or too close
+            needsLastClick: needs.needsLastClick, // Always click last - it's different from first
             firstCoords: needs.needsFirstClick ? { 
               x: Math.round(firstX), 
               y: Math.round(firstY), 
-              svgX: Math.round(firstHSSP.x), 
-              svgY: Math.round(firstHSSP.y), 
-              drop: Math.round(firstHSSP.maxDrop) 
+              svgX: Math.round(firstPoint.x), 
+              svgY: Math.round(firstPoint.y), 
+              drop: firstPoint.dropAmount,
+              type: 'START'
             } : null,
-            lastCoords: needs.needsLastClick && !treatAsSingleEvent ? { 
+            lastCoords: needs.needsLastClick ? { 
               x: Math.round(lastX), 
               y: Math.round(lastY), 
-              svgX: Math.round(lastValley.x), 
-              svgY: Math.round(lastValley.y), 
-              valleyIdx: lastValley.index 
+              svgX: Math.round(lastPoint.x), 
+              svgY: Math.round(lastPoint.y), 
+              drop: lastPoint.dropAmount,
+              type: 'END'
             } : null,
-            singleEvent: treatAsSingleEvent,
+            singleEvent: false, // Never single - we have START and END
             separationPercent: Math.round(separationPercent),
             debug: results
           };
@@ -949,30 +977,61 @@ async function main() {
             return results;
           }, tableStatus);
           
+        // Check if HSSP detection failed
+        if (clickResults.error) {
+          console.log(`     ⚠️  HSSP detection failed: ${clickResults.error}`);
+          console.log(`        → No irrigation points found for this date`);
+          console.log(`        → Tables will remain empty\n`);
+          
+          // Store empty data
+          const dateData = {
+            date: displayedDate,
+            firstIrrigationTime: null,
+            lastIrrigationTime: null,
+            extractedAt: new Date().toISOString(),
+            error: clickResults.error
+          };
+          farmDateData.push(dateData);
+          
+          // Take screenshot
+          const errorScreenshot = path.join(CONFIG.screenshotDir, `farm-${farmIdx + 1}-date-${dateIdx}-no-data-${timestamp}.png`);
+          await page.screenshot({ path: errorScreenshot, fullPage: true });
+          console.log(`     📸 Screenshot: ${errorScreenshot}\n`);
+          
+          // Move to next date
+          if (dayOffset < totalDaysToCheck - 1) {
+            const nextClicked = await page.evaluate(() => {
+              const nextButton = document.querySelector('button[aria-label="다음 기간"]');
+              if (nextButton) { nextButton.click(); return true; }
+              return false;
+            });
+            if (nextClicked) {
+              console.log(`     ⏭️  Moving to next date...\n`);
+              await page.waitForTimeout(2000);
+            }
+          }
+          continue; // Skip to next date
+        }
+        
         // Display debug info
         if (clickResults.debug) {
           clickResults.debug.forEach(msg => {
-            if (msg.message) console.log(`  → ${msg.message}`);
+            if (msg.message) console.log(`     → ${msg.message}`);
           });
         }
         
         // Show separation info
-        if (clickResults.singleEvent !== undefined) {
-          if (clickResults.singleEvent) {
-            console.log(`  ⚠️  Single event detected (separation: ${clickResults.separationPercent || 0}%)`);
-            console.log(`     → Will use same point for both first and last irrigation times`);
-          } else {
-            console.log(`  ✅ Multiple events detected (separation: ${clickResults.separationPercent}%)`);
-          }
+        if (clickResults.separationPercent !== undefined) {
+          console.log(`     ✅ First (START) and Last (END) separated by ${clickResults.separationPercent}% of chart`);
         }
         
         // Now perform REAL Playwright mouse clicks for more reliable interaction
         if (clickResults.needsFirstClick && clickResults.firstCoords) {
           const coords = clickResults.firstCoords;
-          console.log(`  ✅ HSSP: Clicking FIRST irrigation start`);
-          console.log(`     → Screen Coord: (${coords.x}, ${coords.y}) - 15px ABOVE line`);
-          console.log(`     → SVG Line Coord: (${coords.svgX}, ${coords.svgY})`);
-          console.log(`     → Max Drop: ${coords.drop} (steepness)`);
+          console.log(`     ✅ Clicking FIRST irrigation time (START of irrigation)`);
+          console.log(`        → Screen Coord: (${coords.x}, ${coords.y}) - 15px ABOVE line`);
+          console.log(`        → SVG Line Coord: (${coords.svgX}, ${coords.svgY})`);
+          console.log(`        → Type: ${coords.type || 'START'}`);
           
           // Focus first input field
           await page.click('input[type="time"]:nth-of-type(1)');
@@ -981,30 +1040,14 @@ async function main() {
           // Click chart with Playwright mouse
           await page.mouse.click(coords.x, coords.y);
           await page.waitForTimeout(3000); // Wait for UI to update before second click
-          
-          // If single event, copy first value to last field automatically
-          if (clickResults.singleEvent && tableStatus.needsLastClick) {
-            console.log(`  📋 Single event: Copying first time to last time field...`);
-            await page.evaluate(() => {
-              const timeInputs = Array.from(document.querySelectorAll('input[type="time"]'));
-              if (timeInputs.length >= 2 && timeInputs[0].value) {
-                timeInputs[timeInputs.length - 1].value = timeInputs[0].value;
-                // Trigger change event so UI updates
-                const event = new Event('input', { bubbles: true });
-                timeInputs[timeInputs.length - 1].dispatchEvent(event);
-                console.log(`✅ [BROWSER] Copied time: ${timeInputs[0].value}`);
-              }
-            });
-            await page.waitForTimeout(1000);
-          }
         }
         
         if (clickResults.needsLastClick && clickResults.lastCoords) {
           const coords = clickResults.lastCoords;
-          console.log(`  ✅ PEAK: Clicking LAST irrigation peak`);
-          console.log(`     → Screen Coord: (${coords.x}, ${coords.y}) - 15px ABOVE line`);
-          console.log(`     → SVG Line Coord: (${coords.svgX}, ${coords.svgY})`);
-          console.log(`     → Position: valley (lowest Y) at idx=${coords.valleyIdx}`);
+          console.log(`     ✅ Clicking LAST irrigation time (END of irrigation)`);
+          console.log(`        → Screen Coord: (${coords.x}, ${coords.y}) - 15px ABOVE line`);
+          console.log(`        → SVG Line Coord: (${coords.svgX}, ${coords.svgY})`);
+          console.log(`        → Type: ${coords.type || 'END'}`);
           
           // Focus LAST input field
           const timeInputs = await page.$$('input[type="time"]');
