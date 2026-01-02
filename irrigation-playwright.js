@@ -95,26 +95,29 @@ async function main() {
   }
   console.log();
 
-  // Launch browser
+  // Launch browser with maximized window
   const browser = await chromium.launch({
-    headless: false, // Set to true for production
-    devtools: false   // Don't auto-open DevTools (it blocks the view)
+    headless: false,
+    args: [
+      '--start-maximized',  // Start with maximized window
+      '--window-position=0,0'  // Position at top-left
+    ]
   });
+  
   const context = await browser.newContext({
-    viewport: { width: 1920, height: 1080 } // Full HD viewport for better visibility
+    viewport: null,  // Use full window size (no fixed viewport)
+    screen: { width: 1920, height: 1080 }
   });
+  
   const page = await context.newPage();
   
-  // Open DevTools console only in learning mode (docked at bottom)
-  if (CONFIG.chartLearningMode || CONFIG.watchMode) {
-    const cdpSession = await page.context().newCDPSession(page);
-    await cdpSession.send('Emulation.setDeviceMetricsOverride', {
-      width: 1920,
-      height: 1080,
-      deviceScaleFactor: 1,
-      mobile: false
-    });
-  }
+  // Maximize the window using CDP
+  const session = await page.context().newCDPSession(page);
+  const { windowId } = await session.send('Browser.getWindowForTarget');
+  await session.send('Browser.setWindowBounds', {
+    windowId,
+    bounds: { windowState: 'maximized' }
+  });
   
   try {
     // Step 1: Navigate to IoFarm admin report page
