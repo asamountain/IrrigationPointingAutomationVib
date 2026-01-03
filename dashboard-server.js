@@ -16,7 +16,6 @@ class DashboardServer {
     this.port = port;
     this.clients = [];
     this.server = null;
-    this.isPaused = false;
     this.shouldStop = false;
     this.isStarted = false;
     this.config = {
@@ -98,16 +97,6 @@ class DashboardServer {
           res.end(JSON.stringify({ success: false, error: error.message }));
         }
       });
-    }
-    else if (url.pathname === '/control/pause' && req.method === 'POST') {
-      this.isPaused = true;
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ success: true, paused: true }));
-    }
-    else if (url.pathname === '/control/resume' && req.method === 'POST') {
-      this.isPaused = false;
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ success: true, paused: false }));
     }
     else if (url.pathname === '/control/stop' && req.method === 'POST') {
       this.shouldStop = true;
@@ -309,10 +298,6 @@ class DashboardServer {
     });
   }
 
-  checkIfPaused() {
-    return this.isPaused;
-  }
-
   checkIfStopped() {
     return this.shouldStop;
   }
@@ -341,14 +326,6 @@ class DashboardServer {
     return this.config;
   }
 
-  async waitIfPaused() {
-    while (this.isPaused && !this.shouldStop) {
-      await new Promise(resolve => setTimeout(resolve, 500));
-    }
-    // Return updated config in case user changed mode during pause
-    return this.config;
-  }
-
   stop() {
     if (this.server) {
       this.clients.forEach(client => {
@@ -366,4 +343,5 @@ class DashboardServer {
 }
 
 export default DashboardServer;
+
 

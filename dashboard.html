@@ -546,32 +546,26 @@
             </div>
         </div>
 
-        <!-- Control Buttons (hidden until started) -->
-        <div class="card controls hidden" id="controls-panel">
-            <button class="btn-pause" id="btn-pause" onclick="pauseAutomation()">⏸️ Pause</button>
-            <button class="btn-resume btn-disabled" id="btn-resume" onclick="resumeAutomation()" disabled>▶️ Resume</button>
-            <button class="btn-stop" id="btn-stop" onclick="stopAutomation()">⏹️ Stop</button>
-        </div>
-
-        <!-- Learning Mode Toggle (shown when paused) -->
-        <div class="card hidden" id="learning-toggle-panel" style="margin-top: 20px;">
-            <h2>🎓 Learning Mode Control</h2>
-            <p style="margin-bottom: 20px; color: #666;">Toggle Learning Mode on/off - takes effect immediately when you resume</p>
-            <div style="display: flex; gap: 20px; align-items: center; justify-content: center;">
+        <!-- Simple Control Panel -->
+        <div class="card controls hidden" id="controls-panel" style="display: flex; flex-direction: column; gap: 20px;">
+            <div style="display: flex; gap: 15px; justify-content: center; align-items: center;">
                 <label class="toggle-switch">
                     <input type="checkbox" id="learning-mode-toggle">
                     <span class="toggle-slider"></span>
                 </label>
-                <div id="learning-mode-label" style="font-size: 1.3em; font-weight: 600; color: #4a9b3c;">
+                <div id="learning-mode-label" style="font-size: 1.4em; font-weight: 600; color: #4a9b3c;">
                     Normal Mode
                 </div>
+                <div id="mode-hint" style="font-size: 0.9em; color: #999; margin-left: 10px;">
+                    (Flip to enable Learning Mode)
+                </div>
             </div>
+            <button class="btn-stop" id="btn-stop" onclick="stopAutomation()">⏹️ Stop Automation</button>
         </div>
     </div>
 
     <script>
         let eventSource;
-        let isPaused = false;
         let automationStarted = false;
 
         // Handle custom manager input visibility
@@ -702,56 +696,31 @@
             timeElement.textContent = `Captured at ${new Date(timestamp).toLocaleTimeString()}`;
         }
 
-        async function pauseAutomation() {
-            try {
-                await fetch('http://localhost:3456/control/pause', { method: 'POST' });
-                isPaused = true;
-                document.getElementById('btn-pause').classList.add('btn-disabled');
-                document.getElementById('btn-pause').disabled = true;
-                document.getElementById('btn-resume').classList.remove('btn-disabled');
-                document.getElementById('btn-resume').disabled = false;
-                document.getElementById('learning-toggle-panel').classList.remove('hidden'); // Show toggle
-                addLog('Automation paused by user', 'warning');
-            } catch (error) {
-                addLog('Failed to pause automation', 'error');
-            }
-        }
-
-        async function resumeAutomation() {
-            try {
-                await fetch('http://localhost:3456/control/resume', { method: 'POST' });
-                isPaused = false;
-                document.getElementById('btn-resume').classList.add('btn-disabled');
-                document.getElementById('btn-resume').disabled = true;
-                document.getElementById('btn-pause').classList.remove('btn-disabled');
-                document.getElementById('btn-pause').disabled = false;
-                document.getElementById('learning-toggle-panel').classList.add('hidden'); // Hide toggle
-                addLog('Automation resumed by user', 'success');
-            } catch (error) {
-                addLog('Failed to resume automation', 'error');
-            }
-        }
-
-        // Learning Mode Toggle Handler
+        // Learning Mode Toggle Handler - Works Live!
         document.addEventListener('DOMContentLoaded', () => {
             const toggle = document.getElementById('learning-mode-toggle');
             const label = document.getElementById('learning-mode-label');
+            const hint = document.getElementById('mode-hint');
             
             if (toggle && label) {
                 toggle.addEventListener('change', async function() {
                     const isLearning = this.checked;
                     const newMode = isLearning ? 'learning' : 'normal';
                     
-                    // Update label
+                    // Update UI
                     if (isLearning) {
-                        label.textContent = '🎓 Learning Mode';
+                        label.textContent = '🎓 Learning Mode ACTIVE';
                         label.style.color = '#f59e0b';
+                        hint.textContent = '(AI training enabled)';
+                        hint.style.color = '#f59e0b';
                     } else {
                         label.textContent = 'Normal Mode';
                         label.style.color = '#4a9b3c';
+                        hint.textContent = '(Flip to enable Learning Mode)';
+                        hint.style.color = '#999';
                     }
                     
-                    // Send to server
+                    // Send to server immediately
                     try {
                         const response = await fetch('http://localhost:3456/control/mode', {
                             method: 'POST',
@@ -760,16 +729,14 @@
                         });
                         
                         if (response.ok) {
-                            addLog(`Mode switched to: ${isLearning ? 'Learning' : 'Normal'}`, 'success');
+                            addLog(`✓ Mode switched to: ${isLearning ? 'Learning Mode (Training)' : 'Normal Mode'}`, 'success');
                         } else {
                             addLog('Failed to switch mode', 'error');
-                            // Revert toggle
-                            this.checked = !isLearning;
+                            this.checked = !isLearning; // Revert
                         }
                     } catch (error) {
                         addLog('Failed to switch mode: ' + error.message, 'error');
-                        // Revert toggle
-                        this.checked = !isLearning;
+                        this.checked = !isLearning; // Revert
                     }
                 });
             }

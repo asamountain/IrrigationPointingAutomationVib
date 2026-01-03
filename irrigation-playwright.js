@@ -472,31 +472,23 @@ async function main() {
         break; // Exit the farm loop
       }
       
-      // Check if user pressed PAUSE
-      if (dashboard && dashboard.checkIfPaused()) {
-        console.log('\n⏸️  PAUSED. Waiting for resume...\n');
-        dashboard.log('Paused - click Resume to continue', 'warning');
-        dashboard.updateStatus('⏸️  Paused', 'paused');
-        const updatedConfig = await dashboard.waitIfPaused(); // Wait until resumed
-        
-        // After resume, check if stopped during pause
-        if (dashboard.checkIfStopped()) {
-          console.log('\n⛔ STOP requested during pause. Halting...\n');
-          dashboard.log('Processing stopped', 'warning');
-          break;
-        }
-        
-        // Check if mode was changed during pause
-        if (updatedConfig.mode !== CONFIG.watchMode && updatedConfig.mode !== CONFIG.chartLearningMode) {
-          CONFIG.watchMode = (updatedConfig.mode === 'watch');
-          CONFIG.chartLearningMode = (updatedConfig.mode === 'learning');
-          console.log(`✅ Mode switched to: ${updatedConfig.mode}`);
-          dashboard.log(`Mode changed to: ${updatedConfig.mode}`, 'success');
-        }
-        
-        console.log('▶️  Resumed. Continuing...\n');
-        dashboard.log('Resumed processing', 'success');
-        dashboard.updateStatus('▶️  Running', 'running');
+      // Check if mode was changed (live update)
+      const currentConfig = dashboard.getConfig();
+      if (currentConfig.mode === 'learning' && !CONFIG.chartLearningMode) {
+        CONFIG.chartLearningMode = true;
+        CONFIG.watchMode = false;
+        console.log('✅ Switched to Learning Mode');
+        dashboard.log('Learning Mode activated', 'success');
+      } else if (currentConfig.mode === 'normal' && CONFIG.chartLearningMode) {
+        CONFIG.chartLearningMode = false;
+        CONFIG.watchMode = false;
+        console.log('✅ Switched to Normal Mode');
+        dashboard.log('Normal Mode activated', 'success');
+      } else if (currentConfig.mode === 'watch' && !CONFIG.watchMode) {
+        CONFIG.watchMode = true;
+        CONFIG.chartLearningMode = false;
+        console.log('✅ Switched to Watch Mode');
+        dashboard.log('Watch Mode activated', 'success');
       }
       
       const currentFarm = farmsToProcess[farmIdx];
@@ -566,32 +558,26 @@ async function main() {
     for (let dayOffset = 0; dayOffset < totalDaysToCheck; dayOffset++) {
       dateIdx++;
       
-      // Check if user pressed STOP or PAUSE (inside date loop for better responsiveness)
+      // Check if user pressed STOP
       if (dashboard && dashboard.checkIfStopped()) {
         console.log('\n⛔ STOP requested. Halting date processing...\n');
         break; // Exit date loop
       }
       
-      if (dashboard && dashboard.checkIfPaused()) {
-        console.log('\n⏸️  PAUSED...\n');
-        dashboard.updateStatus('⏸️  Paused', 'paused');
-        const updatedConfig = await dashboard.waitIfPaused();
-        
-        if (dashboard.checkIfStopped()) {
-          console.log('\n⛔ STOP requested during pause.\n');
-          break;
-        }
-        
-        // Check if mode changed
-        if (updatedConfig.mode !== CONFIG.watchMode && updatedConfig.mode !== CONFIG.chartLearningMode) {
-          CONFIG.watchMode = (updatedConfig.mode === 'watch');
-          CONFIG.chartLearningMode = (updatedConfig.mode === 'learning');
-          console.log(`✅ Mode switched to: ${updatedConfig.mode}`);
-          dashboard.log(`Mode changed to: ${updatedConfig.mode}`, 'success');
-        }
-        
-        console.log('▶️  Resumed.\n');
-        dashboard.updateStatus('▶️  Running', 'running');
+      // Check if mode was changed (live update)
+      const currentConfig = dashboard.getConfig();
+      if (currentConfig.mode === 'learning' && !CONFIG.chartLearningMode) {
+        CONFIG.chartLearningMode = true;
+        CONFIG.watchMode = false;
+        console.log('✅ Switched to Learning Mode');
+      } else if (currentConfig.mode === 'normal' && CONFIG.chartLearningMode) {
+        CONFIG.chartLearningMode = false;
+        CONFIG.watchMode = false;
+        console.log('✅ Switched to Normal Mode');
+      } else if (currentConfig.mode === 'watch' && !CONFIG.watchMode) {
+        CONFIG.watchMode = true;
+        CONFIG.chartLearningMode = false;
+        console.log('✅ Switched to Watch Mode');
       }
       
       // Get the current date from the date picker button
