@@ -208,6 +208,74 @@
             cursor: not-allowed;
         }
 
+        .btn-start {
+            background: #4ade80;
+            color: #000;
+            font-size: 1.3em;
+            padding: 20px 40px;
+        }
+
+        .config-panel {
+            background: rgba(255, 255, 255, 0.15);
+            backdrop-filter: blur(10px);
+            border-radius: 15px;
+            padding: 25px;
+            margin-bottom: 20px;
+            border: 2px solid rgba(255, 255, 255, 0.3);
+        }
+
+        .config-panel h2 {
+            font-size: 1.8em;
+            margin-bottom: 20px;
+            text-align: center;
+        }
+
+        .config-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+
+        .config-item {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .config-label {
+            font-size: 1.1em;
+            margin-bottom: 10px;
+            font-weight: bold;
+            opacity: 0.9;
+        }
+
+        select, input {
+            padding: 12px;
+            font-size: 1.1em;
+            border-radius: 8px;
+            border: 2px solid rgba(255, 255, 255, 0.3);
+            background: rgba(255, 255, 255, 0.2);
+            color: #fff;
+            font-family: inherit;
+        }
+
+        select option {
+            background: #667eea;
+            color: #fff;
+        }
+
+        input::placeholder {
+            color: rgba(255, 255, 255, 0.6);
+        }
+
+        .start-container {
+            text-align: center;
+        }
+
+        .hidden {
+            display: none;
+        }
+
         .progress-bar {
             width: 100%;
             height: 30px;
@@ -241,7 +309,57 @@
             <p>Real-time monitoring and control</p>
         </header>
 
-        <div class="status-bar">
+        <!-- Configuration Panel (shown before starting) -->
+        <div class="config-panel" id="config-panel">
+            <h2>⚙️ Configuration</h2>
+            <div class="config-grid">
+                <div class="config-item">
+                    <label class="config-label">👤 Manager</label>
+                    <select id="manager-select">
+                        <option value="승진">승진 (Seungjin)</option>
+                        <option value="진우">진우 (Jinwoo)</option>
+                        <option value="custom">Custom...</option>
+                    </select>
+                    <input type="text" id="custom-manager" placeholder="Enter manager name" class="hidden" style="margin-top: 10px;">
+                </div>
+                <div class="config-item">
+                    <label class="config-label">🏭 Start From</label>
+                    <select id="start-from-select">
+                        <option value="0">All Farms (from beginning)</option>
+                        <option value="1">Farm #1</option>
+                        <option value="2">Farm #2</option>
+                        <option value="3">Farm #3</option>
+                        <option value="4">Farm #4</option>
+                        <option value="5">Farm #5</option>
+                    </select>
+                </div>
+            </div>
+            <div class="config-grid">
+                <div class="config-item">
+                    <label class="config-label">📊 Mode</label>
+                    <select id="mode-select">
+                        <option value="normal">Normal (Extract Data)</option>
+                        <option value="watch">Watch Mode (Observe Only)</option>
+                        <option value="learning">Learning Mode (Train)</option>
+                    </select>
+                </div>
+                <div class="config-item">
+                    <label class="config-label">🔢 Max Farms</label>
+                    <select id="max-farms-select">
+                        <option value="3">3 farms (testing)</option>
+                        <option value="5">5 farms</option>
+                        <option value="10">10 farms</option>
+                        <option value="999">All farms</option>
+                    </select>
+                </div>
+            </div>
+            <div class="start-container">
+                <button class="btn-start" id="btn-start" onclick="startAutomation()">🚀 Start Automation</button>
+            </div>
+        </div>
+
+        <!-- Status Bar (shown after starting) -->
+        <div class="status-bar hidden" id="status-bar">
             <div class="status-item">
                 <span class="status-label">Status:</span>
                 <span class="status-value status-running" id="status">🟢 Running</span>
@@ -259,7 +377,8 @@
             </div>
         </div>
 
-        <div class="grid">
+        <!-- Main Dashboard (hidden until started) -->
+        <div class="grid hidden" id="dashboard-grid">
             <div class="card">
                 <h2>📸 Latest Screenshot</h2>
                 <div id="screenshot-preview">
@@ -273,13 +392,14 @@
                 <div class="logs-container" id="logs">
                     <div class="log-entry log-info">
                         <span class="log-time">[Starting]</span>
-                        Dashboard initialized. Waiting for automation to start...
+                        Dashboard initialized. Click "Start Automation" to begin...
                     </div>
                 </div>
             </div>
         </div>
 
-        <div class="card controls">
+        <!-- Control Buttons (hidden until started) -->
+        <div class="card controls hidden" id="controls-panel">
             <button class="btn-pause" id="btn-pause" onclick="pauseAutomation()">⏸️ Pause</button>
             <button class="btn-resume btn-disabled" id="btn-resume" onclick="resumeAutomation()" disabled>▶️ Resume</button>
             <button class="btn-stop" id="btn-stop" onclick="stopAutomation()">⏹️ Stop</button>
@@ -289,6 +409,62 @@
     <script>
         let eventSource;
         let isPaused = false;
+        let automationStarted = false;
+
+        // Handle custom manager input visibility
+        document.getElementById('manager-select').addEventListener('change', function() {
+            const customInput = document.getElementById('custom-manager');
+            if (this.value === 'custom') {
+                customInput.classList.remove('hidden');
+            } else {
+                customInput.classList.add('hidden');
+            }
+        });
+
+        // Start automation with selected configuration
+        async function startAutomation() {
+            const managerSelect = document.getElementById('manager-select');
+            const customManager = document.getElementById('custom-manager');
+            const manager = managerSelect.value === 'custom' ? customManager.value.trim() : managerSelect.value;
+            const startFrom = parseInt(document.getElementById('start-from-select').value);
+            const mode = document.getElementById('mode-select').value;
+            const maxFarms = parseInt(document.getElementById('max-farms-select').value);
+
+            if (!manager) {
+                alert('Please enter a manager name');
+                return;
+            }
+
+            // Send configuration to server
+            try {
+                const response = await fetch('http://localhost:3456/control/start', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ manager, startFrom, mode, maxFarms })
+                });
+
+                if (response.ok) {
+                    automationStarted = true;
+                    
+                    // Hide config panel, show dashboard
+                    document.getElementById('config-panel').classList.add('hidden');
+                    document.getElementById('status-bar').classList.remove('hidden');
+                    document.getElementById('dashboard-grid').classList.remove('hidden');
+                    document.getElementById('controls-panel').classList.remove('hidden');
+                    
+                    // Update manager display
+                    document.getElementById('manager').textContent = manager;
+                    
+                    addLog(`Starting automation with manager: ${manager}`, 'success');
+                    addLog(`Mode: ${mode}, Starting from: ${startFrom === 0 ? 'All farms' : 'Farm #' + startFrom}`, 'info');
+                    addLog(`Max farms to process: ${maxFarms === 999 ? 'All' : maxFarms}`, 'info');
+                } else {
+                    alert('Failed to start automation. Server may already be running.');
+                }
+            } catch (error) {
+                alert('Failed to connect to server: ' + error.message);
+            }
+        }
 
         // Connect to Server-Sent Events stream
         function connectToStream() {

@@ -96,8 +96,20 @@ async function main() {
   const dashboard = new DashboardServer();
   globalDashboard = dashboard; // Set global instance
   const dashboardUrl = await dashboard.start();
-  dashboard.log('Irrigation automation starting...', 'info');
-  dashboard.setManager(CONFIG.targetName);
+  console.log(`📊 Dashboard ready at: ${dashboardUrl}`);
+  console.log(`   → Open this URL to configure and start automation\n`);
+  
+  // Wait for user to click "Start" in dashboard
+  const config = await dashboard.waitUntilStarted();
+  
+  // Apply configuration from dashboard
+  CONFIG.targetName = config.manager;
+  CONFIG.watchMode = (config.mode === 'watch');
+  CONFIG.chartLearningMode = (config.mode === 'learning');
+  
+  // Update dashboard with selected manager
+  dashboard.setManager(config.manager);
+  dashboard.log('Automation starting with user configuration...', 'success');
   
   // Load learned offsets from previous training
   const learnedOffsets = loadLearningOffsets();
@@ -107,8 +119,12 @@ async function main() {
     dashboard.log(`Loaded learning data from ${learnedOffsets.count} training sessions`, 'success');
   }
   
-  // Show selected manager
-  console.log(`👤 Selected Manager: ${CONFIG.targetName}`);
+  // Show selected configuration
+  console.log(`👤 Manager: ${config.manager}`);
+  console.log(`🏭 Start From: ${config.startFrom === 0 ? 'All farms' : 'Farm #' + config.startFrom}`);
+  console.log(`📊 Mode: ${config.mode}`);
+  console.log(`🔢 Max Farms: ${config.maxFarms === 999 ? 'All' : config.maxFarms}`);
+  
   if (CONFIG.watchMode) {
     console.log(`👁️  WATCH MODE: Script will observe but not interfere`);
     dashboard.log('Watch mode enabled', 'info');
@@ -440,11 +456,48 @@ async function main() {
     console.log(`   → Total days to check: ${totalDaysToCheck}`);
     console.log(`   → Method: Click "Previous period" 5 times, then iterate forward\n`);
     
-    // Loop through each farm
-    const maxFarmsToProcess = 3; // Limit to first 3 farms for faster testing
-    const farmsToProcess = farmList.slice(0, maxFarmsToProcess);
+    // Get configuration from dashboard
+    const dashboardConfig = dashboard.getConfig();
+    const startFromIndex = dashboardConfig.startFrom; // 0 = all farms, 1+ = start from that farm
+    const maxFarmsToProcess = dashboardConfig.maxFarms;
+    
+    // Slice farm list based on configuration
+    const farmStartIndex = startFromIndex > 0 ? startFromIndex - 1 : 0; // Convert to 0-based index
+    const farmsToProcess = farmList.slice(farmStartIndex, farmStartIndex + maxFarmsToProcess);
+    
+    console.log(`🏭 Farm Processing Configuration:`);
+    console.log(`   → Starting from: ${startFromIndex === 0 ? 'Beginning (all farms)' : 'Farm #' + startFromIndex}`);
+    console.log(`   → Max farms to process: ${maxFarmsToProcess === 999 ? 'All' : maxFarmsToProcess}`);
+    console.log(`   → Will process ${farmsToProcess.length} farms\n`);
     
     for (let farmIdx = 0; farmIdx < farmsToProcess.length; farmIdx++) {
+      // Check if user pressed STOP
+      if (dashboard && dashboard.checkIfStopped()) {
+        console.log('\n⛔ STOP requested by user. Halting farm processing...\n');
+        dashboard.log('Processing stopped by user', 'warning');
+        dashboard.updateStatus('⛔ Stopped by user', 'paused');
+        break; // Exit the farm loop
+      }
+      
+      // Check if user pressed PAUSE
+      if (dashboard && dashboard.checkIfPaused()) {
+        console.log('\n⏸️  PAUSED. Waiting for resume...\n');
+        dashboard.log('Paused - click Resume to continue', 'warning');
+        dashboard.updateStatus('⏸️  Paused', 'paused');
+        await dashboard.waitIfPaused(); // Wait until resumed
+        
+        // After resume, check if stopped during pause
+        if (dashboard.checkIfStopped()) {
+          console.log('\n⛔ STOP requested during pause. Halting...\n');
+          dashboard.log('Processing stopped', 'warning');
+          break;
+        }
+        
+        console.log('▶️  Resumed. Continuing...\n');
+        dashboard.log('Resumed processing', 'success');
+        dashboard.updateStatus('▶️  Running', 'running');
+      }
+      
       const currentFarm = farmsToProcess[farmIdx];
       console.log(`\n${'='.repeat(70)}`);
       console.log(`🏭 Processing Farm ${farmIdx + 1}/${farmsToProcess.length}: ${currentFarm.name}`);

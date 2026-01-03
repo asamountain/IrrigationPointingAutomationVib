@@ -18,6 +18,13 @@ class DashboardServer {
     this.server = null;
     this.isPaused = false;
     this.shouldStop = false;
+    this.isStarted = false;
+    this.config = {
+      manager: '승진',
+      startFrom: 0,
+      mode: 'normal',
+      maxFarms: 3
+    };
   }
 
   start() {
@@ -71,6 +78,23 @@ class DashboardServer {
       this.serveScreenshot(screenshotPath, res);
     }
     // Control endpoints
+    else if (url.pathname === '/control/start' && req.method === 'POST') {
+      let body = '';
+      req.on('data', chunk => { body += chunk; });
+      req.on('end', () => {
+        try {
+          const config = JSON.parse(body);
+          this.config = { ...this.config, ...config };
+          this.isStarted = true;
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: true, config: this.config }));
+          console.log(`✅ Configuration received from dashboard:`, this.config);
+        } catch (error) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, error: error.message }));
+        }
+      });
+    }
     else if (url.pathname === '/control/pause' && req.method === 'POST') {
       this.isPaused = true;
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -209,6 +233,30 @@ class DashboardServer {
 
   checkIfStopped() {
     return this.shouldStop;
+  }
+
+  checkIfStarted() {
+    return this.isStarted;
+  }
+
+  getConfig() {
+    return this.config;
+  }
+
+  async waitUntilStarted() {
+    console.log('⏳ Waiting for user to click "Start" in dashboard...');
+    this.broadcast({
+      type: 'log',
+      message: 'Waiting for configuration and start command from dashboard...',
+      level: 'info'
+    });
+    
+    while (!this.isStarted) {
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+    
+    console.log('✅ Start command received from dashboard');
+    return this.config;
   }
 
   async waitIfPaused() {
