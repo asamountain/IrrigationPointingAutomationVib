@@ -154,15 +154,8 @@ async function main() {
   // Open automation page
   const page = await context.newPage();
   
-  // Open dashboard in a new tab
-  const dashboardPage = await context.newPage();
-  await dashboardPage.goto(dashboardUrl);
-  await dashboardPage.bringToFront();
-  await page.waitForTimeout(1000); // Let dashboard load
-  await page.bringToFront(); // Bring automation back to front
-  
   dashboard.log('Browser launched successfully', 'success');
-  dashboard.log('Dashboard opened in new tab', 'success');
+  dashboard.log(`Dashboard accessible at ${dashboardUrl}`, 'success');
   
   // Maximize the window using CDP
   const session = await page.context().newCDPSession(page);
@@ -484,13 +477,21 @@ async function main() {
         console.log('\n⏸️  PAUSED. Waiting for resume...\n');
         dashboard.log('Paused - click Resume to continue', 'warning');
         dashboard.updateStatus('⏸️  Paused', 'paused');
-        await dashboard.waitIfPaused(); // Wait until resumed
+        const updatedConfig = await dashboard.waitIfPaused(); // Wait until resumed
         
         // After resume, check if stopped during pause
         if (dashboard.checkIfStopped()) {
           console.log('\n⛔ STOP requested during pause. Halting...\n');
           dashboard.log('Processing stopped', 'warning');
           break;
+        }
+        
+        // Check if mode was changed during pause
+        if (updatedConfig.mode !== CONFIG.watchMode && updatedConfig.mode !== CONFIG.chartLearningMode) {
+          CONFIG.watchMode = (updatedConfig.mode === 'watch');
+          CONFIG.chartLearningMode = (updatedConfig.mode === 'learning');
+          console.log(`✅ Mode switched to: ${updatedConfig.mode}`);
+          dashboard.log(`Mode changed to: ${updatedConfig.mode}`, 'success');
         }
         
         console.log('▶️  Resumed. Continuing...\n');
@@ -564,6 +565,34 @@ async function main() {
     
     for (let dayOffset = 0; dayOffset < totalDaysToCheck; dayOffset++) {
       dateIdx++;
+      
+      // Check if user pressed STOP or PAUSE (inside date loop for better responsiveness)
+      if (dashboard && dashboard.checkIfStopped()) {
+        console.log('\n⛔ STOP requested. Halting date processing...\n');
+        break; // Exit date loop
+      }
+      
+      if (dashboard && dashboard.checkIfPaused()) {
+        console.log('\n⏸️  PAUSED...\n');
+        dashboard.updateStatus('⏸️  Paused', 'paused');
+        const updatedConfig = await dashboard.waitIfPaused();
+        
+        if (dashboard.checkIfStopped()) {
+          console.log('\n⛔ STOP requested during pause.\n');
+          break;
+        }
+        
+        // Check if mode changed
+        if (updatedConfig.mode !== CONFIG.watchMode && updatedConfig.mode !== CONFIG.chartLearningMode) {
+          CONFIG.watchMode = (updatedConfig.mode === 'watch');
+          CONFIG.chartLearningMode = (updatedConfig.mode === 'learning');
+          console.log(`✅ Mode switched to: ${updatedConfig.mode}`);
+          dashboard.log(`Mode changed to: ${updatedConfig.mode}`, 'success');
+        }
+        
+        console.log('▶️  Resumed.\n');
+        dashboard.updateStatus('▶️  Running', 'running');
+      }
       
       // Get the current date from the date picker button
       const displayedDate = await page.evaluate(() => {

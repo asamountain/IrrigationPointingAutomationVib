@@ -114,6 +114,22 @@ class DashboardServer {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ success: true, stopped: true }));
     }
+    else if (url.pathname === '/control/mode' && req.method === 'POST') {
+      let body = '';
+      req.on('data', chunk => { body += chunk; });
+      req.on('end', () => {
+        try {
+          const { mode } = JSON.parse(body);
+          this.config.mode = mode;
+          console.log(`✅ Mode changed to: ${mode}`);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: true, mode }));
+        } catch (error) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, error: error.message }));
+        }
+      });
+    }
     // 404
     else {
       res.writeHead(404);
@@ -329,6 +345,8 @@ class DashboardServer {
     while (this.isPaused && !this.shouldStop) {
       await new Promise(resolve => setTimeout(resolve, 500));
     }
+    // Return updated config in case user changed mode during pause
+    return this.config;
   }
 
   stop() {
