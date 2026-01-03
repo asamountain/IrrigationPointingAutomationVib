@@ -17,11 +17,11 @@ const CONFIG = {
   url: 'https://admin.iofarm.com/report/',
   username: 'admin@admin.com',
   password: 'jojin1234!!',
-  targetName: process.env.MANAGER || '승진', // Choose manager: $env:MANAGER="진우" or "승진"
+  targetName: '승진', // Will be set by dashboard
   outputDir: './data',
   screenshotDir: './screenshots',
-  chartLearningMode: process.env.CHART_LEARNING === 'true', // Enable with: $env:CHART_LEARNING="true"; npm start
-  watchMode: process.env.WATCH_MODE === 'true' // Simple watch mode: $env:WATCH_MODE="true"; npm start
+  chartLearningMode: false, // Will be set by dashboard
+  watchMode: false // Will be set by dashboard
 };
 
 // Ensure output directories exist
