@@ -306,7 +306,7 @@ async function main() {
       console.log(`📸 Screenshot saved: ${errorScreenshot}\n`);
     }
     
-    // Step 3: Wait for "승진's irrigation" to show up
+    // Step 3: Wait for manager's irrigation to show up
     console.log(`📊 Step 3: Waiting for "${CONFIG.targetName}'s irrigation" to appear...`);
     
     try {
@@ -321,7 +321,7 @@ async function main() {
       const pageTitle = await page.title();
       console.log(`  → Page Title: "${pageTitle}"`);
       
-      // Look for text containing "승진" and "irrigation" or "관수"
+      // Look for text containing manager name and "irrigation" or "관수"
       const searchTexts = [
         `${CONFIG.targetName}'s irrigation`,
         `${CONFIG.targetName}`,
@@ -372,45 +372,45 @@ async function main() {
       console.log(`📸 Error screenshot saved: ${errorScreenshot}\n`);
     }
     
-    // Step 4: Click '승진' radio button to select that manager
-    console.log('🎯 Step 4: Selecting "승진" manager...');
+    // Step 4: Click manager radio button to select that manager
+    console.log(`🎯 Step 4: Selecting "${CONFIG.targetName}" manager...`);
     
     try {
       // Use JavaScript to click the radio button (more reliable than Playwright click)
-      const radioClicked = await page.evaluate(() => {
+      const radioClicked = await page.evaluate((managerName) => {
         // Find radio button by label text
         const labels = Array.from(document.querySelectorAll('label'));
-        const seungjinLabel = labels.find(label => label.textContent.includes('승진'));
-        if (seungjinLabel) {
-          seungjinLabel.click();
+        const managerLabel = labels.find(label => label.textContent.includes(managerName));
+        if (managerLabel) {
+          managerLabel.click();
           return true;
         }
         
         // Fallback: try input directly
         const radios = Array.from(document.querySelectorAll('input[type="radio"]'));
-        const seungjinRadio = radios.find(radio => 
-          radio.id.includes('승진') || radio.value.includes('승진')
+        const managerRadio = radios.find(radio => 
+          radio.id.includes(managerName) || radio.value.includes(managerName)
         );
-        if (seungjinRadio) {
-          seungjinRadio.click();
+        if (managerRadio) {
+          managerRadio.click();
           return true;
         }
         
         return false;
-      });
+      }, CONFIG.targetName); // Pass the manager name from CONFIG
       
       if (radioClicked) {
-        console.log('  ✅ Clicked "승진" radio button via JavaScript');
+        console.log(`  ✅ Clicked "${CONFIG.targetName}" radio button via JavaScript`);
         await page.waitForTimeout(2000);
         
-        const step4Screenshot = path.join(CONFIG.screenshotDir, `4-selected-seungjin-${timestamp}.png`);
+        const step4Screenshot = path.join(CONFIG.screenshotDir, `4-selected-manager-${timestamp}.png`);
         await page.screenshot({ path: step4Screenshot, fullPage: true });
         console.log(`  📸 Screenshot: ${step4Screenshot}\n`);
       } else {
-        console.log('  ⚠️  Could not find "승진" radio button\n');
+        console.log(`  ⚠️  Could not find "${CONFIG.targetName}" radio button\n`);
       }
     } catch (error) {
-      console.log(`  ⚠️  Error clicking "승진" radio: ${error.message}\n`);
+      console.log(`  ⚠️  Error clicking "${CONFIG.targetName}" radio: ${error.message}\n`);
     }
     
     // Step 5: Get all farms from the list and loop through them
@@ -1798,7 +1798,7 @@ async function main() {
     
     console.log('\n📋 What Was Accomplished:');
     console.log('   1. ✅ Navigated to report page');
-    console.log('   2. ✅ Selected "승진" manager');
+    console.log(`   2. ✅ Selected "${CONFIG.targetName}" manager`);
     console.log(`   3. ✅ Processed ${allFarmData.length} farms`);
     console.log(`   4. ✅ Checked ${summaryData.dateRange.totalDays} days per farm (last 5 days)`);
     console.log(`   5. ✅ Total dates processed: ${summaryData.totalDatesProcessed}`);
