@@ -77,6 +77,10 @@ class DashboardServer {
       const screenshotPath = url.searchParams.get('path');
       this.serveScreenshot(screenshotPath, res);
     }
+    // Serve learning data
+    else if (url.pathname === '/learning-data') {
+      this.serveLearningData(res);
+    }
     // Control endpoints
     else if (url.pathname === '/control/start' && req.method === 'POST') {
       let body = '';
@@ -172,6 +176,68 @@ class DashboardServer {
       res.writeHead(200, { 'Content-Type': 'image/png' });
       res.end(data);
     });
+  }
+
+  serveLearningData(res) {
+    const trainingFile = path.join(__dirname, 'training', 'training-data.json');
+    
+    if (!fs.existsSync(trainingFile)) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ 
+        count: 0, 
+        firstX: 0, firstY: 0, 
+        lastX: 0, lastY: 0,
+        status: 'no_data'
+      }));
+      return;
+    }
+
+    try {
+      const trainingData = JSON.parse(fs.readFileSync(trainingFile));
+      const corrected = trainingData.filter(entry => entry.userCorrections);
+      
+      if (corrected.length === 0) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ 
+          count: 0, 
+          firstX: 0, firstY: 0, 
+          lastX: 0, lastY: 0,
+          status: 'no_corrections'
+        }));
+        return;
+      }
+      
+      let firstXTotal = 0, firstYTotal = 0, firstCount = 0;
+      let lastXTotal = 0, lastYTotal = 0, lastCount = 0;
+      
+      corrected.forEach(entry => {
+        if (entry.userCorrections.first) {
+          firstXTotal += entry.userCorrections.first.svgX - entry.algorithmDetection.first.svgX;
+          firstYTotal += entry.userCorrections.first.svgY - entry.algorithmDetection.first.svgY;
+          firstCount++;
+        }
+        if (entry.userCorrections.last) {
+          lastXTotal += entry.userCorrections.last.svgX - entry.algorithmDetection.last.svgX;
+          lastYTotal += entry.userCorrections.last.svgY - entry.algorithmDetection.last.svgY;
+          lastCount++;
+        }
+      });
+      
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        count: corrected.length,
+        firstX: firstCount > 0 ? firstXTotal / firstCount : 0,
+        firstY: firstCount > 0 ? firstYTotal / firstCount : 0,
+        lastX: lastCount > 0 ? lastXTotal / lastCount : 0,
+        lastY: lastCount > 0 ? lastYTotal / lastCount : 0,
+        firstCount,
+        lastCount,
+        status: 'active'
+      }));
+    } catch (error) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: error.message, status: 'error' }));
+    }
   }
 
   sendToClient(client, data) {
