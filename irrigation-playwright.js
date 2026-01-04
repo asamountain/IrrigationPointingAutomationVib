@@ -452,18 +452,24 @@ async function main() {
     // Get configuration from dashboard
     const dashboardConfig = dashboard.getConfig();
     const startFromIndex = dashboardConfig.startFrom; // 0 = all farms, 1+ = start from that farm
-    const maxFarmsToProcess = dashboardConfig.maxFarms;
-    
-    // Slice farm list based on configuration
     const farmStartIndex = startFromIndex > 0 ? startFromIndex - 1 : 0; // Convert to 0-based index
-    const farmsToProcess = farmList.slice(farmStartIndex, farmStartIndex + maxFarmsToProcess);
     
     console.log(`🏭 Farm Processing Configuration:`);
     console.log(`   → Starting from: ${startFromIndex === 0 ? 'Beginning (all farms)' : 'Farm #' + startFromIndex}`);
-    console.log(`   → Max farms to process: ${maxFarmsToProcess === 999 ? 'All' : maxFarmsToProcess}`);
-    console.log(`   → Will process ${farmsToProcess.length} farms\n`);
+    console.log(`   → Max farms to process: ${dashboardConfig.maxFarms === 999 ? 'All' : dashboardConfig.maxFarms}`);
+    console.log(`   → Will process up to ${Math.min(dashboardConfig.maxFarms, farmList.length - farmStartIndex)} farms\n`);
     
-    for (let farmIdx = 0; farmIdx < farmsToProcess.length; farmIdx++) {
+    // Dynamic loop - checks maxFarms from config each iteration (allows adding farms mid-run)
+    for (let farmIdx = 0; farmIdx < farmList.length - farmStartIndex; farmIdx++) {
+      // Get current config (may have been updated via "Add More Farms")
+      const currentConfig = dashboard.getConfig();
+      
+      // Check if we've reached the current maxFarms limit
+      if (farmIdx >= currentConfig.maxFarms) {
+        console.log(`\n✅ Reached maxFarms limit (${currentConfig.maxFarms}). Stopping farm processing.\n`);
+        dashboard.log(`Completed processing ${currentConfig.maxFarms} farms`, 'success');
+        break;
+      }
       // Check if user pressed STOP
       if (dashboard && dashboard.checkIfStopped()) {
         console.log('\n⛔ STOP requested by user. Halting farm processing...\n');
@@ -472,8 +478,7 @@ async function main() {
         break; // Exit the farm loop
       }
       
-      // Check if mode was changed (live update)
-      const currentConfig = dashboard.getConfig();
+      // Check if mode was changed (live update - reuse currentConfig from above)
       if (currentConfig.mode === 'learning' && !CONFIG.chartLearningMode) {
         CONFIG.chartLearningMode = true;
         CONFIG.watchMode = false;
@@ -491,9 +496,10 @@ async function main() {
         dashboard.log('Watch Mode activated', 'success');
       }
       
-      const currentFarm = farmsToProcess[farmIdx];
+      const actualFarmIndex = farmStartIndex + farmIdx;
+      const currentFarm = farmList[actualFarmIndex];
       console.log(`\n${'='.repeat(70)}`);
-      console.log(`🏭 Processing Farm ${farmIdx + 1}/${farmsToProcess.length}: ${currentFarm.name}`);
+      console.log(`🏭 Processing Farm ${farmIdx + 1}/${currentConfig.maxFarms}: ${currentFarm.name}`);
       console.log(`${'='.repeat(70)}\n`);
       
       // Update dashboard progress (reuse currentConfig from above)
