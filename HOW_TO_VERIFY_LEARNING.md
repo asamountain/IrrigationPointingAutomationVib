@@ -399,3 +399,4 @@ If after following all steps above, you still don't see learning working:
 3. Ensure you're clicking during Learning Mode (not just waiting)
 4. Verify browser window is visible (markers won't show if minimized)
 
+

@@ -119,6 +119,27 @@ class DashboardServer {
         }
       });
     }
+    else if (url.pathname === '/control/add-farms' && req.method === 'POST') {
+      let body = '';
+      req.on('data', chunk => { body += chunk; });
+      req.on('end', () => {
+        try {
+          const { additionalFarms } = JSON.parse(body);
+          this.config.maxFarms += additionalFarms;
+          console.log(`✅ Added ${additionalFarms} more farms. New total: ${this.config.maxFarms}`);
+          this.broadcast({
+            type: 'log',
+            message: `Extended automation by ${additionalFarms} farms (now processing up to ${this.config.maxFarms} farms)`,
+            level: 'success'
+          });
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: true, newMaxFarms: this.config.maxFarms }));
+        } catch (error) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, error: error.message }));
+        }
+      });
+    }
     // 404
     else {
       res.writeHead(404);
@@ -264,6 +285,15 @@ class DashboardServer {
       type: 'status',
       status,
       statusClass
+    });
+  }
+
+  updateProgress(currentFarm, totalFarms, farmName = '') {
+    this.broadcast({
+      type: 'progress',
+      currentFarm,
+      totalFarms,
+      farmName
     });
   }
 

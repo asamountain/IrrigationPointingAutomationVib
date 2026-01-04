@@ -548,6 +548,7 @@
 
         <!-- Simple Control Panel -->
         <div class="card controls hidden" id="controls-panel" style="display: flex; flex-direction: column; gap: 20px;">
+            <!-- Learning Mode Toggle -->
             <div style="display: flex; gap: 15px; justify-content: center; align-items: center;">
                 <label class="toggle-switch">
                     <input type="checkbox" id="learning-mode-toggle">
@@ -560,6 +561,23 @@
                     (Flip to enable Learning Mode)
                 </div>
             </div>
+
+            <!-- Dynamic Farm Extension -->
+            <div style="border-top: 1px solid #e5e7eb; padding-top: 15px;">
+                <div style="display: flex; gap: 10px; justify-content: center; align-items: center; flex-wrap: wrap;">
+                    <label style="font-weight: 600; color: #374151;">Process more farms:</label>
+                    <input type="number" id="add-farms-input" min="1" max="100" value="5" 
+                           style="width: 80px; padding: 8px; border: 2px solid #d1d5db; border-radius: 6px; font-size: 1em; text-align: center;">
+                    <button class="btn-primary" onclick="addMoreFarms()" style="padding: 8px 20px;">
+                        ➕ Add More
+                    </button>
+                </div>
+                <div id="farm-progress" style="margin-top: 10px; text-align: center; color: #6b7280; font-size: 0.95em;">
+                    Current progress will be shown here
+                </div>
+            </div>
+
+            <!-- Stop Button -->
             <button class="btn-stop" id="btn-stop" onclick="stopAutomation()">⏹️ Stop Automation</button>
         </div>
     </div>
@@ -663,6 +681,18 @@
             if (data.type === 'manager') {
                 document.getElementById('manager').textContent = data.name;
             }
+
+            if (data.type === 'progress') {
+                const progressDisplay = document.getElementById('farm-progress');
+                if (progressDisplay) {
+                    const farmName = data.farmName ? `: ${data.farmName}` : '';
+                    progressDisplay.innerHTML = `
+                        <strong>Processing farm ${data.currentFarm} of ${data.totalFarms}</strong>${farmName}
+                    `;
+                    progressDisplay.style.color = '#4a9b3c';
+                    progressDisplay.style.fontWeight = '600';
+                }
+            }
         }
 
         function updateProgress(percent) {
@@ -752,6 +782,34 @@
                 } catch (error) {
                     addLog('Failed to stop automation', 'error');
                 }
+            }
+        }
+
+        async function addMoreFarms() {
+            const input = document.getElementById('add-farms-input');
+            const additionalFarms = parseInt(input.value);
+            
+            if (!additionalFarms || additionalFarms < 1) {
+                addLog('⚠️ Please enter a valid number of farms (1 or more)', 'error');
+                return;
+            }
+            
+            try {
+                const response = await fetch('http://localhost:3456/control/add-farms', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ additionalFarms })
+                });
+                
+                if (response.ok) {
+                    const result = await response.json();
+                    addLog(`✅ Added ${additionalFarms} more farms! New total: ${result.newMaxFarms}`, 'success');
+                    input.value = 5; // Reset to default
+                } else {
+                    addLog('❌ Failed to add more farms', 'error');
+                }
+            } catch (error) {
+                addLog('❌ Error adding farms: ' + error.message, 'error');
             }
         }
 
