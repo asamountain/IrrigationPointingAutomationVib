@@ -496,8 +496,7 @@ async function main() {
       console.log(`🏭 Processing Farm ${farmIdx + 1}/${farmsToProcess.length}: ${currentFarm.name}`);
       console.log(`${'='.repeat(70)}\n`);
       
-      // Update dashboard progress
-      const currentConfig = dashboard.getConfig();
+      // Update dashboard progress (reuse currentConfig from above)
       if (dashboard) {
         dashboard.updateProgress(farmIdx + 1, currentConfig.maxFarms, currentFarm.name);
       }
