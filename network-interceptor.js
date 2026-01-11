@@ -93,6 +93,13 @@ export function extractDataPoints(apiResponse) {
   
   console.log(`   → Node "${nodeKey}" has ${nodeData.length} entries`);
   
+  // 🔍 DEBUG: Show actual data structure
+  if (nodeData.length > 0) {
+    console.log("🔍 [DEBUG] RAW DATA SAMPLE (First Item):");
+    console.log(JSON.stringify(nodeData[0], null, 2));
+    console.log("-------------------------------------");
+  }
+  
   // Look for sensor keys (slabwgt, slabvwc, etc.)
   if (nodeData.length === 0) {
     console.log('⚠️  [NETWORK] Node data array is empty');
