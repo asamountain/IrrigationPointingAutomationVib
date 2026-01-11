@@ -872,24 +872,49 @@ async function main() {
             if (!isInEvent && slope > surgeThreshold) {
               console.log(`     → Surge detected at index ${i} (slope: ${slope.toFixed(3)})`);
               
-              // 2. LOOK BACK: Find the true valley point
+              // 2. LOOK BACK: Find the absolute valley (local minimum)
               let valleyIndex = i - 1;
               let lookbackSteps = 0;
-              const maxLookback = Math.min(30, i); // Look back up to 30 points or to start
+              const maxLookback = Math.min(60, i); // Look back up to 60 points (1 hour)
+              const noiseThreshold = yRange * 0.001; // 0.1% noise tolerance
               
-              // Walk backward while values are still increasing (go back before the rise started)
+              // ENHANCED: Trace backward to find the absolute bottom of the valley
+              // Keep going back while the curve is DESCENDING (values getting smaller)
+              // Stop when we start ASCENDING (we've passed the valley and are climbing the previous hill)
               while (lookbackSteps < maxLookback && valleyIndex > 0) {
-                const currentVal = dataPoints[valleyIndex].y;
-                const prevVal = dataPoints[valleyIndex - 1].y;
-                const backSlope = currentVal - prevVal;
+                const current = dataPoints[valleyIndex].y;
+                const prev = dataPoints[valleyIndex - 1].y;
                 
-                // Stop when we hit a point that was going down or flat (found the valley!)
-                if (backSlope <= minSlope) {
+                // Check for time gap (> 15 minutes = 900 seconds = 900000 ms)
+                const timeGap = dataPoints[valleyIndex].x - dataPoints[valleyIndex - 1].x;
+                if (timeGap > 900000) {
+                  console.log(`     → Time gap detected (${(timeGap/60000).toFixed(1)} min), stopping lookback`);
                   break;
                 }
                 
+                // If previous value is HIGHER than current (allowing for noise), 
+                // we've passed the valley and are ascending the left side
+                if (prev > current + noiseThreshold) {
+                  console.log(`     → Found valley: prev=${prev.toFixed(3)} > curr=${current.toFixed(3)} (ascending left side)`);
+                  break;
+                }
+                
+                // Otherwise, keep going back (still descending or flat)
                 valleyIndex--;
                 lookbackSteps++;
+              }
+              
+              // Extra check: Make sure we actually found a valley (not just walked back to start)
+              if (lookbackSteps > 0) {
+                const valleyValue = dataPoints[valleyIndex].y;
+                const surgeValue = dataPoints[i].y;
+                const drop = surgeValue - valleyValue;
+                if (drop < surgeThreshold * 0.5) {
+                  // Not a real valley, revert to i-1
+                  console.log(`     → False valley (drop=${drop.toFixed(3)} too small), using i-1`);
+                  valleyIndex = i - 1;
+                  lookbackSteps = 0;
+                }
               }
               
               console.log(`     → Looked back ${lookbackSteps} steps: Valley at index ${valleyIndex}`);
