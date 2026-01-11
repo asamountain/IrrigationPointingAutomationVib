@@ -95,8 +95,15 @@ export function extractDataPoints(apiResponse) {
   
   // 🔍 DEBUG: Show actual data structure
   if (nodeData.length > 0) {
-    console.log("🔍 [DEBUG] RAW DATA SAMPLE (First Item):");
-    console.log(JSON.stringify(nodeData[0], null, 2));
+    console.log("🔍 [DEBUG] DATA STRUCTURE ANALYSIS:");
+    console.log(`   → Type: ${Array.isArray(nodeData) ? 'Array' : typeof nodeData}`);
+    console.log(`   → Length: ${nodeData.length}`);
+    console.log(`   → First 3 items:`);
+    for (let i = 0; i < Math.min(3, nodeData.length); i++) {
+      console.log(`      [${i}]:`, JSON.stringify(nodeData[i]));
+    }
+    console.log(`   → Last item:`);
+    console.log(`      [${nodeData.length - 1}]:`, JSON.stringify(nodeData[nodeData.length - 1]));
     console.log("-------------------------------------");
   }
   
