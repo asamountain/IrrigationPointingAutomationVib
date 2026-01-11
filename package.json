@@ -20,6 +20,7 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
+    "open": "^11.0.0",
     "playwright": "^1.57.0"
   }
 }
