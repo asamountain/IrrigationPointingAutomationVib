@@ -140,10 +140,11 @@ async function main() {
   dashboard.updateStep('Initializing browser', 5);
   
   const browser = await chromium.launch({
-    headless: false,
+    headless: false,         // ✅ FORCE VISIBLE (not background)
+    channel: 'chrome',       // ✅ Use real Chrome (not Chromium)
     args: [
-      '--start-maximized',  // Start with maximized window
-      '--window-position=0,0'  // Position at top-left
+      '--start-maximized',   // Start with maximized window
+      '--window-position=0,0' // Position at top-left
     ]
   });
   
@@ -847,107 +848,101 @@ async function main() {
           
           console.log(`  📊 Analyzing ${dataPoints.length} data points for irrigation events...`);
           
-          // 🔧 NEW: "Look-Back" Algorithm - Finds valley BEFORE surge starts
+          // 🔬 ROLLING WINDOW & LOCAL MINIMUM Algorithm
+          // Purpose: Catch gentle sustained rises + Find absolute valley bottom
+          
           const yValues = dataPoints.map(p => p.y);
           const maxY = Math.max(...yValues);
           const minY = Math.min(...yValues);
           const yRange = maxY - minY;
           
-          // Dynamic threshold based on data range (more robust)
-          const surgeThreshold = yRange * 0.02; // 2% rise = surge detected
-          const minSlope = yRange * 0.005; // 0.5% = still rising
-          
           console.log(`     → Y range: ${minY.toFixed(2)} to ${maxY.toFixed(2)} (span: ${yRange.toFixed(2)})`);
-          console.log(`     → Surge threshold: ${surgeThreshold.toFixed(3)} (2% of range)`);
           
-          const irrigationEvents = [];
-          let isInEvent = false;
+          // ROLLING WINDOW PARAMETERS
+          const SURGE_WINDOW = 5;       // Compare with 5 minutes ago (catches slow rises)
+          const SURGE_THRESHOLD = Math.max(0.02, yRange * 0.015); // 1.5% or 0.02, whichever higher
+          const LOOKBACK_WINDOW = 20;   // Look back 20 minutes to find valley
+          const DEBOUNCE_MINUTES = 30;  // Minutes between events
           
-          for (let i = 5; i < dataPoints.length - 5; i++) {
-            const current = dataPoints[i].y;
-            const previous = dataPoints[i - 1].y;
-            const slope = current - previous;
+          console.log(`     → Surge window: ${SURGE_WINDOW} minutes`);
+          console.log(`     → Surge threshold: ${SURGE_THRESHOLD.toFixed(4)} (sustained rise detection)`);
+          console.log(`     → Lookback window: ${LOOKBACK_WINDOW} minutes (valley search)`);
+          
+          const allEvents = [];
+          let lastEventIndex = -DEBOUNCE_MINUTES;
+          
+          // SCAN: Start after enough data for the window
+          for (let i = SURGE_WINDOW; i < dataPoints.length - 5; i++) {
+            const currentVal = dataPoints[i].y;
+            const pastVal = dataPoints[i - SURGE_WINDOW].y;
+            const diff = currentVal - pastVal;
             
-            // 1. DETECT SURGE: Significant positive slope
-            if (!isInEvent && slope > surgeThreshold) {
-              console.log(`     → Surge detected at index ${i} (slope: ${slope.toFixed(3)})`);
+            // DETECT: Sustained Rise (comparing 5-min window)
+            if (diff > SURGE_THRESHOLD && i > lastEventIndex + DEBOUNCE_MINUTES) {
+              console.log(`     → Sustained rise detected at index ${i} (5-min rise: ${diff.toFixed(4)})`);
               
-              // 2. LOOK BACK: Find the absolute valley (local minimum)
-              let valleyIndex = i - 1;
-              let lookbackSteps = 0;
-              const maxLookback = Math.min(60, i); // Look back up to 60 points (1 hour)
-              const noiseThreshold = yRange * 0.001; // 0.1% noise tolerance
+              // FIND VALLEY: Scan lookback window for ABSOLUTE MINIMUM
+              let minVal = currentVal;
+              let valleyIndex = i;
+              const startSearch = Math.max(0, i - LOOKBACK_WINDOW);
               
-              // ENHANCED: Trace backward to find the absolute bottom of the valley
-              // Keep going back while the curve is DESCENDING (values getting smaller)
-              // Stop when we start ASCENDING (we've passed the valley and are climbing the previous hill)
-              while (lookbackSteps < maxLookback && valleyIndex > 0) {
-                const current = dataPoints[valleyIndex].y;
-                const prev = dataPoints[valleyIndex - 1].y;
-                
-                // Check for time gap (> 15 minutes = 900 seconds = 900000 ms)
-                const timeGap = dataPoints[valleyIndex].x - dataPoints[valleyIndex - 1].x;
-                if (timeGap > 900000) {
-                  console.log(`     → Time gap detected (${(timeGap/60000).toFixed(1)} min), stopping lookback`);
-                  break;
-                }
-                
-                // If previous value is HIGHER than current (allowing for noise), 
-                // we've passed the valley and are ascending the left side
-                if (prev > current + noiseThreshold) {
-                  console.log(`     → Found valley: prev=${prev.toFixed(3)} > curr=${current.toFixed(3)} (ascending left side)`);
-                  break;
-                }
-                
-                // Otherwise, keep going back (still descending or flat)
-                valleyIndex--;
-                lookbackSteps++;
-              }
+              console.log(`     → Searching for valley: indices ${startSearch} to ${i} (${i - startSearch} points)`);
               
-              // Extra check: Make sure we actually found a valley (not just walked back to start)
-              if (lookbackSteps > 0) {
-                const valleyValue = dataPoints[valleyIndex].y;
-                const surgeValue = dataPoints[i].y;
-                const drop = surgeValue - valleyValue;
-                if (drop < surgeThreshold * 0.5) {
-                  // Not a real valley, revert to i-1
-                  console.log(`     → False valley (drop=${drop.toFixed(3)} too small), using i-1`);
-                  valleyIndex = i - 1;
-                  lookbackSteps = 0;
+              for (let j = i; j >= startSearch; j--) {
+                if (dataPoints[j].y <= minVal) {
+                  minVal = dataPoints[j].y;
+                  valleyIndex = j;
                 }
               }
               
-              console.log(`     → Looked back ${lookbackSteps} steps: Valley at index ${valleyIndex}`);
-              console.log(`     → Valley Y: ${dataPoints[valleyIndex].y.toFixed(3)}, Peak Y: ${current.toFixed(3)}`);
+              // VALIDATE: Must be in "Yellow Zone" (07:00 - 17:00)
+              const eventTimestamp = dataPoints[valleyIndex].x;
+              const eventDate = new Date(eventTimestamp);
+              const eventHour = eventDate.getHours();
+              const eventMinute = eventDate.getMinutes();
+              const isDaytime = eventHour >= 7 && eventHour <= 17;
               
-              irrigationEvents.push({
-                index: valleyIndex, // The TRUE start point (valley)
-                x: dataPoints[valleyIndex].x,
-                y: dataPoints[valleyIndex].y,
-                peakIndex: i, // For reference
-                rise: current - dataPoints[valleyIndex].y
-              });
+              const timeStr = `${String(eventHour).padStart(2, '0')}:${String(eventMinute).padStart(2, '0')}`;
               
-              isInEvent = true;
-            }
-            
-            // 3. RESET: When slope flattens or drops, event is over
-            if (isInEvent && slope < -surgeThreshold * 0.5) {
-              isInEvent = false;
+              console.log(`     → Valley found at index ${valleyIndex} (searched back ${i - valleyIndex} points)`);
+              console.log(`     → Valley time: ${timeStr} (hour: ${eventHour})`);
+              console.log(`     → Valley Y: ${dataPoints[valleyIndex].y.toFixed(3)}, Surge Y: ${currentVal.toFixed(3)}`);
+              console.log(`     → Total rise from valley: ${(currentVal - dataPoints[valleyIndex].y).toFixed(3)}`);
+              console.log(`     → Daytime filter: ${isDaytime ? '✅ PASS' : '❌ SKIP (outside 07:00-17:00)'}`);
+              
+              if (isDaytime) {
+                allEvents.push({
+                  index: valleyIndex,
+                  x: dataPoints[valleyIndex].x,
+                  y: dataPoints[valleyIndex].y,
+                  peakIndex: i,
+                  rise: currentVal - dataPoints[valleyIndex].y,
+                  time: timeStr
+                });
+                
+                lastEventIndex = valleyIndex;
+                i = Math.max(i, valleyIndex + 15); // Skip forward
+              } else {
+                console.log(`     → Event rejected (outside active hours)`);
+              }
             }
           }
           
-          // De-duplicate (keep events at least 5% apart)
+          console.log(`  🔬 [WINDOW-MIN] Raw detections: ${allEvents.length} events`);
+          
+          // DE-DUPLICATE: Keep events at least 5% apart
           const uniqueEvents = [];
           const minSeparation = dataPoints.length * 0.05;
           
-          for (const event of irrigationEvents) {
+          for (const event of allEvents) {
             let isDuplicate = false;
             for (const existing of uniqueEvents) {
               if (Math.abs(event.index - existing.index) < minSeparation) {
                 isDuplicate = true;
-                if (event.drop > existing.drop) {
+                // Keep the one with larger rise
+                if (event.rise > existing.rise) {
                   uniqueEvents[uniqueEvents.indexOf(existing)] = event;
+                  console.log(`     → Replaced duplicate: kept event at ${event.time} (larger rise)`);
                 }
                 break;
               }
@@ -957,6 +952,7 @@ async function main() {
             }
           }
           
+
           console.log(`  ✅ Found ${uniqueEvents.length} irrigation events`);
           
           if (uniqueEvents.length === 0) {

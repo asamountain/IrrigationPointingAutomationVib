@@ -11,6 +11,7 @@ import { chromium } from 'playwright';
 import fs from 'fs';
 import path from 'path';
 import DashboardServer from './dashboard-server.js';
+import { setupNetworkInterception, waitForChartData, extractDataPoints } from './network-interceptor.js';
 
 // Configuration (move to config.js later)
 const CONFIG = {
@@ -139,10 +140,11 @@ async function main() {
   dashboard.updateStep('Initializing browser', 5);
   
   const browser = await chromium.launch({
-    headless: false,
+    headless: false,         // ✅ FORCE VISIBLE (not background)
+    channel: 'chrome',       // ✅ Use real Chrome (not Chromium)
     args: [
-      '--start-maximized',  // Start with maximized window
-      '--window-position=0,0'  // Position at top-left
+      '--start-maximized',   // Start with maximized window
+      '--window-position=0,0' // Position at top-left
     ]
   });
   
@@ -415,20 +417,30 @@ async function main() {
         const farms = [];
         const tabs = document.querySelector('[id*="tabs"][id*="content-point"]');
         if (tabs) {
-          // Get all farm items in the list
-          const farmDivs = tabs.querySelectorAll('div > div:first-child > div:nth-child(2) > div');
-          farmDivs.forEach((div, idx) => {
-            const text = div.textContent.trim();
+          // CRITICAL FIX: Find individual <a> elements, not the parent container
+          const farmContainer = tabs.querySelector('div > div:first-child > div:nth-child(2)');
+          
+          if (!farmContainer) {
+            console.error('[BROWSER] ❌ Farm container not found!');
+            return farms;
+          }
+          
+          // Find all <a> tags (each represents one farm)
+          const farmLinks = farmContainer.querySelectorAll('a[href*="/report/point/"]');
+          console.log(`[BROWSER] Found ${farmLinks.length} farm links`);
+          
+          farmLinks.forEach((link, idx) => {
+            const text = link.textContent.trim();
             
             // BUGFIX: Filter out invalid elements
-            if (!text || text.length < 20 || text.length > 800) return;
+            if (!text || text.length < 3 || text.length > 200) return;
             if (/\d{4}년|\d{2}월|\d{2}일/.test(text)) return; // Skip dates
             if (text.includes('전체 보기') || text.includes('저장')) return; // Skip UI buttons
             if (text.includes('Created with') || text.includes('Highcharts')) return; // Skip chart
             if (/^\d{2}:\d{2}/.test(text)) return; // Skip if starts with time
             if (text.startsWith('구역')) return; // Skip table labels
             
-            console.log(`[BROWSER] ✓ Valid farm: ${text.substring(0, 50)}...`);
+            console.log(`[BROWSER] ✓ Valid farm #${idx + 1}: ${text}`);
             farms.push({ index: idx + 1, name: text });
           });
         }
@@ -515,31 +527,59 @@ async function main() {
         dashboard.updateProgress(farmIdx + 1, currentConfig.maxFarms, currentFarm.name);
       }
       
-      // Click the farm
-      try {
-        const farmClicked = await page.evaluate((farmIndex) => {
-          const tabs = document.querySelector('[id*="tabs"][id*="content-point"]');
-          if (tabs) {
-            const targetDiv = tabs.querySelector(`div > div:first-child > div:nth-child(2) > div:nth-child(${farmIndex})`);
-            if (targetDiv) {
-              targetDiv.click();
-              return true;
-            }
-          }
-        return false;
-        }, currentFarm.index);
+      // Set up network interception to capture chart data
+      console.log('  🌐 Setting up network interception...');
+      const networkData = setupNetworkInterception(page);
       
-      if (farmClicked) {
-          console.log(`  ✅ Clicked farm "${currentFarm.name}"`);
-        await page.waitForTimeout(3000); // Wait for chart to load
-      } else {
-          console.log(`  ⚠️  Could not click farm "${currentFarm.name}", skipping...\n`);
+      // Click the farm - MODERN APPROACH (Scroll + Force Click + Validate)
+      try {
+        console.log(`  🎯 Attempting to click farm: "${currentFarm.name}"`);
+        
+        // CRITICAL: Re-locate the element inside the loop using the SAME selector that found the farms
+        const farmContainer = page.locator('div.css-nd8svt');
+        const farmLink = farmContainer.locator('a[href*="/report/point/"]').nth(actualFarmIndex);
+        
+        // Step 1: Scroll into view (CRITICAL for off-screen elements)
+        console.log(`     → Scrolling farm into view...`);
+        await farmLink.scrollIntoViewIfNeeded();
+        await page.waitForTimeout(500); // Let scroll animation finish
+        
+        // Step 2: Get the target URL for validation
+        const expectedHref = await farmLink.getAttribute('href');
+        console.log(`     → Target URL: ${expectedHref}`);
+        
+        // Step 3: Force click (bypasses overlays like sticky headers)
+        console.log(`     → Clicking farm link...`);
+        await farmLink.click({ force: true });
+        
+        // Step 4: Validate the click worked (URL should change)
+        console.log(`     → Waiting for navigation...`);
+        await page.waitForTimeout(2000); // Wait for URL to update
+        
+        const currentURL = page.url();
+        const urlChanged = currentURL.includes('/report/point/');
+        
+        if (urlChanged) {
+          console.log(`  ✅ Successfully clicked farm "${currentFarm.name}"`);
+          console.log(`     → URL updated to: ${currentURL}`);
+          
+          // Wait for right panel to load data
+          await page.waitForTimeout(3000);
+        } else {
+          console.log(`  ⚠️  Click may have failed - URL did not change`);
+          console.log(`     → Current URL: ${currentURL}`);
+          console.log(`     → Expected pattern: /report/point/`);
+          console.log(`     → Skipping this farm...
+`);
           continue;
-      }
-    } catch (error) {
-        console.log(`  ⚠️  Error clicking farm: ${error.message}, skipping...\n`);
+        }
+      } catch (error) {
+        console.log(`  ⚠️  Error clicking farm: ${error.message}`);
+        console.log(`     → This could be due to: element detached, timeout, or network issue`);
+        console.log(`     → Skipping this farm...
+`);
         continue;
-    }
+      }
     
     // Step: Navigate to 5 days ago using "Previous period" button
     console.log(`\n  🔙 Navigating to 5 days ago...`);
@@ -772,10 +812,220 @@ async function main() {
         if (tableStatus.needsFirstClick || tableStatus.needsLastClick) {
         console.log('  ⚠️  Tables need data, clicking chart points...\n');
         
-        // Wait longer for Highcharts to initialize
-        await page.waitForTimeout(3000);
-        
-        // Professional chart point detection API  
+        // NETWORK INTERCEPTION APPROACH (Replaces Highcharts DOM access)
+        console.log('  ⏳ Waiting for chart data from network...');
+        try {
+          // Wait for the API response to be captured
+          const chartData = await waitForChartData(networkData, 10000);
+          console.log('  ✅ Chart data successfully captured from network!\n');
+          
+          // Extract normalized data points
+          const dataPoints = extractDataPoints(chartData);
+          
+          if (!dataPoints || dataPoints.length < 10) {
+            console.log('  ⚠️  Insufficient data points for analysis');
+            console.log(`     → Got ${dataPoints?.length || 0} points, need at least 10`);
+            console.log('     → Skipping chart interaction for this date\n');
+            
+            // Skip to next date
+            if (dayOffset < totalDaysToCheck - 1) {
+              console.log(`     ⏭️  Moving to next date...`);
+              const nextClicked = await page.evaluate(() => {
+                const nextButton = document.querySelector('button[aria-label="다음 기간"]');
+                if (nextButton) {
+                  nextButton.click();
+                  return true;
+                }
+                return false;
+              });
+              
+              if (nextClicked) {
+                await page.waitForTimeout(2000);
+              }
+            }
+            continue; // Skip to next date
+          }
+          
+          console.log(`  📊 Analyzing ${dataPoints.length} data points for irrigation events...`);
+          
+          // 🔬 HSSP (High Sensitivity Surge & Peak) Algorithm
+          // Purpose: Catch gentle first irrigations + Find exact valley bottoms
+          
+          const yValues = dataPoints.map(p => p.y);
+          const maxY = Math.max(...yValues);
+          const minY = Math.min(...yValues);
+          const yRange = maxY - minY;
+          
+          console.log(`     → Y range: ${minY.toFixed(2)} to ${maxY.toFixed(2)} (span: ${yRange.toFixed(2)})`);
+          
+          // HIGH SENSITIVITY: Lower threshold to catch gentle slopes
+          const SURGE_THRESHOLD = Math.max(0.015, yRange * 0.01); // 1% of range OR 0.015, whichever is higher
+          const DEBOUNCE_MINUTES = 20; // Minutes between events
+          const DEBOUNCE_POINTS = Math.floor(DEBOUNCE_MINUTES / 1); // Assuming 1-min intervals
+          
+          console.log(`     → Surge threshold: ${SURGE_THRESHOLD.toFixed(4)} (high sensitivity mode)`);
+          
+          const allEvents = [];
+          let lastEventIndex = -DEBOUNCE_POINTS;
+          
+          // SCAN: Minute by minute
+          for (let i = 5; i < dataPoints.length - 5; i++) {
+            const currentVal = dataPoints[i].y;
+            const prevVal = dataPoints[i - 1].y;
+            const diff = currentVal - prevVal;
+            
+            // DETECT: Any positive surge
+            if (diff > SURGE_THRESHOLD && i > lastEventIndex + DEBOUNCE_POINTS) {
+              console.log(`     → Surge detected at index ${i} (slope: ${diff.toFixed(4)})`);
+              
+              // TRACE-BACK: Find the absolute valley bottom
+              let valleyIndex = i - 1; // Start just before the surge
+              let traceSteps = 0;
+              const maxTraceBack = Math.min(120, i); // Max 2 hours back
+              
+              while (valleyIndex > 0 && traceSteps < maxTraceBack) {
+                const curr = dataPoints[valleyIndex].y;
+                const prev = dataPoints[valleyIndex - 1].y;
+                
+                // Check for large time gap (> 20 minutes)
+                const timeGap = dataPoints[valleyIndex].x - dataPoints[valleyIndex - 1].x;
+                if (timeGap > 1200000) { // 20 minutes in ms
+                  console.log(`     → Large time gap detected (${(timeGap/60000).toFixed(1)} min), stopping trace-back`);
+                  break;
+                }
+                
+                // KEY: Stop when previous value is HIGHER (we crossed the valley)
+                if (prev > curr) {
+                  console.log(`     → Valley found: prev=${prev.toFixed(3)} > curr=${curr.toFixed(3)}`);
+                  break;
+                }
+                
+                // Keep going back (descending or flat)
+                valleyIndex--;
+                traceSteps++;
+              }
+              
+              // VALIDATE: Must be in "Yellow Zone" (07:00 - 17:00)
+              const eventTimestamp = dataPoints[valleyIndex].x;
+              const eventDate = new Date(eventTimestamp);
+              const eventHour = eventDate.getHours();
+              const eventMinute = eventDate.getMinutes();
+              const isDaytime = eventHour >= 7 && eventHour <= 17;
+              
+              const timeStr = `${String(eventHour).padStart(2, '0')}:${String(eventMinute).padStart(2, '0')}`;
+              
+              console.log(`     → Traced back ${traceSteps} steps to index ${valleyIndex}`);
+              console.log(`     → Valley time: ${timeStr} (hour: ${eventHour})`);
+              console.log(`     → Valley Y: ${dataPoints[valleyIndex].y.toFixed(3)}, Peak Y: ${currentVal.toFixed(3)}`);
+              console.log(`     → Rise: ${(currentVal - dataPoints[valleyIndex].y).toFixed(3)}`);
+              console.log(`     → Daytime filter: ${isDaytime ? '✅ PASS' : '❌ SKIP (outside 07:00-17:00)'}`);
+              
+              if (isDaytime) {
+                allEvents.push({
+                  index: valleyIndex,
+                  x: dataPoints[valleyIndex].x,
+                  y: dataPoints[valleyIndex].y,
+                  peakIndex: i,
+                  rise: currentVal - dataPoints[valleyIndex].y,
+                  time: timeStr
+                });
+                
+                lastEventIndex = valleyIndex;
+                i = Math.max(i, valleyIndex + 15); // Skip forward to avoid re-detecting
+              } else {
+                console.log(`     → Event rejected (outside active hours)`);
+              }
+            }
+          }
+          
+          console.log(`  🔬 [HSSP] Raw detections: ${allEvents.length} events`);
+          
+          // DE-DUPLICATE: Keep events at least 5% apart
+          const uniqueEvents = [];
+          const minSeparation = dataPoints.length * 0.05;
+          
+          for (const event of allEvents) {
+            let isDuplicate = false;
+            for (const existing of uniqueEvents) {
+              if (Math.abs(event.index - existing.index) < minSeparation) {
+                isDuplicate = true;
+                // Keep the one with larger rise
+                if (event.rise > existing.rise) {
+                  uniqueEvents[uniqueEvents.indexOf(existing)] = event;
+                  console.log(`     → Replaced duplicate: kept event at ${event.time} (larger rise)`);
+                }
+                break;
+              }
+            }
+            if (!isDuplicate) {
+              uniqueEvents.push(event);
+            }
+          }
+          
+
+          console.log(`  ✅ Found ${uniqueEvents.length} irrigation events`);
+          
+          if (uniqueEvents.length === 0) {
+            console.log('     → No irrigation detected for this date\n');
+            // Skip to next date
+            if (dayOffset < totalDaysToCheck - 1) {
+              console.log(`     ⏭️  Moving to next date...`);
+              const nextClicked = await page.evaluate(() => {
+                const nextButton = document.querySelector('button[aria-label="다음 기간"]');
+                if (nextButton) {
+                  nextButton.click();
+                  return true;
+                }
+                return false;
+              });
+              
+              if (nextClicked) {
+                await page.waitForTimeout(2000);
+              }
+            }
+            continue;
+          }
+          
+          // Sort by index
+          uniqueEvents.sort((a, b) => a.index - b.index);
+          
+          const firstEvent = uniqueEvents[0];
+          const lastEvent = uniqueEvents[uniqueEvents.length - 1];
+          
+          console.log(`     → First event at index ${firstEvent.index}`);
+          console.log(`     → Last event at index ${lastEvent.index}`);
+          console.log(`  🎯 Now attempting to click chart at these positions...\n`);
+          
+          // TODO: Actually click the chart points using the indices
+          // For now, we've successfully analyzed the data!
+          // The clicking logic using Highcharts API can be kept if it works,
+          // or we can implement coordinate-based clicking
+          
+        } catch (timeoutError) {
+          console.log('  ⚠️  Network data capture timed out after 10 seconds');
+          console.log('     → Chart data API may not have been called');
+          console.log('     → Or API response format is different than expected');
+          console.log('     → Skipping chart interaction for this date\n');
+          
+          // Skip to next date if data unavailable
+          if (dayOffset < totalDaysToCheck - 1) {
+            console.log(`     ⏭️  Moving to next date...`);
+            const nextClicked = await page.evaluate(() => {
+              const nextButton = document.querySelector('button[aria-label="다음 기간"]');
+              if (nextButton) {
+                nextButton.click();
+                return true;
+              }
+              return false;
+            });
+            
+            if (nextClicked) {
+              await page.waitForTimeout(2000);
+            }
+          }
+          continue; // Skip to next date
+        }
+
         const clickResults = await page.evaluate((needs) => {
           const results = [];
           
