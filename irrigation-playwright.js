@@ -847,30 +847,68 @@ async function main() {
           
           console.log(`  📊 Analyzing ${dataPoints.length} data points for irrigation events...`);
           
-          // Simple spike detection (find significant drops in Y value)
+          // 🔧 NEW: "Look-Back" Algorithm - Finds valley BEFORE surge starts
           const yValues = dataPoints.map(p => p.y);
           const maxY = Math.max(...yValues);
           const minY = Math.min(...yValues);
           const yRange = maxY - minY;
-          const dropThreshold = yRange * 0.08; // 8% drop
+          
+          // Dynamic threshold based on data range (more robust)
+          const surgeThreshold = yRange * 0.02; // 2% rise = surge detected
+          const minSlope = yRange * 0.005; // 0.5% = still rising
+          
+          console.log(`     → Y range: ${minY.toFixed(2)} to ${maxY.toFixed(2)} (span: ${yRange.toFixed(2)})`);
+          console.log(`     → Surge threshold: ${surgeThreshold.toFixed(3)} (2% of range)`);
           
           const irrigationEvents = [];
-          for (let i = 10; i < dataPoints.length - 10; i++) {
-            const before = dataPoints.slice(i - 10, i);
-            const after = dataPoints.slice(i, i + 10);
+          let isInEvent = false;
+          
+          for (let i = 5; i < dataPoints.length - 5; i++) {
+            const current = dataPoints[i].y;
+            const previous = dataPoints[i - 1].y;
+            const slope = current - previous;
             
-            const avgBefore = before.reduce((sum, p) => sum + p.y, 0) / before.length;
-            const avgAfter = after.reduce((sum, p) => sum + p.y, 0) / after.length;
-            
-            const drop = Math.abs(avgAfter - avgBefore);
-            
-            if (drop >= dropThreshold) {
+            // 1. DETECT SURGE: Significant positive slope
+            if (!isInEvent && slope > surgeThreshold) {
+              console.log(`     → Surge detected at index ${i} (slope: ${slope.toFixed(3)})`);
+              
+              // 2. LOOK BACK: Find the true valley point
+              let valleyIndex = i - 1;
+              let lookbackSteps = 0;
+              const maxLookback = Math.min(30, i); // Look back up to 30 points or to start
+              
+              // Walk backward while values are still increasing (go back before the rise started)
+              while (lookbackSteps < maxLookback && valleyIndex > 0) {
+                const currentVal = dataPoints[valleyIndex].y;
+                const prevVal = dataPoints[valleyIndex - 1].y;
+                const backSlope = currentVal - prevVal;
+                
+                // Stop when we hit a point that was going down or flat (found the valley!)
+                if (backSlope <= minSlope) {
+                  break;
+                }
+                
+                valleyIndex--;
+                lookbackSteps++;
+              }
+              
+              console.log(`     → Looked back ${lookbackSteps} steps: Valley at index ${valleyIndex}`);
+              console.log(`     → Valley Y: ${dataPoints[valleyIndex].y.toFixed(3)}, Peak Y: ${current.toFixed(3)}`);
+              
               irrigationEvents.push({
-                index: i,
-                x: dataPoints[i].x,
-                y: dataPoints[i].y,
-                drop: drop
+                index: valleyIndex, // The TRUE start point (valley)
+                x: dataPoints[valleyIndex].x,
+                y: dataPoints[valleyIndex].y,
+                peakIndex: i, // For reference
+                rise: current - dataPoints[valleyIndex].y
               });
+              
+              isInEvent = true;
+            }
+            
+            // 3. RESET: When slope flattens or drops, event is over
+            if (isInEvent && slope < -surgeThreshold * 0.5) {
+              isInEvent = false;
             }
           }
           
