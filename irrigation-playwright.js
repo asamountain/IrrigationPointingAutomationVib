@@ -11,6 +11,7 @@ import { chromium } from 'playwright';
 import fs from 'fs';
 import path from 'path';
 import DashboardServer from './dashboard-server.js';
+import { setupNetworkInterception, waitForChartData, extractDataPoints } from './network-interceptor.js';
 
 // Configuration (move to config.js later)
 const CONFIG = {
@@ -525,6 +526,10 @@ async function main() {
         dashboard.updateProgress(farmIdx + 1, currentConfig.maxFarms, currentFarm.name);
       }
       
+      // Set up network interception to capture chart data
+      console.log('  🌐 Setting up network interception...');
+      const networkData = setupNetworkInterception(page);
+      
       // Click the farm - MODERN APPROACH (Scroll + Force Click + Validate)
       try {
         console.log(`  🎯 Attempting to click farm: "${currentFarm.name}"`);
@@ -806,21 +811,134 @@ async function main() {
         if (tableStatus.needsFirstClick || tableStatus.needsLastClick) {
         console.log('  ⚠️  Tables need data, clicking chart points...\n');
         
-        // Wait longer for Highcharts to initialize - WITH ACTIVE POLLING
-        console.log('  ⏳ Waiting for Highcharts library to load...');
+        // NETWORK INTERCEPTION APPROACH (Replaces Highcharts DOM access)
+        console.log('  ⏳ Waiting for chart data from network...');
         try {
-          await page.waitForFunction(
-            () => window.Highcharts && window.Highcharts.charts && window.Highcharts.charts.length > 0,
-            { timeout: 10000 } // Wait up to 10 seconds
-          );
-          console.log('  ✅ Highcharts loaded successfully\n');
+          // Wait for the API response to be captured
+          const chartData = await waitForChartData(networkData, 10000);
+          console.log('  ✅ Chart data successfully captured from network!\n');
+          
+          // Extract normalized data points
+          const dataPoints = extractDataPoints(chartData);
+          
+          if (!dataPoints || dataPoints.length < 10) {
+            console.log('  ⚠️  Insufficient data points for analysis');
+            console.log(`     → Got ${dataPoints?.length || 0} points, need at least 10`);
+            console.log('     → Skipping chart interaction for this date\n');
+            
+            // Skip to next date
+            if (dayOffset < totalDaysToCheck - 1) {
+              console.log(`     ⏭️  Moving to next date...`);
+              const nextClicked = await page.evaluate(() => {
+                const nextButton = document.querySelector('button[aria-label="다음 기간"]');
+                if (nextButton) {
+                  nextButton.click();
+                  return true;
+                }
+                return false;
+              });
+              
+              if (nextClicked) {
+                await page.waitForTimeout(2000);
+              }
+            }
+            continue; // Skip to next date
+          }
+          
+          console.log(`  📊 Analyzing ${dataPoints.length} data points for irrigation events...`);
+          
+          // Simple spike detection (find significant drops in Y value)
+          const yValues = dataPoints.map(p => p.y);
+          const maxY = Math.max(...yValues);
+          const minY = Math.min(...yValues);
+          const yRange = maxY - minY;
+          const dropThreshold = yRange * 0.08; // 8% drop
+          
+          const irrigationEvents = [];
+          for (let i = 10; i < dataPoints.length - 10; i++) {
+            const before = dataPoints.slice(i - 10, i);
+            const after = dataPoints.slice(i, i + 10);
+            
+            const avgBefore = before.reduce((sum, p) => sum + p.y, 0) / before.length;
+            const avgAfter = after.reduce((sum, p) => sum + p.y, 0) / after.length;
+            
+            const drop = Math.abs(avgAfter - avgBefore);
+            
+            if (drop >= dropThreshold) {
+              irrigationEvents.push({
+                index: i,
+                x: dataPoints[i].x,
+                y: dataPoints[i].y,
+                drop: drop
+              });
+            }
+          }
+          
+          // De-duplicate (keep events at least 5% apart)
+          const uniqueEvents = [];
+          const minSeparation = dataPoints.length * 0.05;
+          
+          for (const event of irrigationEvents) {
+            let isDuplicate = false;
+            for (const existing of uniqueEvents) {
+              if (Math.abs(event.index - existing.index) < minSeparation) {
+                isDuplicate = true;
+                if (event.drop > existing.drop) {
+                  uniqueEvents[uniqueEvents.indexOf(existing)] = event;
+                }
+                break;
+              }
+            }
+            if (!isDuplicate) {
+              uniqueEvents.push(event);
+            }
+          }
+          
+          console.log(`  ✅ Found ${uniqueEvents.length} irrigation events`);
+          
+          if (uniqueEvents.length === 0) {
+            console.log('     → No irrigation detected for this date\n');
+            // Skip to next date
+            if (dayOffset < totalDaysToCheck - 1) {
+              console.log(`     ⏭️  Moving to next date...`);
+              const nextClicked = await page.evaluate(() => {
+                const nextButton = document.querySelector('button[aria-label="다음 기간"]');
+                if (nextButton) {
+                  nextButton.click();
+                  return true;
+                }
+                return false;
+              });
+              
+              if (nextClicked) {
+                await page.waitForTimeout(2000);
+              }
+            }
+            continue;
+          }
+          
+          // Sort by index
+          uniqueEvents.sort((a, b) => a.index - b.index);
+          
+          const firstEvent = uniqueEvents[0];
+          const lastEvent = uniqueEvents[uniqueEvents.length - 1];
+          
+          console.log(`     → First event at index ${firstEvent.index}`);
+          console.log(`     → Last event at index ${lastEvent.index}`);
+          console.log(`  🎯 Now attempting to click chart at these positions...\n`);
+          
+          // TODO: Actually click the chart points using the indices
+          // For now, we've successfully analyzed the data!
+          // The clicking logic using Highcharts API can be kept if it works,
+          // or we can implement coordinate-based clicking
+          
         } catch (timeoutError) {
-          console.log('  ⚠️  Highcharts did not load within 10 seconds');
-          console.log('     → Chart may not have rendered yet');
-          console.log('     → Or page structure may have changed');
+          console.log('  ⚠️  Network data capture timed out after 10 seconds');
+          console.log('     → Chart data API may not have been called');
+          console.log('     → Or API response format is different than expected');
           console.log('     → Skipping chart interaction for this date\n');
           
-          // Skip to next date if Highcharts isn't available
+          // Skip to next date if data unavailable
           if (dayOffset < totalDaysToCheck - 1) {
             console.log(`     ⏭️  Moving to next date...`);
             const nextClicked = await page.evaluate(() => {
@@ -838,6 +956,7 @@ async function main() {
           }
           continue; // Skip to next date
         }
+
         const clickResults = await page.evaluate((needs) => {
           const results = [];
           
