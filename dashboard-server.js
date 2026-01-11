@@ -32,9 +32,22 @@ class DashboardServer {
         this.handleRequest(req, res);
       });
 
-      this.server.listen(this.port, () => {
-        console.log(`📊 Dashboard server started at http://localhost:${this.port}`);
-        resolve(`http://localhost:${this.port}`);
+      this.server.listen(this.port, async () => {
+        const url = `http://localhost:${this.port}`;
+        console.log(`📊 Dashboard server started at ${url}`);
+        console.log(`📊 Dashboard ready at: ${url}`);
+        console.log(`   → Open this URL to configure and start automation`);
+        
+        // Auto-open browser
+        try {
+          const { default: open } = await import('open');
+          await open(url);
+          console.log('✨ Browser launched automatically!');
+        } catch (err) {
+          console.log('⚠️  Could not open browser automatically (Manual open required)');
+        }
+        
+        resolve(url);
       });
 
       this.server.on('error', (error) => {
