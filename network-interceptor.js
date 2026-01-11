@@ -113,17 +113,42 @@ export function extractDataPoints(apiResponse) {
     return null;
   }
   
-  // Check first entry to see what sensors are available
-  const firstEntry = nodeData[0];
-  const sensorKeys = Object.keys(firstEntry).filter(k => 
-    k.toLowerCase().includes('slab') || 
-    k.toLowerCase().includes('wgt') ||
-    k.toLowerCase().includes('vwc')
-  );
+  // 🔧 FIX: Find first non-empty entry (skip empty objects)
+  let firstEntry = null;
+  let skipCount = 0;
+  for (let i = 0; i < Math.min(20, nodeData.length); i++) {
+    const entry = nodeData[i];
+    if (entry && Object.keys(entry).length > 0) {
+      firstEntry = entry;
+      skipCount = i;
+      break;
+    }
+  }
+  
+  if (!firstEntry) {
+    console.log('⚠️  [NETWORK] All entries are empty objects');
+    return null;
+  }
+  
+  if (skipCount > 0) {
+    console.log(`   → Skipped ${skipCount} empty entries, using entry [${skipCount}]`);
+  }
+  
+  // 🔧 FIX: Look for sensor keys with dynamic suffixes (slabwgt_1, calslabvwc_1, etc.)
+  const allKeys = Object.keys(firstEntry);
+  console.log(`   → Keys in first valid entry: ${allKeys.join(', ')}`);
+  
+  const sensorKeys = allKeys.filter(k => {
+    const lower = k.toLowerCase();
+    return (lower.includes('slabwgt') || 
+            lower.includes('slabvwc') || 
+            lower.includes('calslabvwc')) && 
+           k !== 'timestamp' && k !== 't' && k !== 'time';
+  });
   
   console.log(`   → Available sensors: ${sensorKeys.join(', ')}`);
   
-  // Prefer "slabwgt" (weight sensor)
+  // Prefer weight sensors (slabwgt_*)
   let targetSensor = sensorKeys.find(k => k.toLowerCase().includes('wgt'));
   if (!targetSensor) {
     targetSensor = sensorKeys[0]; // Fall back to first available
@@ -131,7 +156,7 @@ export function extractDataPoints(apiResponse) {
   
   if (!targetSensor) {
     console.log('⚠️  [NETWORK] No recognized sensor data found');
-    console.log(`   → Available keys: ${Object.keys(firstEntry).join(', ')}`);
+    console.log(`   → Available keys: ${allKeys.join(', ')}`);
     return null;
   }
   
