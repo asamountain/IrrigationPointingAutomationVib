@@ -1,12 +1,8 @@
 /**
- * Network Interception Module
- * Captures chart data from API responses instead of DOM access
+ * Updated Network Interceptor - Looks for "node." keys
+ * Based on actual app structure discovered in Webpack bundle
  */
 
-/**
- * Set up network monitoring to capture chart data
- * Call this BEFORE navigating to a farm
- */
 export function setupNetworkInterception(page) {
   const capturedData = {
     chartData: null,
@@ -18,45 +14,36 @@ export function setupNetworkInterception(page) {
   page.on('response', async (response) => {
     try {
       const url = response.url();
-      const method = response.request().method();
+      const resourceType = response.request().resourceType();
       const status = response.status();
 
-      // Look for API calls that might contain chart data
-      const isPotentialDataUrl = 
-        (url.includes('/report/point') || 
-         url.includes('/api/') ||
-         url.includes('/data/')) &&
-        method === 'GET' &&
-        status === 200;
+      // Filter: Only check fetch/xhr requests with 200 status
+      if ((resourceType !== 'fetch' && resourceType !== 'xhr') || status !== 200) {
+        return;
+      }
 
-      if (isPotentialDataUrl) {
-        console.log(`🔍 [NETWORK] Intercepted: ${url.substring(url.length - 80)}`);
+      const contentType = response.headers()['content-type'] || '';
+      if (!contentType.includes('application/json')) {
+        return;
+      }
+
+      // Try to parse as JSON
+      try {
+        const data = await response.json();
         
-        const contentType = response.headers()['content-type'] || '';
+        // ✅ THE SECRET SAUCE: Look for "node." keys (discovered in source code)
+        const nodeKeys = Object.keys(data).filter(key => key.startsWith('node.'));
         
-        if (contentType.includes('application/json')) {
-          try {
-            const data = await response.json();
-            
-            // Check if this looks like chart data
-            const hasChartData = 
-              (data.data && Array.isArray(data.data)) ||
-              (data.series && Array.isArray(data.series)) ||
-              (data.items && Array.isArray(data.items)) ||
-              (Array.isArray(data) && data.length > 100); // Large array likely chart data
-            
-            if (hasChartData) {
-              console.log(`✅ [NETWORK] Found chart data! URL: ${url}`);
-              console.log(`   → Data structure: ${Object.keys(data).join(', ')}`);
-              
-              capturedData.chartData = data;
-              capturedData.dataUrl = url;
-              capturedData.timestamp = Date.now();
-            }
-          } catch (jsonError) {
-            // Not JSON or parse failed, ignore
-          }
+        if (nodeKeys.length > 0) {
+          console.log(`✅ [NETWORK] Found "node." data! URL: ${url.substring(Math.max(0, url.length - 80))}`);
+          console.log(`   → Node keys: ${nodeKeys.join(', ')}`);
+          
+          capturedData.chartData = data;
+          capturedData.dataUrl = url;
+          capturedData.timestamp = Date.now();
         }
+      } catch (jsonError) {
+        // Not JSON or parse failed, ignore
       }
     } catch (err) {
       // Ignore errors from closed responses
@@ -66,85 +53,98 @@ export function setupNetworkInterception(page) {
   return capturedData;
 }
 
-/**
- * Wait for chart data to be captured via network
- */
-export async function waitForChartData(capturedData, timeoutMs = 10000) {
+export async function waitForChartData(capturedData, timeoutMs = 15000) {
   const startTime = Date.now();
+  
+  console.log('  ⏳ Waiting for sensor data (looking for "node." keys)...');
   
   while (Date.now() - startTime < timeoutMs) {
     if (capturedData.chartData) {
-      console.log(`✅ [NETWORK] Chart data captured after ${Date.now() - startTime}ms`);
+      console.log(`  ✅ Sensor data captured after ${Date.now() - startTime}ms\n`);
       return capturedData.chartData;
     }
     await new Promise(resolve => setTimeout(resolve, 100)); // Poll every 100ms
   }
   
-  throw new Error(`Timeout: No chart data captured within ${timeoutMs}ms`);
+  throw new Error(`Timeout: No sensor data with "node." keys found within ${timeoutMs}ms`);
 }
 
-/**
- * Extract data points from various API response formats
- */
 export function extractDataPoints(apiResponse) {
-  console.log('🔍 [NETWORK] Analyzing API response structure...');
+  console.log('🔍 [NETWORK] Analyzing API response for sensor data...');
   
-  // Try different common formats
-  let dataPoints = null;
+  // Find the "node." key
+  const nodeKeys = Object.keys(apiResponse).filter(key => key.startsWith('node.'));
   
-  // Format 1: { data: [...] }
-  if (apiResponse.data && Array.isArray(apiResponse.data)) {
-    dataPoints = apiResponse.data;
-    console.log(`   → Format: { data: [...] } with ${dataPoints.length} points`);
-  }
-  // Format 2: { series: [{ data: [...] }] }
-  else if (apiResponse.series && Array.isArray(apiResponse.series) && apiResponse.series[0]?.data) {
-    dataPoints = apiResponse.series[0].data;
-    console.log(`   → Format: { series: [{ data: [...] }] } with ${dataPoints.length} points`);
-  }
-  // Format 3: { items: [...] }
-  else if (apiResponse.items && Array.isArray(apiResponse.items)) {
-    dataPoints = apiResponse.items;
-    console.log(`   → Format: { items: [...] } with ${dataPoints.length} points`);
-  }
-  // Format 4: Direct array
-  else if (Array.isArray(apiResponse)) {
-    dataPoints = apiResponse;
-    console.log(`   → Format: Direct array with ${dataPoints.length} points`);
-  }
-  
-  if (!dataPoints) {
-    console.log('⚠️  [NETWORK] Could not identify data array in response');
-    console.log(`   → Available keys: ${Object.keys(apiResponse).join(', ')}`);
+  if (nodeKeys.length === 0) {
+    console.log('⚠️  [NETWORK] No "node." keys found in response');
     return null;
   }
   
-  // Normalize data points to { x, y } format
-  const normalizedPoints = dataPoints.map((point, idx) => {
-    // Format: [timestamp, value]
-    if (Array.isArray(point) && point.length >= 2) {
-      return { x: point[0], y: point[1], index: idx };
-    }
-    // Format: { x, y }
-    else if (typeof point === 'object' && 'y' in point) {
-      return { x: point.x !== undefined ? point.x : idx, y: point.y, index: idx };
-    }
-    // Format: { value, timestamp }
-    else if (typeof point === 'object' && 'value' in point) {
-      return { x: point.timestamp || point.time || idx, y: point.value, index: idx };
-    }
-    // Format: just numbers
-    else if (typeof point === 'number') {
-      return { x: idx, y: point, index: idx };
+  console.log(`   → Found ${nodeKeys.length} node key(s): ${nodeKeys.join(', ')}`);
+  
+  // Get the first node's data
+  const nodeKey = nodeKeys[0];
+  const nodeData = apiResponse[nodeKey];
+  
+  if (!Array.isArray(nodeData)) {
+    console.log(`⚠️  [NETWORK] Node data is not an array: ${typeof nodeData}`);
+    return null;
+  }
+  
+  console.log(`   → Node "${nodeKey}" has ${nodeData.length} entries`);
+  
+  // Look for sensor keys (slabwgt, slabvwc, etc.)
+  if (nodeData.length === 0) {
+    console.log('⚠️  [NETWORK] Node data array is empty');
+    return null;
+  }
+  
+  // Check first entry to see what sensors are available
+  const firstEntry = nodeData[0];
+  const sensorKeys = Object.keys(firstEntry).filter(k => 
+    k.toLowerCase().includes('slab') || 
+    k.toLowerCase().includes('wgt') ||
+    k.toLowerCase().includes('vwc')
+  );
+  
+  console.log(`   → Available sensors: ${sensorKeys.join(', ')}`);
+  
+  // Prefer "slabwgt" (weight sensor)
+  let targetSensor = sensorKeys.find(k => k.toLowerCase().includes('wgt'));
+  if (!targetSensor) {
+    targetSensor = sensorKeys[0]; // Fall back to first available
+  }
+  
+  if (!targetSensor) {
+    console.log('⚠️  [NETWORK] No recognized sensor data found');
+    console.log(`   → Available keys: ${Object.keys(firstEntry).join(', ')}`);
+    return null;
+  }
+  
+  console.log(`   → Using sensor: "${targetSensor}"`);
+  
+  // Extract data points
+  const dataPoints = nodeData.map((entry, idx) => {
+    const value = entry[targetSensor];
+    if (value === null || value === undefined) {
+      return null;
     }
     
-    return null;
+    // Try to get timestamp if available
+    const timestamp = entry.timestamp || entry.time || entry.t || idx;
+    
+    return {
+      x: timestamp,
+      y: parseFloat(value),
+      index: idx
+    };
   }).filter(p => p !== null);
   
-  console.log(`✅ [NETWORK] Normalized ${normalizedPoints.length} data points`);
-  if (normalizedPoints.length > 0) {
-    console.log(`   → Sample: [0] = {x: ${normalizedPoints[0].x}, y: ${normalizedPoints[0].y}}`);
+  console.log(`✅ [NETWORK] Extracted ${dataPoints.length} data points from "${targetSensor}"`);
+  if (dataPoints.length > 0) {
+    const sample = dataPoints[Math.floor(dataPoints.length / 2)];
+    console.log(`   → Sample (middle): [${sample.index}] = {x: ${sample.x}, y: ${sample.y}}`);
   }
   
-  return normalizedPoints;
+  return dataPoints;
 }
