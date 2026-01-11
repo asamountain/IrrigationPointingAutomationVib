@@ -419,9 +419,17 @@ async function main() {
           const farmDivs = tabs.querySelectorAll('div > div:first-child > div:nth-child(2) > div');
           farmDivs.forEach((div, idx) => {
             const text = div.textContent.trim();
-            if (text && text.length > 0) {
-              farms.push({ index: idx + 1, name: text });
-            }
+            
+            // BUGFIX: Filter out invalid elements
+            if (!text || text.length < 20 || text.length > 800) return;
+            if (/\d{4}년|\d{2}월|\d{2}일/.test(text)) return; // Skip dates
+            if (text.includes('전체 보기') || text.includes('저장')) return; // Skip UI buttons
+            if (text.includes('Created with') || text.includes('Highcharts')) return; // Skip chart
+            if (/^\d{2}:\d{2}/.test(text)) return; // Skip if starts with time
+            if (text.startsWith('구역')) return; // Skip table labels
+            
+            console.log(`[BROWSER] ✓ Valid farm: ${text.substring(0, 50)}...`);
+            farms.push({ index: idx + 1, name: text });
           });
         }
         return farms;
@@ -635,7 +643,7 @@ async function main() {
           const text = (elem.textContent || '').trim();
           
           // Must match EXACTLY the label (to avoid picking up "진우")
-          if (text === firstTimeLabel && elem.children.length === 0) {
+          if (text.includes('첫 급액 시간') && elem.children.length === 0) {
             results.debug.push(`Found first label: ${elem.tagName}`);
             
             // Look in parent container for input or value display
@@ -664,7 +672,7 @@ async function main() {
             }
           }
           
-          if (text === lastTimeLabel && elem.children.length === 0) {
+          if (text.includes('마지막 급액 시간') && elem.children.length === 0) {
             results.debug.push(`Found last label: ${elem.tagName}`);
             
             let container = elem.closest('div, section, article');
