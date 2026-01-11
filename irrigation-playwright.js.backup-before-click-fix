@@ -525,55 +525,31 @@ async function main() {
         dashboard.updateProgress(farmIdx + 1, currentConfig.maxFarms, currentFarm.name);
       }
       
-      // Click the farm - MODERN APPROACH (Scroll + Force Click + Validate)
+      // Click the farm
       try {
-        console.log(`  🎯 Attempting to click farm: "${currentFarm.name}"`);
-        
-        // CRITICAL: Re-locate the element inside the loop using the SAME selector that found the farms
-        const farmContainer = page.locator('div.css-nd8svt');
-        const farmLink = farmContainer.locator('a[href*="/report/point/"]').nth(actualFarmIndex);
-        
-        // Step 1: Scroll into view (CRITICAL for off-screen elements)
-        console.log(`     → Scrolling farm into view...`);
-        await farmLink.scrollIntoViewIfNeeded();
-        await page.waitForTimeout(500); // Let scroll animation finish
-        
-        // Step 2: Get the target URL for validation
-        const expectedHref = await farmLink.getAttribute('href');
-        console.log(`     → Target URL: ${expectedHref}`);
-        
-        // Step 3: Force click (bypasses overlays like sticky headers)
-        console.log(`     → Clicking farm link...`);
-        await farmLink.click({ force: true });
-        
-        // Step 4: Validate the click worked (URL should change)
-        console.log(`     → Waiting for navigation...`);
-        await page.waitForTimeout(2000); // Wait for URL to update
-        
-        const currentURL = page.url();
-        const urlChanged = currentURL.includes('/report/point/');
-        
-        if (urlChanged) {
-          console.log(`  ✅ Successfully clicked farm "${currentFarm.name}"`);
-          console.log(`     → URL updated to: ${currentURL}`);
-          
-          // Wait for right panel to load data
-          await page.waitForTimeout(3000);
-        } else {
-          console.log(`  ⚠️  Click may have failed - URL did not change`);
-          console.log(`     → Current URL: ${currentURL}`);
-          console.log(`     → Expected pattern: /report/point/`);
-          console.log(`     → Skipping this farm...
-`);
+        const farmClicked = await page.evaluate((farmIndex) => {
+          const tabs = document.querySelector('[id*="tabs"][id*="content-point"]');
+          if (tabs) {
+            const targetDiv = tabs.querySelector(`div > div:first-child > div:nth-child(2) > div:nth-child(${farmIndex})`);
+            if (targetDiv) {
+              targetDiv.click();
+              return true;
+            }
+          }
+        return false;
+        }, currentFarm.index);
+      
+      if (farmClicked) {
+          console.log(`  ✅ Clicked farm "${currentFarm.name}"`);
+        await page.waitForTimeout(3000); // Wait for chart to load
+      } else {
+          console.log(`  ⚠️  Could not click farm "${currentFarm.name}", skipping...\n`);
           continue;
-        }
-      } catch (error) {
-        console.log(`  ⚠️  Error clicking farm: ${error.message}`);
-        console.log(`     → This could be due to: element detached, timeout, or network issue`);
-        console.log(`     → Skipping this farm...
-`);
-        continue;
       }
+    } catch (error) {
+        console.log(`  ⚠️  Error clicking farm: ${error.message}, skipping...\n`);
+        continue;
+    }
     
     // Step: Navigate to 5 days ago using "Previous period" button
     console.log(`\n  🔙 Navigating to 5 days ago...`);
