@@ -80,6 +80,14 @@ class DashboardServer {
     if (url.pathname === '/' || url.pathname === '/dashboard') {
       this.serveDashboard(res);
     }
+    // Serve history page
+    else if (url.pathname === '/history') {
+      this.serveHistory(res);
+    }
+    // API endpoint for history data
+    else if (url.pathname === '/api/history') {
+      this.serveHistoryData(res);
+    }
     // SSE endpoint for real-time updates
     else if (url.pathname === '/events') {
       this.handleSSE(req, res);
@@ -105,6 +113,23 @@ class DashboardServer {
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ success: true, config: this.config }));
           console.log(`✅ Configuration received from dashboard:`, this.config);
+        } catch (error) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, error: error.message }));
+        }
+      });
+    }
+    else if (url.pathname === '/control/start-report-sending' && req.method === 'POST') {
+      let body = '';
+      req.on('data', chunk => { body += chunk; });
+      req.on('end', () => {
+        try {
+          const config = JSON.parse(body);
+          this.config = { ...this.config, ...config, mode: 'report-sending' };
+          this.isStarted = true;
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: true, config: this.config }));
+          console.log(`📤 Report Sending Mode activated:`, this.config);
         } catch (error) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ success: false, error: error.message }));
@@ -169,6 +194,33 @@ class DashboardServer {
         return;
       }
       res.writeHead(200, { 'Content-Type': 'text/html' });
+      res.end(data);
+    });
+  }
+
+  serveHistory(res) {
+    const historyPath = path.join(__dirname, 'history.html');
+    fs.readFile(historyPath, 'utf8', (err, data) => {
+      if (err) {
+        res.writeHead(500);
+        res.end('Error loading history page');
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'text/html' });
+      res.end(data);
+    });
+  }
+
+  serveHistoryData(res) {
+    const historyFile = path.join(__dirname, 'history', 'run_logs.json');
+    fs.readFile(historyFile, 'utf8', (err, data) => {
+      if (err) {
+        // If file doesn't exist, return empty array
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify([]));
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(data);
     });
   }

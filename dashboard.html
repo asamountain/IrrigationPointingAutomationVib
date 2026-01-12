@@ -449,6 +449,9 @@
                         <option value="0">All Farms (from beginning)</option>
                         <!-- Dynamically generated options 1-100 -->
                     </select>
+                    <div id="farm-count-label" style="margin-top: 8px; font-size: 0.9em; color: #999; font-style: italic;">
+                        Dropdown will sync when automation starts
+                    </div>
                     <script>
                         // Generate farm options from 1 to 100
                         (function() {
@@ -484,6 +487,12 @@
             </div>
             <div class="start-container">
                 <button class="btn-start" id="btn-start" onclick="startAutomation()">🚀 Start Automation</button>
+                <button class="btn-primary" id="btn-send-reports" onclick="startReportSending()" style="margin-left: 15px; background: linear-gradient(135deg, #ff6b6b 0%, #ee5a6f 100%);">
+                    📤 Auto-Send Reports
+                </button>
+                <a href="/history" style="text-decoration: none;">
+                    <button class="btn-primary" style="margin-left: 15px;">📊 View History</button>
+                </a>
             </div>
         </div>
 
@@ -649,6 +658,50 @@
             }
         }
 
+        // 📤 NEW: Start Report Sending Automation
+        async function startReportSending() {
+            const managerSelect = document.getElementById('manager-select');
+            const customManager = document.getElementById('custom-manager');
+            const manager = managerSelect.value === 'custom' ? customManager.value.trim() : managerSelect.value;
+            const startFrom = parseInt(document.getElementById('start-from-select').value);
+            const maxFarms = parseInt(document.getElementById('max-farms-select').value);
+
+            if (!manager) {
+                alert('Please enter a manager name');
+                return;
+            }
+
+            // Send configuration to server for report sending mode
+            try {
+                const response = await fetch('http://localhost:3456/control/start-report-sending', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ manager, startFrom, maxFarms })
+                });
+
+                if (response.ok) {
+                    automationStarted = true;
+                    
+                    // Hide config panel, show dashboard
+                    document.getElementById('config-panel').classList.add('hidden');
+                    document.getElementById('status-bar').classList.remove('hidden');
+                    document.getElementById('dashboard-grid').classList.remove('hidden');
+                    document.getElementById('controls-panel').classList.remove('hidden');
+                    
+                    // Update manager display
+                    document.getElementById('manager').textContent = manager;
+                    
+                    addLog(`🚀 Starting Report Sending Mode with manager: ${manager}`, 'success');
+                    addLog(`Starting from: ${startFrom === 0 ? 'All farms' : 'Farm #' + startFrom}`, 'info');
+                    addLog(`Max farms to process: ${maxFarms === 999 ? 'All' : maxFarms}`, 'info');
+                } else {
+                    alert('Failed to start report sending. Server may already be running.');
+                }
+            } catch (error) {
+                alert('Failed to connect to server: ' + error.message);
+            }
+        }
+
         // Connect to Server-Sent Events stream
         function connectToStream() {
             eventSource = new EventSource('http://localhost:3456/events');
@@ -701,12 +754,51 @@
                     progressDisplay.style.fontWeight = '600';
                 }
             }
+
+            // 🔄 NEW: Handle farm count sync from automation
+            if (data.type === 'update_farm_count') {
+                updateFarmDropdown(data.count);
+            }
         }
 
         function updateProgress(percent) {
             const progressBar = document.getElementById('progress');
             progressBar.style.width = percent + '%';
             progressBar.textContent = Math.round(percent) + '%';
+        }
+
+        // 🔄 NEW: Update farm dropdown based on real count from automation
+        function updateFarmDropdown(realCount) {
+            const select = document.getElementById('start-from-select');
+            const label = document.getElementById('farm-count-label');
+            const currentValue = parseInt(select.value);
+
+            // Update label
+            label.textContent = `✅ Found ${realCount} Farms`;
+            label.style.color = '#4a9b3c';
+            label.style.fontWeight = '600';
+            label.style.fontStyle = 'normal';
+
+            // Clear existing options (except "All Farms")
+            select.innerHTML = '<option value="0">All Farms (from beginning)</option>';
+
+            // Regenerate options from 1 to realCount
+            for (let i = 1; i <= realCount; i++) {
+                const option = document.createElement('option');
+                option.value = i;
+                option.textContent = `Farm #${i}`;
+                select.appendChild(option);
+            }
+
+            // Restore selection if still valid, otherwise reset to "All Farms"
+            if (currentValue > 0 && currentValue <= realCount) {
+                select.value = currentValue;
+            } else if (currentValue > realCount) {
+                select.value = 0; // Reset to "All Farms" if selection was invalid
+                addLog(`⚠️ Your selection (Farm #${currentValue}) exceeds available farms. Reset to "All Farms".`, 'warning');
+            }
+
+            console.log(`📡 Farm dropdown updated: ${realCount} farms available`);
         }
 
         function addLog(message, level = 'info') {

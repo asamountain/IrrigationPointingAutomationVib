@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Automation History & Statistics</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+            color: #e0e0e0;
+            padding: 20px;
+            min-height: 100vh;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            background: rgba(0, 0, 0, 0.5);
+            border-radius: 15px;
+            padding: 30px;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
+        }
+
+        h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+            color: #4fc3f7;
+            text-align: center;
+            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.5);
+        }
+
+        .subtitle {
+            text-align: center;
+            color: #b0bec5;
+            margin-bottom: 30px;
+            font-size: 1.1em;
+        }
+
+        .controls {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 25px;
+            flex-wrap: wrap;
+            gap: 15px;
+        }
+
+        .button {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 8px;
+            font-size: 1em;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            text-decoration: none;
+            display: inline-block;
+            box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
+        }
+
+        .button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(102, 126, 234, 0.6);
+        }
+
+        .stats-summary {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+
+        .stat-card {
+            background: linear-gradient(135deg, rgba(79, 195, 247, 0.2) 0%, rgba(100, 181, 246, 0.1) 100%);
+            border: 1px solid rgba(79, 195, 247, 0.3);
+            border-radius: 10px;
+            padding: 20px;
+            text-align: center;
+            transition: transform 0.3s ease;
+        }
+
+        .stat-card:hover {
+            transform: translateY(-5px);
+            border-color: rgba(79, 195, 247, 0.6);
+        }
+
+        .stat-value {
+            font-size: 2.5em;
+            font-weight: bold;
+            color: #4fc3f7;
+            margin-bottom: 5px;
+        }
+
+        .stat-label {
+            color: #b0bec5;
+            font-size: 0.9em;
+        }
+
+        .table-container {
+            overflow-x: auto;
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 10px;
+            padding: 20px;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            min-width: 800px;
+        }
+
+        thead {
+            background: linear-gradient(135deg, rgba(79, 195, 247, 0.3) 0%, rgba(100, 181, 246, 0.2) 100%);
+        }
+
+        th {
+            padding: 15px;
+            text-align: left;
+            font-weight: 600;
+            color: #4fc3f7;
+            border-bottom: 2px solid rgba(79, 195, 247, 0.5);
+        }
+
+        td {
+            padding: 12px 15px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        tbody tr {
+            transition: background-color 0.2s ease;
+        }
+
+        tbody tr:hover {
+            background: rgba(79, 195, 247, 0.1);
+        }
+
+        .status-success {
+            color: #66bb6a;
+            font-weight: bold;
+        }
+
+        .status-partial {
+            color: #ffa726;
+            font-weight: bold;
+        }
+
+        .status-failed {
+            color: #ef5350;
+            font-weight: bold;
+        }
+
+        .no-data {
+            text-align: center;
+            padding: 60px;
+            color: #b0bec5;
+            font-size: 1.2em;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 60px;
+            color: #4fc3f7;
+            font-size: 1.2em;
+        }
+
+        .error {
+            text-align: center;
+            padding: 60px;
+            color: #ef5350;
+            font-size: 1.2em;
+        }
+
+        @media (max-width: 768px) {
+            .container {
+                padding: 15px;
+            }
+
+            h1 {
+                font-size: 1.8em;
+            }
+
+            .stats-summary {
+                grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>📊 Automation History & Statistics</h1>
+        <p class="subtitle">Complete run history and performance metrics</p>
+
+        <div class="controls">
+            <a href="/dashboard" class="button">← Back to Dashboard</a>
+            <button onclick="loadHistory()" class="button">🔄 Refresh</button>
+        </div>
+
+        <div class="stats-summary" id="statsSummary">
+            <div class="stat-card">
+                <div class="stat-value" id="totalRuns">0</div>
+                <div class="stat-label">Total Runs</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="totalFarms">0</div>
+                <div class="stat-label">Total Farms Processed</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="totalCharts">0</div>
+                <div class="stat-label">Total Charts Clicked</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="avgSuccess">0%</div>
+                <div class="stat-label">Average Success Rate</div>
+            </div>
+        </div>
+
+        <div class="table-container">
+            <div id="loadingMessage" class="loading">Loading history data...</div>
+            <div id="errorMessage" class="error" style="display: none;">Error loading history data</div>
+            <div id="noDataMessage" class="no-data" style="display: none;">No automation runs recorded yet</div>
+            
+            <table id="historyTable" style="display: none;">
+                <thead>
+                    <tr>
+                        <th>Run Date & Time</th>
+                        <th>Farms Processed</th>
+                        <th>Charts Clicked</th>
+                        <th>Dates Processed</th>
+                        <th>Dates Skipped</th>
+                        <th>Success Rate</th>
+                        <th>Duration</th>
+                        <th>Date Range</th>
+                    </tr>
+                </thead>
+                <tbody id="historyBody">
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <script>
+        async function loadHistory() {
+            const loadingMessage = document.getElementById('loadingMessage');
+            const errorMessage = document.getElementById('errorMessage');
+            const noDataMessage = document.getElementById('noDataMessage');
+            const historyTable = document.getElementById('historyTable');
+            const historyBody = document.getElementById('historyBody');
+
+            // Show loading, hide others
+            loadingMessage.style.display = 'block';
+            errorMessage.style.display = 'none';
+            noDataMessage.style.display = 'none';
+            historyTable.style.display = 'none';
+
+            try {
+                const response = await fetch('/api/history');
+                if (!response.ok) {
+                    throw new Error('Failed to fetch history data');
+                }
+
+                const data = await response.json();
+
+                // Hide loading
+                loadingMessage.style.display = 'none';
+
+                if (data.length === 0) {
+                    noDataMessage.style.display = 'block';
+                    updateSummaryStats([]);
+                    return;
+                }
+
+                // Sort by date (most recent first)
+                data.sort((a, b) => new Date(b.startTime) - new Date(a.startTime));
+
+                // Update summary statistics
+                updateSummaryStats(data);
+
+                // Clear table body
+                historyBody.innerHTML = '';
+
+                // Populate table
+                data.forEach(run => {
+                    const row = document.createElement('tr');
+                    
+                    const startDate = new Date(run.startTime);
+                    const endDate = run.endTime ? new Date(run.endTime) : null;
+                    
+                    const duration = endDate 
+                        ? formatDuration((endDate - startDate) / 1000)
+                        : 'N/A';
+
+                    const successRate = run.farmsCompleted > 0
+                        ? ((run.successCount / run.datesProcessed) * 100).toFixed(1)
+                        : 0;
+
+                    const statusClass = successRate >= 90 
+                        ? 'status-success' 
+                        : successRate >= 50 
+                            ? 'status-partial' 
+                            : 'status-failed';
+
+                    row.innerHTML = `
+                        <td>${formatDateTime(startDate)}</td>
+                        <td>${run.farmsCompleted || 0}</td>
+                        <td>${run.chartsClicked || 0}</td>
+                        <td>${run.datesProcessed || 0}</td>
+                        <td>${run.skipCount || 0}</td>
+                        <td class="${statusClass}">${successRate}%</td>
+                        <td>${duration}</td>
+                        <td>${run.dateRange || 'N/A'}</td>
+                    `;
+
+                    historyBody.appendChild(row);
+                });
+
+                historyTable.style.display = 'table';
+
+            } catch (error) {
+                console.error('Error loading history:', error);
+                loadingMessage.style.display = 'none';
+                errorMessage.style.display = 'block';
+            }
+        }
+
+        function updateSummaryStats(data) {
+            const totalRuns = data.length;
+            const totalFarms = data.reduce((sum, run) => sum + (run.farmsCompleted || 0), 0);
+            const totalCharts = data.reduce((sum, run) => sum + (run.chartsClicked || 0), 0);
+            
+            let totalSuccessRate = 0;
+            let validRuns = 0;
+            
+            data.forEach(run => {
+                if (run.datesProcessed > 0) {
+                    totalSuccessRate += (run.successCount / run.datesProcessed) * 100;
+                    validRuns++;
+                }
+            });
+
+            const avgSuccess = validRuns > 0 ? (totalSuccessRate / validRuns).toFixed(1) : 0;
+
+            document.getElementById('totalRuns').textContent = totalRuns;
+            document.getElementById('totalFarms').textContent = totalFarms;
+            document.getElementById('totalCharts').textContent = totalCharts;
+            document.getElementById('avgSuccess').textContent = avgSuccess + '%';
+        }
+
+        function formatDateTime(date) {
+            const options = {
+                year: 'numeric',
+                month: 'short',
+                day: 'numeric',
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit'
+            };
+            return date.toLocaleString('en-US', options);
+        }
+
+        function formatDuration(seconds) {
+            const hours = Math.floor(seconds / 3600);
+            const minutes = Math.floor((seconds % 3600) / 60);
+            const secs = Math.floor(seconds % 60);
+
+            if (hours > 0) {
+                return `${hours}h ${minutes}m ${secs}s`;
+            } else if (minutes > 0) {
+                return `${minutes}m ${secs}s`;
+            } else {
+                return `${secs}s`;
+            }
+        }
+
+        // Load history on page load
+        loadHistory();
+    </script>
+</body>
+</html>
