@@ -447,12 +447,20 @@
                     <label class="config-label">🏭 Start From</label>
                     <select id="start-from-select">
                         <option value="0">All Farms (from beginning)</option>
-                        <option value="1">Farm #1</option>
-                        <option value="2">Farm #2</option>
-                        <option value="3">Farm #3</option>
-                        <option value="4">Farm #4</option>
-                        <option value="5">Farm #5</option>
+                        <!-- Dynamically generated options 1-100 -->
                     </select>
+                    <script>
+                        // Generate farm options from 1 to 100
+                        (function() {
+                            const select = document.getElementById('start-from-select');
+                            for (let i = 1; i <= 100; i++) {
+                                const option = document.createElement('option');
+                                option.value = i;
+                                option.textContent = `Farm #${i}`;
+                                select.appendChild(option);
+                            }
+                        })();
+                    </script>
                 </div>
             </div>
             <div class="config-grid">

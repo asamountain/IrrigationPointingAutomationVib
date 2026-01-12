@@ -156,6 +156,8 @@ async function main() {
   // Open automation page
   const page = await context.newPage();
   
+  // 🔒 AUTHENTICATION FIX: No resource blocking - allow all auth scripts to run
+  console.log('🔒 Authentication mode: All resources enabled for stable login');
   dashboard.log('Browser launched successfully', 'success');
   dashboard.log(`Dashboard accessible at ${dashboardUrl}`, 'success');
   
@@ -174,11 +176,13 @@ async function main() {
     dashboard.updateStep('Step 1: Navigating to report page', 10);
     dashboard.log('Navigating to admin.iofarm.com/report/', 'info');
     
-    await page.goto(CONFIG.url, { waitUntil: 'networkidle' });
+    await page.goto(CONFIG.url, { waitUntil: 'domcontentloaded', timeout: 15000 });
+    await page.waitForLoadState('domcontentloaded');
     
-    // Wait a few seconds as requested
-    console.log('  → Waiting for page to fully load...');
-    await page.waitForTimeout(3000);
+    // ⚡ SMART: Wait for body and ensure page is interactive
+    console.log('  → Waiting for page to be interactive...');
+    await page.waitForSelector('body', { state: 'attached', timeout: 5000 });
+    await page.waitForLoadState('load').catch(() => {}); // Allow some extra loading time
     
     // Show current URL
     const currentUrl1 = page.url();
@@ -196,6 +200,10 @@ async function main() {
     console.log('🔐 Step 2: Checking if login is required...');
     
     try {
+      // ⚡ SMART: Wait for page to be ready before checking for login form
+      await page.waitForLoadState('domcontentloaded');
+      console.log('  → Checking for login form...');
+      
       // Check if login form exists (wait up to 5 seconds)
       const loginFormExists = await page.locator('input[type="email"], input[type="text"], input[name="email"], input[name="username"]').first().isVisible({ timeout: 5000 }).catch(() => false);
       
@@ -262,28 +270,95 @@ async function main() {
         
         if (!buttonClicked) {
           // Try pressing Enter as fallback
+          console.log('  → Pressing Enter as fallback...');
           await page.keyboard.press('Enter');
         }
         
-        // Wait for navigation after login
-        await page.waitForLoadState('networkidle');
-        await page.waitForTimeout(3000);
+        // 🔒 ROCK SOLID LOGIN: Wait for authentication to complete
+        console.log('  ⏳ Verifying login success...');
+        console.log('     → Waiting for URL to change from login page...');
         
-        const loginScreenshot = path.join(CONFIG.screenshotDir, `2-after-login-${timestamp}.png`);
-        await page.screenshot({ path: loginScreenshot, fullPage: true });
+        try {
+          // Wait for URL to change away from login (indicates successful auth)
+          await page.waitForURL(url => !url.includes('/login') && !url.includes('/signin'), { 
+            timeout: 20000 
+          });
+          
+          const postLoginUrl = page.url();
+          console.log(`     ✅ Login successful! Redirected to: ${postLoginUrl}`);
+          
+          // Wait for page to be fully loaded
+          await page.waitForLoadState('load');
+          console.log('     ✅ Page fully loaded after authentication');
+          
+        } catch (urlWaitError) {
+          console.log(`     ⚠️  URL did not change, checking if already authenticated...`);
+          // Check if we're already on an authenticated page
+          const currentUrl = page.url();
+          if (currentUrl.includes('/report') || currentUrl.includes('/dashboard') || currentUrl.includes('/home')) {
+            console.log(`     ✅ Already on authenticated page: ${currentUrl}`);
+          } else {
+            console.log(`     ⚠️  Warning: Still on URL: ${currentUrl}`);
+            console.log(`     → Will attempt to continue anyway...`);
+          }
+        }
+        
+        // Additional wait for authentication state to be saved
+        console.log('  → Allowing time for auth token to be saved...');
+        await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {
+          console.log('     → Network not idle, continuing anyway...');
+        });
         
         // Show current URL after login
         const currentUrl2 = page.url();
-        console.log(`  → Current URL after login: ${currentUrl2}`);
-        console.log(`✅ Login completed. Screenshot saved: ${loginScreenshot}\n`);
+        console.log(`  → Current URL after login verification: ${currentUrl2}`);
         
-        // Check if we need to navigate to report page after login
+        // Navigate to report page if not already there
         if (!currentUrl2.includes('/report')) {
-          console.log('  ⚠️  Not at /report page yet, attempting to navigate...');
-          await page.goto('https://admin.iofarm.com/report', { waitUntil: 'networkidle' });
-          await page.waitForTimeout(2000);
-          console.log(`  → Navigated to: ${page.url()}\n`);
+          console.log('  📍 Not at /report page, navigating now (auth should be established)...');
+          await page.goto('https://admin.iofarm.com/report', { 
+            waitUntil: 'load',
+            timeout: 20000 
+          });
+          console.log(`  ✅ Navigated to: ${page.url}`);
+          
+          // Wait for page to be fully loaded
+          await page.waitForLoadState('load');
         }
+        
+        // 🎯 CRITICAL: Wait for farm list container (verify we're truly authenticated)
+        console.log('  → Verifying authenticated page loaded...');
+        console.log('     → Looking for farm list container...');
+        
+        try {
+          await page.waitForSelector('[id*="tabs"][id*="content-point"]', { 
+            state: 'visible', 
+            timeout: 20000 
+          });
+          console.log('     ✅ Farm list container is visible');
+        } catch (e) {
+          console.log(`     ⚠️  Farm list container not found: ${e.message}`);
+          console.log(`     → Current URL: ${page.url()}`);
+          console.log(`     → Taking debug screenshot...`);
+          await page.screenshot({ path: path.join(CONFIG.screenshotDir, `debug-no-farms-${timestamp}.png`), fullPage: true });
+        }
+        
+        // Additional wait for farm links to populate
+        console.log('     → Waiting for farm links to populate...');
+        try {
+          await page.waitForSelector('div.css-nd8svt a[href*="/report/point/"]', { 
+            state: 'visible', 
+            timeout: 30000 
+          });
+          console.log('     ✅ Farm links are populated and visible');
+        } catch (e) {
+          console.log(`     ⚠️  Farm links not found: ${e.message}`);
+          console.log(`     → Will attempt to continue anyway...`);
+        }
+        
+        const loginScreenshot = path.join(CONFIG.screenshotDir, `2-after-login-${timestamp}.png`);
+        await page.screenshot({ path: loginScreenshot, fullPage: true });
+        console.log(`✅ Login completed. Screenshot saved: ${loginScreenshot}\n`);
         
       } else {
         console.log('  ✅ No login required, already at report page');
@@ -309,8 +384,8 @@ async function main() {
       const currentUrl3 = page.url();
       console.log(`  → Current URL: ${currentUrl3}`);
       
-      // Wait a few seconds for content to load
-      await page.waitForTimeout(3000);
+      // ⚡ FAST: Wait for main content container
+      await page.waitForSelector('body', { state: 'visible', timeout: 3000 }).catch(() => {});
       
       // Get page title for verification
       const pageTitle = await page.title();
@@ -396,7 +471,7 @@ async function main() {
       
       if (radioClicked) {
         console.log(`  ✅ Clicked "${CONFIG.targetName}" radio button via JavaScript`);
-        await page.waitForTimeout(2000);
+        // ⚡ FAST: No wait needed after JavaScript click
         
         const step4Screenshot = path.join(CONFIG.screenshotDir, `4-selected-manager-${timestamp}.png`);
         await page.screenshot({ path: step4Screenshot, fullPage: true });
@@ -410,6 +485,18 @@ async function main() {
     
     // Step 5: Get all farms from the list and loop through them
     console.log('🏭 Step 5: Getting list of all farms...');
+    
+    // 🎯 Ensure farm list container is ready before extraction
+    console.log('  → Verifying farm list container is present...');
+    await page.waitForLoadState('domcontentloaded');
+    await page.waitForSelector('[id*="tabs"][id*="content-point"]', { state: 'visible', timeout: 15000 }).catch(() => {
+      console.log('  ⚠️  Warning: Farm list container not found!');
+    });
+    
+    // ⚡ SMART: Extended wait for farm links to ensure SPA has fully rendered
+    console.log('  → Waiting for farm links to populate...');
+    await page.waitForSelector('div.css-nd8svt a[href*="/report/point/"]', { state: 'visible', timeout: 30000 });
+    console.log('  ✅ Farm links are visible and ready');
     
     let farmList = [];
     try {
@@ -469,18 +556,27 @@ async function main() {
     console.log(`   → Total days to check: ${totalDaysToCheck}`);
     console.log(`   → Method: Click "Previous period" 5 times, then iterate forward\n`);
     
+    // --- NEW FARM ITERATION LOGIC ---
     // Get configuration from dashboard
     const dashboardConfig = dashboard.getConfig();
-    const startFromIndex = dashboardConfig.startFrom; // 0 = all farms, 1+ = start from that farm
-    const farmStartIndex = startFromIndex > 0 ? startFromIndex - 1 : 0; // Convert to 0-based index
+    const totalFarms = farmList.length;
     
-    console.log(`🏭 Farm Processing Configuration:`);
-    console.log(`   → Starting from: ${startFromIndex === 0 ? 'Beginning (all farms)' : 'Farm #' + startFromIndex}`);
-    console.log(`   → Max farms to process: ${dashboardConfig.maxFarms === 999 ? 'All' : dashboardConfig.maxFarms}`);
-    console.log(`   → Will process up to ${Math.min(dashboardConfig.maxFarms, farmList.length - farmStartIndex)} farms\n`);
+    // Parse config (dashboard sends 1-based index for 'startFrom', 0 means 'all')
+    let startIndex = (dashboardConfig.startFrom > 0) ? (dashboardConfig.startFrom - 1) : 0;
+    let maxCount = dashboardConfig.maxFarms || totalFarms;
+    let endIndex = Math.min(startIndex + maxCount, totalFarms);
+    
+    console.log(`\n📋 Farm Processing Plan:`);
+    console.log(`   → Total available: ${totalFarms}`);
+    console.log(`   → Starting at: Farm #${startIndex + 1}`);
+    console.log(`   → Stopping at: Farm #${endIndex}`);
+    console.log(`   → Batch size: ${endIndex - startIndex} farms\n`);
+    
+    // Slice the array to get only the farms we want to process
+    const farmsToProcess = farmList.slice(startIndex, endIndex);
     
     // Dynamic loop - checks maxFarms from config each iteration (allows adding farms mid-run)
-    for (let farmIdx = 0; farmIdx < farmList.length - farmStartIndex; farmIdx++) {
+    for (let farmIdx = 0; farmIdx < farmsToProcess.length; farmIdx++) {
       // Get current config (may have been updated via "Add More Farms")
       const currentConfig = dashboard.getConfig();
       
@@ -516,15 +612,17 @@ async function main() {
         dashboard.log('Watch Mode activated', 'success');
       }
       
-      const actualFarmIndex = farmStartIndex + farmIdx;
-      const currentFarm = farmList[actualFarmIndex];
+      // Get current farm from the sliced array
+      const currentFarm = farmsToProcess[farmIdx];
+      const actualFarmIndex = startIndex + farmIdx; // Calculate actual index in original farmList for clicking
+      
       console.log(`\n${'='.repeat(70)}`);
-      console.log(`🏭 Processing Farm ${farmIdx + 1}/${currentConfig.maxFarms}: ${currentFarm.name}`);
+      console.log(`🏭 Processing Farm ${farmIdx + 1}/${farmsToProcess.length}: ${currentFarm.name} (Farm #${actualFarmIndex + 1} of ${totalFarms})`);
       console.log(`${'='.repeat(70)}\n`);
       
       // Update dashboard progress (reuse currentConfig from above)
       if (dashboard) {
-        dashboard.updateProgress(farmIdx + 1, currentConfig.maxFarms, currentFarm.name);
+        dashboard.updateProgress(farmIdx + 1, farmsToProcess.length, currentFarm.name);
       }
       
       // Set up network interception to capture chart data
@@ -539,36 +637,36 @@ async function main() {
         const farmContainer = page.locator('div.css-nd8svt');
         const farmLink = farmContainer.locator('a[href*="/report/point/"]').nth(actualFarmIndex);
         
-        // Step 1: Scroll into view (CRITICAL for off-screen elements)
-        console.log(`     → Scrolling farm into view...`);
-        await farmLink.scrollIntoViewIfNeeded();
-        await page.waitForTimeout(500); // Let scroll animation finish
+        // ⚡ SUPER FAST: Parallel execution - Setup trap, scroll, click, validate
+        console.log(`     → Setting up navigation trap...`);
         
-        // Step 2: Get the target URL for validation
+        // Step 1: Setup the navigation promise (the "trap")
+        const navigationPromise = page.waitForURL('**/report/point/**', { timeout: 5000 }).catch(() => null);
+        
+        // Step 2: Scroll into view (no wait for animation)
+        await farmLink.scrollIntoViewIfNeeded();
+        
+        // Step 3: Get target URL for logging
         const expectedHref = await farmLink.getAttribute('href');
         console.log(`     → Target URL: ${expectedHref}`);
         
-        // Step 3: Force click (bypasses overlays like sticky headers)
+        // Step 4: Click with noWaitAfter (instant, non-blocking)
         console.log(`     → Clicking farm link...`);
-        await farmLink.click({ force: true });
+        await farmLink.click({ force: true, noWaitAfter: true });
         
-        // Step 4: Validate the click worked (URL should change)
+        // Step 5: Await the trap (waits for URL change)
         console.log(`     → Waiting for navigation...`);
-        await page.waitForTimeout(2000); // Wait for URL to update
+        const navSuccess = await navigationPromise;
         
-        const currentURL = page.url();
-        const urlChanged = currentURL.includes('/report/point/');
-        
-        if (urlChanged) {
-          console.log(`  ✅ Successfully clicked farm "${currentFarm.name}"`);
-          console.log(`     → URL updated to: ${currentURL}`);
+        if (navSuccess !== null) {
+          const currentURL = page.url();
+          console.log(`  ✅ Successfully navigated to farm "${currentFarm.name}"`);
+          console.log(`     → URL: ${currentURL}`);
           
-          // Wait for right panel to load data
-          await page.waitForTimeout(3000);
+          // ⚡ FAST: Wait for main content to be visible
+          await page.waitForSelector('div.css-nd8svt', { state: 'visible', timeout: 3000 }).catch(() => {});
         } else {
-          console.log(`  ⚠️  Click may have failed - URL did not change`);
-          console.log(`     → Current URL: ${currentURL}`);
-          console.log(`     → Expected pattern: /report/point/`);
+          console.log(`  ⚠️  Navigation timeout - URL did not change`);
           console.log(`     → Skipping this farm...
 `);
           continue;
@@ -599,7 +697,8 @@ async function main() {
         
         if (clicked) {
           console.log(`     ✅ Clicked "Previous period" (${i + 1}/5)`);
-          await page.waitForTimeout(1500); // Wait for chart to update
+          // ⚡ FAST: Brief wait for date picker to update (unavoidable UI animation)
+          await page.waitForTimeout(300);
         } else {
           console.log(`     ⚠️  Could not find "Previous period" button`);
           break;
@@ -663,8 +762,7 @@ async function main() {
       console.log('  💧 Checking irrigation time tables...');
       
       try {
-        await page.waitForTimeout(2000); // Wait for data to load for this date
-        
+        // ⚡ FAST: No wait needed - table data is already loaded
         // Check the two table fields - look specifically in the right panel
         const tableStatus = await page.evaluate(() => {
         const results = { debug: [] };
@@ -801,7 +899,8 @@ async function main() {
             
             if (nextClicked) {
               console.log(`     ✅ Moved to next date`);
-              await page.waitForTimeout(2000);
+              // ⚡ FAST: Brief wait for date picker (unavoidable UI)
+              await page.waitForTimeout(300);
             }
           }
           
@@ -840,7 +939,8 @@ async function main() {
               });
               
               if (nextClicked) {
-                await page.waitForTimeout(2000);
+                // ⚡ FAST: Brief wait for date picker UI
+                await page.waitForTimeout(300);
               }
             }
             continue; // Skip to next date
@@ -970,7 +1070,8 @@ async function main() {
               });
               
               if (nextClicked) {
-                await page.waitForTimeout(2000);
+                // ⚡ FAST: Brief wait for date picker UI
+                await page.waitForTimeout(300);
               }
             }
             continue;
@@ -1010,7 +1111,8 @@ async function main() {
             });
             
             if (nextClicked) {
-              await page.waitForTimeout(2000);
+              // ⚡ FAST: Brief wait for date picker UI
+              await page.waitForTimeout(300);
             }
           }
           continue; // Skip to next date
@@ -1457,7 +1559,8 @@ async function main() {
             });
             if (nextClicked) {
               console.log(`     ⏭️  Moving to next date...\n`);
-              await page.waitForTimeout(2000);
+              // ⚡ FAST: Brief wait for date picker UI
+              await page.waitForTimeout(300);
             }
           }
           continue; // Skip to next date
@@ -1678,8 +1781,7 @@ async function main() {
             }, 1000);
           });
           
-          await page.waitForTimeout(1000); // Let markers appear
-          
+          // ⚡ FAST: Markers appear instantly via JavaScript
           console.log(`\n        🟢 🔴 LOOK AT THE BROWSER WINDOW! 🔴 🟢`);
           console.log(`        ═══════════════════════════════════════`);
           console.log(`        You should see:`);
@@ -1691,10 +1793,10 @@ async function main() {
           console.log(`        ✅ Circles correct? → Just wait for countdown`);
           console.log(`        ❌ Circles wrong? → Click correct spots before timer ends`);
           console.log(`           (Yellow circle = your FIRST, Orange = your LAST)`);
-          console.log(`\n        ⏱️  Waiting 30 seconds for corrections...`);
+          console.log(`\n        ⏱️  Waiting 20 seconds for corrections...`);
           
-          // Wait 30 seconds for user to make corrections
-          await page.waitForTimeout(30000);
+          // Wait 20 seconds for user to make corrections (must keep this for human interaction)
+          await page.waitForTimeout(20000);
           
           // Collect user corrections
           const userCorrections = await page.evaluate(() => {
@@ -1766,11 +1868,11 @@ async function main() {
           
           // Focus first input field
           await page.click('input[type="time"]:nth-of-type(1)');
-          await page.waitForTimeout(500);
           
-          // Click chart with Playwright mouse
+          // ⚡ FAST: Click chart immediately
           await page.mouse.click(coords.x, coords.y);
-          await page.waitForTimeout(3000); // Wait for UI to update before second click
+          // Brief wait for UI to register click before second click
+          await page.waitForTimeout(500);
         }
         
         if (clickResults.needsLastClick && clickResults.lastCoords) {
@@ -1793,22 +1895,22 @@ async function main() {
           const timeInputs = await page.$$('input[type="time"]');
           if (timeInputs.length > 1) {
             await timeInputs[timeInputs.length - 1].click();
-            await page.waitForTimeout(500);
           }
           
-          // Click chart with Playwright mouse
+          // ⚡ FAST: Click chart immediately
           await page.mouse.click(coords.x, coords.y);
-          await page.waitForTimeout(2000); // Wait for UI to update
+          // Brief wait for table update
+          await page.waitForTimeout(500);
         }
         
-        await page.waitForTimeout(2000); // Final wait for tables to fully update
+        // ⚡ FAST: Tables update instantly after clicks
         
       } else {
           console.log('     ✅ Some tables already have data, minimal clicks needed\n');
         }
         
-        // Wait for UI to fully update after clicks
-        await page.waitForTimeout(4000);
+        // ⚡ FAST: Brief wait for UI update
+        await page.waitForTimeout(500);
         
         // Take screenshot after clicking
         const step6Screenshot = path.join(CONFIG.screenshotDir, `farm-${farmIdx + 1}-date-${dateIdx}-after-clicks-${timestamp}.png`);
@@ -1818,9 +1920,7 @@ async function main() {
         // Extract final table values
         console.log('     📊 Extracting irrigation data from tables...');
       
-      // Wait a moment for tables to update after clicks
-      await page.waitForTimeout(3000);
-      
+      // ⚡ FAST: Extract data immediately
       const finalData = await page.evaluate(() => {
         const results = {
           firstIrrigationTime: null,
@@ -1993,7 +2093,8 @@ async function main() {
         
         if (nextClicked) {
           console.log(`     ✅ Moved to next date`);
-          await page.waitForTimeout(2000); // Wait for chart to update
+          // ⚡ FAST: Brief wait for date picker UI
+          await page.waitForTimeout(300);
         } else {
           console.log(`     ⚠️  Could not find "Next period" button`);
         }
