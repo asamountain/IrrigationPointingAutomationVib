@@ -18,6 +18,7 @@ class DashboardServer {
     this.server = null;
     this.shouldStop = false;
     this.isStarted = false;
+    this.startPromiseResolver = null; // Will hold the Promise resolver for waitUntilStarted
     this.config = {
       manager: '승진',
       startFrom: 0,
@@ -110,6 +111,14 @@ class DashboardServer {
           const config = JSON.parse(body);
           this.config = { ...this.config, ...config };
           this.isStarted = true;
+          
+          // 🔔 CRITICAL: Wake up waitUntilStarted() via Promise resolver
+          if (this.startPromiseResolver) {
+            console.log('🔔 Resolving start promise (Standard Mode)...');
+            this.startPromiseResolver(this.config);
+            this.startPromiseResolver = null;
+          }
+          
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ success: true, config: this.config }));
           console.log(`✅ Configuration received from dashboard:`, this.config);
@@ -127,8 +136,16 @@ class DashboardServer {
           const config = JSON.parse(body);
           this.config = { ...this.config, ...config, mode: 'report-sending' };
           this.isStarted = true;
+          
+          // 🔔 CRITICAL: Wake up waitUntilStarted() via Promise resolver
+          if (this.startPromiseResolver) {
+            console.log('🔔 Resolving start promise (Report Sending Mode)...');
+            this.startPromiseResolver(this.config);
+            this.startPromiseResolver = null;
+          }
+          
           res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ success: true, config: this.config }));
+          res.end(JSON.stringify({ status: 'started', mode: 'report-sending', config: this.config }));
           console.log(`📤 Report Sending Mode activated:`, this.config);
         } catch (error) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -413,12 +430,21 @@ class DashboardServer {
       level: 'info'
     });
     
-    while (!this.isStarted) {
-      await new Promise(resolve => setTimeout(resolve, 500));
+    // If already started (e.g., quick restart), return immediately
+    if (this.isStarted) {
+      console.log('✅ Already started, returning config immediately');
+      return this.config;
     }
     
+    // Create a Promise that will be resolved when start/start-report-sending is called
+    const config = await new Promise((resolve) => {
+      this.startPromiseResolver = resolve;
+      console.log('🔔 Start promise created, waiting for button click...');
+    });
+    
     console.log('✅ Start command received from dashboard');
-    return this.config;
+    console.log(`   → Mode: ${config.mode}`);
+    return config;
   }
 
   stop() {

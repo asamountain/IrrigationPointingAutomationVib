@@ -488,6 +488,96 @@ async function runReportSending(config, dashboard, runStats) {
       console.log('\n  ✅ Already at /report page');
     }
     
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // STEP 3: SELECT MANAGER (ENFORCED SWITCHING)
+    // ═══════════════════════════════════════════════════════════════════════════════
+    console.log(`\n🎯 Step 3: Selecting Manager "${config.manager}" (Enforced Switching)...`);
+    dashboard.updateStatus(`🎯 Selecting manager: ${config.manager}`, 'running');
+    
+    try {
+      // Wait for manager selector to be visible
+      console.log('  → Waiting for manager selector to appear...');
+      await page.waitForSelector('.chakra-segment-group__itemText', { 
+        state: 'visible',
+        timeout: 10000 
+      });
+      
+      // Define precise locator using Chakra UI class + exact text match
+      const managerButton = page.locator('.chakra-segment-group__itemText', { 
+        hasText: new RegExp(`^${config.manager}$`) 
+      });
+      
+      // Check if the button exists
+      const buttonCount = await managerButton.count();
+      console.log(`  → Found ${buttonCount} button(s) matching "${config.manager}"`);
+      
+      if (buttonCount > 0) {
+        // Primary: Force click on the Playwright locator
+        console.log(`  → Clicking "${config.manager}" button...`);
+        try {
+          await managerButton.first().click({ force: true, timeout: 5000 });
+          console.log(`  ✅ Playwright click successful`);
+        } catch (clickError) {
+          // Fallback: Use native JavaScript click
+          console.log(`  ⚠️  Playwright click failed, using JS fallback...`);
+          const jsClicked = await page.evaluate((targetManager) => {
+            const spans = Array.from(document.querySelectorAll('.chakra-segment-group__itemText'));
+            const targetSpan = spans.find(span => span.textContent.trim() === targetManager);
+            if (targetSpan) {
+              targetSpan.click();
+              const parentLabel = targetSpan.closest('label');
+              if (parentLabel) parentLabel.click();
+              return true;
+            }
+            return false;
+          }, config.manager);
+          
+          if (jsClicked) {
+            console.log(`  ✅ JavaScript fallback click successful`);
+          } else {
+            console.log(`  ❌ JavaScript fallback also failed`);
+          }
+        }
+        
+        // CRITICAL: Wait for UI state change
+        console.log(`  → Waiting for UI state confirmation...`);
+        try {
+          await page.waitForFunction((targetManager) => {
+            const spans = Array.from(document.querySelectorAll('.chakra-segment-group__itemText'));
+            const targetSpan = spans.find(span => span.textContent.trim() === targetManager);
+            if (targetSpan) {
+              const parentLabel = targetSpan.closest('label');
+              if (parentLabel) {
+                return parentLabel.getAttribute('data-state') === 'checked';
+              }
+            }
+            return false;
+          }, config.manager, { timeout: 3000 });
+          console.log(`  ✅ UI confirmed: "${config.manager}" is now selected`);
+        } catch (waitError) {
+          console.log(`  ⚠️  UI state change not detected, continuing anyway...`);
+        }
+        
+        // CRITICAL: Wait for network idle (table reload with new farm IDs)
+        console.log(`  → Waiting for network to idle (table reload)...`);
+        await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {
+          console.log('  ⚠️  Network not fully idle, continuing...');
+        });
+        
+        // Safety buffer for AJAX reload (3 seconds)
+        console.log(`  → Safety buffer (3s for farm list reload)...`);
+        await page.waitForTimeout(3000);
+        console.log(`  ✅ Manager selection complete\n`);
+        
+      } else {
+        console.log(`  ⚠️  Could not find "${config.manager}" button using .chakra-segment-group__itemText`);
+        console.log(`  → Proceeding with default manager selection...\n`);
+      }
+    } catch (error) {
+      console.log(`  ⚠️  Error selecting manager: ${error.message}`);
+      console.log(`  → Proceeding anyway...\n`);
+    }
+    
     // Step 4: Wait for Farm List Content
     console.log('  → Waiting for farm list to appear...');
     await page.waitForSelector('div.css-nd8svt a', { 
@@ -497,7 +587,7 @@ async function runReportSending(config, dashboard, runStats) {
     console.log('  ✅ Farm list loaded\n');
     
     // Step 5: Extract Farm List
-    console.log('🏭 Step 2: Extracting farm list...');
+    console.log('🏭 Step 4: Extracting farm list...');
     dashboard.updateStatus('📋 Loading farms...', 'running');
     
     const farmList = await page.evaluate(() => {
@@ -569,11 +659,25 @@ async function runReportSending(config, dashboard, runStats) {
         break;
       }
       
-      // Construct the send-report URL
-      const sendReportUrl = farm.href.replace('/report/point/', '/report/send-report/');
-      const fullUrl = `https://admin.iofarm.com${sendReportUrl}`;
+      // ═══════════════════════════════════════════════════════════════════════════════
+      // URL ENFORCEMENT: Construct URL with explicit manager parameter
+      // ═══════════════════════════════════════════════════════════════════════════════
+      const targetManager = config.manager; // '승진' - enforce correct manager
+      
+      // Parse the scraped href (might have wrong manager param)
+      const rawUrl = new URL(farm.href, 'https://admin.iofarm.com');
+      
+      // Force the manager parameter to match config (overwrite any existing value)
+      rawUrl.searchParams.set('manager', targetManager);
+      
+      // Convert /point/ to /send-report/
+      const sendReportPath = rawUrl.pathname.replace('/report/point/', '/report/send-report/');
+      
+      // Construct final URL with enforced manager param
+      const fullUrl = `https://admin.iofarm.com${sendReportPath}${rawUrl.search}`;
       
       console.log(`  🌐 Navigating to: ${fullUrl}`);
+      console.log(`  ✅ Manager enforced: ${targetManager}\n`);
       
       try {
         // 🛡️ TIMEOUT SAFETY: Wrap in try/catch with explicit timeout
