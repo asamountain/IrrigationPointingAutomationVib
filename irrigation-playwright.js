@@ -10,6 +10,7 @@
 import { chromium } from 'playwright';
 import fs from 'fs';
 import path from 'path';
+import { execSync } from 'child_process';
 import DashboardServer from './dashboard-server.js';
 import { setupNetworkInterception, waitForChartData, extractDataPoints } from './network-interceptor.js';
 
@@ -90,17 +91,157 @@ function loadLearningOffsets() {
   }
 }
 
+// 🌍 UNIVERSAL BROWSER LAUNCHER: Cross-platform "Write Once, Run Anywhere"
+// Handles: Windows, macOS, Linux/WSL with automatic dependency installation
+async function launchBrowser() {
+  // ═══════════════════════════════════════════════════════════════════
+  // STEP 1: OS DETECTION
+  // ═══════════════════════════════════════════════════════════════════
+  const platform = process.platform;
+  const isLinux = platform === 'linux';
+  const isMac = platform === 'darwin';
+  const isWindows = platform === 'win32';
+  
+  // Detect WSL specifically (Linux with Microsoft in kernel version)
+  const isWSL = isLinux && (() => {
+    try {
+      const release = fs.readFileSync('/proc/version', 'utf8').toLowerCase();
+      return release.includes('microsoft') || release.includes('wsl');
+    } catch { return false; }
+  })();
+
+  const osName = isWSL ? 'WSL (Linux)' : 
+                 isLinux ? 'Linux' : 
+                 isMac ? 'macOS' : 
+                 isWindows ? 'Windows' : 'Unknown';
+  
+  console.log(`🖥️  Detected Environment: ${osName}`);
+
+  // ═══════════════════════════════════════════════════════════════════
+  // STEP 2: HEADLESS MODE DECISION
+  // ═══════════════════════════════════════════════════════════════════
+  // Default: VISIBLE (headless: false) for ALL environments
+  // Override: Set $HEADLESS=true to run in invisible/headless mode
+  const forceHeadless = process.env.HEADLESS?.toLowerCase();
+  let headless;
+  
+  if (forceHeadless === 'true') {
+    headless = true;
+    console.log('🔇 Headless Mode: ENABLED (via $HEADLESS=true)');
+  } else {
+    headless = false;
+    console.log('🖼️  Headless Mode: DISABLED (default - set $HEADLESS=true to hide browser)');
+  }
+
+  const launchArgs = [
+    '--start-maximized',
+    '--window-position=0,0',
+    '--disable-blink-features=AutomationControlled' // Reduce bot detection
+  ];
+
+  // ═══════════════════════════════════════════════════════════════════
+  // STEP 3: SMART LAUNCH STRATEGY
+  // ═══════════════════════════════════════════════════════════════════
+  
+  // --- ATTEMPT 1: Try Google Chrome (preferred) ---
+  try {
+    console.log('🚀 Attempt 1: Launching Google Chrome...');
+    const browser = await chromium.launch({
+      headless,
+      channel: 'chrome',
+      args: launchArgs
+    });
+    console.log('✅ Google Chrome launched successfully.');
+    return browser;
+  } catch (chromeError) {
+    console.log(`⚠️  Chrome launch failed: ${chromeError.message.split('\n')[0]}`);
+
+    // --- PLATFORM-SPECIFIC RECOVERY ---
+    if (isLinux || isWSL) {
+      // Linux/WSL: Auto-install Chrome via Playwright
+      console.log('📦 Linux/WSL detected - attempting to install Chrome...');
+      try {
+        execSync('npx playwright install chrome', { 
+          stdio: 'inherit',
+          timeout: 180000 // 3 minutes for slow connections
+        });
+        console.log('✅ Chrome installation completed.');
+      } catch (installErr) {
+        console.log(`⚠️  Chrome install failed: ${installErr.message}`);
+      }
+    } else if (isMac) {
+      // macOS: Provide helpful guidance
+      console.log('💡 macOS: Chrome may be missing or in a non-standard location.');
+      console.log('   → Try: brew install --cask google-chrome');
+      console.log('   → Or download from: https://www.google.com/chrome/');
+    }
+    // Windows: Chrome is usually installed; skip auto-install
+
+    // --- ATTEMPT 2: Retry Chrome after install (Linux/WSL only) ---
+    if (isLinux || isWSL) {
+      try {
+        console.log('🔄 Attempt 2: Retrying Chrome after installation...');
+        const browser = await chromium.launch({
+          headless,
+          channel: 'chrome',
+          args: launchArgs
+        });
+        console.log('✅ Google Chrome launched successfully (after install).');
+        return browser;
+      } catch (retryError) {
+        console.log(`⚠️  Chrome retry failed: ${retryError.message.split('\n')[0]}`);
+      }
+    }
+
+    // --- ATTEMPT 3: Fallback to Bundled Chromium ---
+    console.log('🔄 Attempt 3: Falling back to bundled Chromium...');
+    
+    // Ensure Chromium is installed
+    try {
+      console.log('📦 Installing Playwright Chromium...');
+      execSync('npx playwright install chromium', { 
+        stdio: 'inherit',
+        timeout: 180000
+      });
+      console.log('✅ Chromium installation completed.');
+    } catch (chromiumInstallErr) {
+      console.log(`⚠️  Chromium install warning: ${chromiumInstallErr.message}`);
+      // Continue anyway - might already be installed
+    }
+
+    try {
+      const browser = await chromium.launch({
+        headless,
+        args: launchArgs
+        // No 'channel' = use bundled Chromium
+      });
+      console.log('✅ Bundled Chromium launched successfully.');
+      return browser;
+    } catch (chromiumError) {
+      // --- FINAL FAILURE ---
+      console.error('\n❌ ═══════════════════════════════════════════════════════════');
+      console.error('❌ CRITICAL: Could not launch any browser!');
+      console.error('❌ ═══════════════════════════════════════════════════════════');
+      console.error(`   Chrome error: ${chromeError.message.split('\n')[0]}`);
+      console.error(`   Chromium error: ${chromiumError.message.split('\n')[0]}`);
+      console.error('\n💡 Manual fix options:');
+      console.error('   1. Run: npx playwright install');
+      console.error('   2. Install Chrome: https://www.google.com/chrome/');
+      if (isLinux || isWSL) {
+        console.error('   3. For WSL GUI: Install an X server (VcXsrv/WSLg)');
+      }
+      throw new Error('❌ Critical: Could not launch any browser after all attempts.');
+    }
+  }
+}
+
 // 📤 REPORT SENDING MODE: Validate table data and click "Create Report" button
 async function runReportSending(config, dashboard, runStats) {
   console.log('\n📤 ========================================');
   console.log('📤   REPORT SENDING AUTOMATION MODE');
   console.log('📤 ========================================\n');
   
-  const browser = await chromium.launch({
-    headless: false,
-    channel: 'chrome',
-    args: ['--start-maximized', '--window-position=0,0']
-  });
+  const browser = await launchBrowser();
   
   const context = await browser.newContext({
     viewport: null,
@@ -162,11 +303,55 @@ async function runReportSending(config, dashboard, runStats) {
         console.log('  → Clicking submit button...');
         await page.click('button[type="submit"]');
         
-        // Wait for redirect away from login
-        console.log('  → Waiting for login redirect...');
-        await page.waitForURL(url => !url.includes('/login'), { timeout: 15000 });
+        // ═══════════════════════════════════════════════════════════════════
+        // 🎯 STATE-BASED LOGIN VERIFICATION (SPA-Compatible)
+        // ═══════════════════════════════════════════════════════════════════
+        console.log('  → Verifying login via UI state change...');
         
-        console.log(`  ✅ Login successful! Redirected to: ${page.url()}`);
+        const LOGIN_TIMEOUT = 10000;
+        
+        const successPromise = (async () => {
+          await Promise.race([
+            page.waitForSelector('div.css-nd8svt', { state: 'visible', timeout: LOGIN_TIMEOUT }),
+            page.waitForSelector('[id*="tabs"][id*="content-point"]', { state: 'visible', timeout: LOGIN_TIMEOUT }),
+            page.waitForSelector('a[href*="/report/point/"]', { state: 'visible', timeout: LOGIN_TIMEOUT })
+          ]);
+          return { status: 'success' };
+        })();
+        
+        const failurePromise = (async () => {
+          await page.waitForSelector('text=/invalid|incorrect|error|실패/i', { state: 'visible', timeout: LOGIN_TIMEOUT });
+          return { status: 'failure' };
+        })();
+        
+        try {
+          const result = await Promise.race([
+            successPromise.catch(() => null),
+            failurePromise.catch(() => null),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), LOGIN_TIMEOUT))
+          ]);
+          
+          if (result?.status === 'failure') {
+            throw new Error('❌ Login failed: Invalid credentials');
+          } else if (result?.status === 'success') {
+            console.log('  ✅ Login confirmed by UI change');
+          } else {
+            // Check final state
+            const farmListVisible = await page.locator('div.css-nd8svt, a[href*="/report/point/"]').first().isVisible().catch(() => false);
+            if (farmListVisible) {
+              console.log('  ✅ Login confirmed by UI change');
+            } else {
+              throw new Error('❌ Login timed out - Check screenshot');
+            }
+          }
+        } catch (raceError) {
+          if (raceError.message === 'timeout') {
+            throw new Error('❌ Login timed out - Check screenshot');
+          }
+          throw raceError;
+        }
+        
+        console.log(`  ✅ Login successful! Current URL: ${page.url()}`);
       } else {
         console.log('  ⚠️  No login form found, assuming authenticated');
       }
@@ -564,18 +749,12 @@ async function main() {
     return;
   }
 
-  // Launch browser with maximized window
+  // Launch browser with Universal Browser Launcher (cross-platform)
   dashboard.updateStatus('🚀 Launching browser...', 'running');
   dashboard.updateStep('Initializing browser', 5);
   
-  const browser = await chromium.launch({
-    headless: false,         // ✅ FORCE VISIBLE (not background)
-    channel: 'chrome',       // ✅ Use real Chrome (not Chromium)
-    args: [
-      '--start-maximized',   // Start with maximized window
-      '--window-position=0,0' // Position at top-left
-    ]
-  });
+  const browser = await launchBrowser();
+  dashboard.log('Browser launched successfully', 'success');
   
   const context = await browser.newContext({
     viewport: null,  // Use full window size (no fixed viewport)
@@ -599,257 +778,288 @@ async function main() {
   });
   
   try {
-    // Step 1: Navigate to IoFarm admin report page
-    console.log('📍 Step 1: Navigating to admin.iofarm.com/report/...');
-    dashboard.updateStatus('🌐 Navigating to report page...', 'running');
-    dashboard.updateStep('Step 1: Navigating to report page', 10);
-    dashboard.log('Navigating to admin.iofarm.com/report/', 'info');
+    // ═══════════════════════════════════════════════════════════════════════════
+    // 🚦 SEQUENTIAL NAVIGATION FLOW (Root → Auth → Report)
+    // ═══════════════════════════════════════════════════════════════════════════
     
-    await page.goto(CONFIG.url, { waitUntil: 'domcontentloaded', timeout: 15000 });
-    await page.waitForLoadState('domcontentloaded');
+    const timestamp = new Date().toISOString().replace(/:/g, '-').split('.')[0];
     
-    // ⚡ SMART: Wait for body and ensure page is interactive
+    // ─────────────────────────────────────────────────────────────────────────────
+    // STEP 1: START AT ROOT (not /report)
+    // ─────────────────────────────────────────────────────────────────────────────
+    console.log('📍 Step 1: Navigating to ROOT (admin.iofarm.com/)...');
+    dashboard.updateStatus('🌐 Navigating to root...', 'running');
+    dashboard.updateStep('Step 1: Navigating to root', 10);
+    dashboard.log('Navigating to admin.iofarm.com/ (root)', 'info');
+    
+    // Navigate to ROOT, not /report
+    await page.goto('https://admin.iofarm.com/', { 
+      waitUntil: 'domcontentloaded', 
+      timeout: 20000 
+    });
+    
+    // Wait for page to be interactive
     console.log('  → Waiting for page to be interactive...');
     await page.waitForSelector('body', { state: 'attached', timeout: 5000 });
-    await page.waitForLoadState('load').catch(() => {}); // Allow some extra loading time
+    await page.waitForLoadState('load').catch(() => {});
     
-    // Show current URL
-    const currentUrl1 = page.url();
-    console.log(`  → Current URL: ${currentUrl1}`);
-    dashboard.log(`Current URL: ${currentUrl1}`, 'info');
+    const rootUrl = page.url();
+    console.log(`  → Landed at: ${rootUrl}`);
+    dashboard.log(`Landed at: ${rootUrl}`, 'info');
     
-    // Take screenshot to verify we're on the right page
-    const timestamp = new Date().toISOString().replace(/:/g, '-').split('.')[0];
-    const screenshotPath = path.join(CONFIG.screenshotDir, `1-homepage-${timestamp}.png`);
+    // Take initial screenshot
+    const screenshotPath = path.join(CONFIG.screenshotDir, `1-root-page-${timestamp}.png`);
     await takeScreenshot(page, screenshotPath);
-    console.log(`✅ Report page loaded. Screenshot saved: ${screenshotPath}\n`);
-    dashboard.log('Report page loaded successfully', 'success');
+    console.log(`  → Screenshot: ${screenshotPath}\n`);
     
-    // Step 2: Check if login is needed, if so, login
-    console.log('🔐 Step 2: Checking if login is required...');
+    // ─────────────────────────────────────────────────────────────────────────────
+    // STEP 2: ROBUST AUTHENTICATION CHECK
+    // ─────────────────────────────────────────────────────────────────────────────
+    console.log('🔐 Step 2: Checking authentication status...');
     dashboard.updateStatus('🔐 Checking authentication...', 'running');
+    dashboard.updateStep('Step 2: Authentication check', 20);
     
-    try {
-      // ⚡ SMART: Wait for page to be ready before checking for login form
-      await page.waitForLoadState('domcontentloaded');
-      console.log('  → Checking for login form...');
+    // Check for authenticated state indicators
+    const authCheck = await page.evaluate(() => {
+      // Indicators of authenticated state
+      const hasLogoutButton = document.body.innerText.includes('로그아웃') || 
+                              document.body.innerText.includes('Logout');
+      const hasFarmList = document.querySelector('div.css-nd8svt') !== null ||
+                          document.querySelector('[id*="tabs"][id*="content-point"]') !== null ||
+                          document.querySelectorAll('a[href*="/report/point/"]').length > 0;
+      const hasDashboard = document.querySelector('[class*="dashboard"]') !== null ||
+                           document.querySelector('[class*="sidebar"]') !== null;
       
-      // Check if we're already authenticated by looking for authenticated elements
-      const alreadyAuthenticated = await page.evaluate(() => {
-        // Look for farm list container (only visible when authenticated)
-        const farmContainer = document.querySelector('[id*="tabs"][id*="content-point"]');
-        const hasAuthenticatedContent = farmContainer !== null;
-        const isOnLoginPage = window.location.href.includes('/login') || window.location.href.includes('/signin');
-        return hasAuthenticatedContent && !isOnLoginPage;
-      });
+      // Indicators of login page
+      const hasLoginForm = document.querySelector('input[type="email"]') !== null ||
+                           document.querySelector('input[type="password"]') !== null;
+      const hasLoginButton = document.body.innerText.includes('로그인') ||
+                             document.body.innerText.includes('Login');
       
-      if (alreadyAuthenticated) {
-        console.log('  ✅ Already authenticated! Farm list is visible.');
-        console.log(`  → Current URL: ${page.url()}\n`);
-        dashboard.log('Already authenticated', 'success');
-      } else {
-        // Check if login form exists
-        const loginFormExists = await page.locator('input[type="email"], input[type="text"], input[name="email"], input[name="username"]').first().isVisible({ timeout: 5000 }).catch(() => false);
-        
-        if (loginFormExists) {
-          console.log('  → Login form detected, proceeding with login...');
-          dashboard.updateStatus('🔐 Logging in...', 'running');
-          
-          // Try common email/username field selectors
-          const emailSelectors = [
-            'input[type="email"]',
-            'input[name="email"]',
-            'input[name="username"]',
-            'input[placeholder*="email" i]',
-            'input[placeholder*="이메일" i]'
-          ];
-          
-          let emailFilled = false;
-          for (const selector of emailSelectors) {
-            try {
-              const emailField = page.locator(selector).first();
-              if (await emailField.isVisible({ timeout: 1000 })) {
-                console.log(`  → Entering email: ${CONFIG.username}`);
-                await emailField.fill(CONFIG.username);
-                emailFilled = true;
-                break;
-              }
-            } catch (e) {
-              continue;
-            }
+      return {
+        isAuthenticated: (hasLogoutButton || hasFarmList || hasDashboard) && !hasLoginForm,
+        hasLoginForm: hasLoginForm,
+        hasFarmList: hasFarmList
+      };
+    });
+    
+    console.log(`  → Auth check result: ${JSON.stringify(authCheck)}`);
+    
+    if (authCheck.isAuthenticated) {
+      // ═══════════════════════════════════════════════════════════════════
+      // ALREADY AUTHENTICATED
+      // ═══════════════════════════════════════════════════════════════════
+      console.log('  ✅ Already authenticated! Dashboard/Farm list detected.');
+      dashboard.log('Already authenticated', 'success');
+      
+    } else if (authCheck.hasLoginForm) {
+      // ═══════════════════════════════════════════════════════════════════
+      // LOGIN REQUIRED
+      // ═══════════════════════════════════════════════════════════════════
+      console.log('  → Login form detected, proceeding with authentication...');
+      dashboard.updateStatus('🔐 Logging in...', 'running');
+      
+      // Fill email
+      const emailSelectors = [
+        'input[type="email"]',
+        'input[name="email"]',
+        'input[name="username"]',
+        'input[placeholder*="email" i]',
+        'input[placeholder*="이메일" i]'
+      ];
+      
+      let emailFilled = false;
+      for (const selector of emailSelectors) {
+        try {
+          const emailField = page.locator(selector).first();
+          if (await emailField.isVisible({ timeout: 1000 })) {
+            console.log(`  → Entering email: ${CONFIG.username}`);
+            await emailField.fill(CONFIG.username);
+            emailFilled = true;
+            break;
           }
-          
-          if (!emailFilled) {
-            console.log('  ⚠️ Could not find email field, trying generic input[type="text"]');
-            await page.fill('input[type="text"]', CONFIG.username);
-          }
-          
-          // Type password
-          console.log('  → Entering password...');
-          await page.fill('input[type="password"]', CONFIG.password);
-          
-          // Click login button
-          console.log('  → Clicking login button...');
-          const loginButtonSelectors = [
-            'button[type="submit"]',
-            'button:has-text("로그인")',
-            'button:has-text("Login")',
-            'input[type="submit"]',
-            'button.login-button'
-          ];
-          
-          let buttonClicked = false;
-          for (const selector of loginButtonSelectors) {
-            try {
-              const button = page.locator(selector).first();
-              if (await button.isVisible({ timeout: 1000 })) {
-                await button.click();
-                buttonClicked = true;
-                break;
-              }
-            } catch (e) {
-              continue;
-            }
-          }
-          
-          if (!buttonClicked) {
-            console.log('  → Pressing Enter as fallback...');
-            await page.keyboard.press('Enter');
-          }
-          
-          // 🔒 ROCK SOLID LOGIN: Wait for authentication to complete
-          console.log('\n  🔒 ROCK SOLID LOGIN VERIFICATION:');
-          console.log('  ═══════════════════════════════════');
-          
-          // STEP A: Wait for URL to change away from login
-          console.log('  [1/4] Waiting for URL to change from login page...');
-          try {
-            await page.waitForURL(url => !url.includes('/login') && !url.includes('/signin'), { 
-              timeout: 20000 
-            });
-            console.log(`       ✅ URL changed to: ${page.url()}`);
-          } catch (urlError) {
-            console.log(`       ⚠️  URL did not change in 20s: ${page.url()}`);
-            throw new Error('Login redirect timeout - credentials may be incorrect');
-          }
-          
-          // STEP B: Wait for network to be idle (auth scripts finishing)
-          console.log('  [2/4] Waiting for network to stabilize (auth token saving)...');
-          await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {
-            console.log('       ⚠️  Network not idle after 10s, continuing...');
-          });
-          console.log('       ✅ Network idle');
-          
-          // STEP C: Wait for DOM to be fully loaded
-          console.log('  [3/4] Waiting for page to be fully loaded...');
-          await page.waitForLoadState('load', { timeout: 10000 });
-          console.log('       ✅ Page fully loaded');
-          
-          // STEP D: Verify authenticated state with a reliable element
-          console.log('  [4/4] Verifying authenticated element is visible...');
-          
-          const verifyAuth = await page.evaluate(() => {
-            // Check multiple indicators of successful auth
-            const hasTabsContent = document.querySelector('[id*="tabs"][id*="content"]') !== null;
-            const hasFarmLinks = document.querySelectorAll('a[href*="/report/point/"]').length > 0;
-            const notOnLogin = !window.location.href.includes('/login');
-            
-            return {
-              success: hasTabsContent && notOnLogin,
-              hasFarmLinks: hasFarmLinks,
-              url: window.location.href
-            };
-          });
-          
-          if (verifyAuth.success) {
-            console.log(`       ✅ Authenticated! At: ${verifyAuth.url}`);
-            console.log(`       → Farm links found: ${verifyAuth.hasFarmLinks}`);
-          } else {
-            console.log(`       ⚠️  Authentication unclear. URL: ${verifyAuth.url}`);
-            console.log(`       → Will try to navigate to /report page...`);
-          }
-          
-          console.log('  ═══════════════════════════════════\n');
-          
-          // Navigate to report page if not already there
-          const currentUrl = page.url();
-          if (!currentUrl.includes('/report')) {
-            console.log('  📍 Not at /report page, navigating with authenticated session...');
-            await page.goto('https://admin.iofarm.com/report', { 
-              waitUntil: 'networkidle',
-              timeout: 20000 
-            });
-            console.log(`  ✅ Navigated to: ${page.url()}`);
-          }
-          
-          // 🎯 CRITICAL: Final verification - wait for farm list to be visible
-          console.log('  🎯 Final verification: Looking for farm list...');
-          
-          try {
-            await page.waitForSelector('[id*="tabs"][id*="content-point"]', { 
-              state: 'visible', 
-              timeout: 15000 
-            });
-            console.log('     ✅ Farm list container is visible');
-          } catch (e) {
-            console.log(`     ❌ Farm list container not found: ${e.message}`);
-            const debugUrl = page.url();
-            console.log(`     → Current URL: ${debugUrl}`);
-            
-            // Take debug screenshot
-            const debugScreenshot = path.join(CONFIG.screenshotDir, `debug-no-farms-${timestamp}.png`);
-            await page.screenshot({ path: debugScreenshot, fullPage: true });
-            console.log(`     → Debug screenshot: ${debugScreenshot}`);
-            
-            // If still on login page, throw error
-            if (debugUrl.includes('/login') || debugUrl.includes('/signin')) {
-              throw new Error('Still on login page after authentication - credentials may be incorrect');
-            }
-          }
-          
-          // Wait for farm links to populate
-          console.log('     → Waiting for farm links to populate...');
-          await page.waitForSelector('div.css-nd8svt a[href*="/report/point/"]', { 
-            state: 'visible', 
-            timeout: 30000 
-          });
-          console.log('     ✅ Farm links are visible and ready\n');
-          
-          const loginScreenshot = path.join(CONFIG.screenshotDir, `2-after-login-${timestamp}.png`);
-          await page.screenshot({ path: loginScreenshot, fullPage: true });
-          console.log(`✅ Login completed successfully. Screenshot: ${loginScreenshot}\n`);
-          dashboard.log('Login successful', 'success');
-          
-        } else {
-          console.log('  ✅ No login form found, checking if already authenticated...');
-          const currentUrl = page.url();
-          console.log(`  → Current URL: ${currentUrl}\n`);
-          
-          // Verify we're on the right page
-          if (currentUrl.includes('/report') || await page.isVisible('[id*="tabs"]')) {
-            console.log('  ✅ Already on authenticated page\n');
-            dashboard.log('Already authenticated', 'success');
-          } else {
-            console.log('  ⚠️  Unclear authentication state, will attempt to continue...\n');
-          }
-        }
+        } catch (e) { continue; }
       }
       
-    } catch (loginError) {
-      console.log('❌ Login process failed. Error:', loginError.message);
-      console.log('   Stack:', loginError.stack);
-      console.log('   → Taking error screenshot...');
+      if (!emailFilled) {
+        console.log('  ⚠️ Fallback: using input[type="text"]');
+        await page.fill('input[type="text"]', CONFIG.username);
+      }
       
-      const errorScreenshot = path.join(CONFIG.screenshotDir, `error-login-${timestamp}.png`);
-      await page.screenshot({ path: errorScreenshot, fullPage: true });
-      console.log(`   → Error screenshot: ${errorScreenshot}\n`);
+      // Fill password
+      console.log('  → Entering password...');
+      await page.fill('input[type="password"]', CONFIG.password);
       
-      dashboard.log('Login failed: ' + loginError.message, 'error');
-      throw loginError; // Re-throw to stop execution
+      // Click login button
+      console.log('  → Clicking login button...');
+      const loginButtonSelectors = [
+        'button[type="submit"]',
+        'button:has-text("로그인")',
+        'button:has-text("Login")',
+        'input[type="submit"]'
+      ];
+      
+      let buttonClicked = false;
+      for (const selector of loginButtonSelectors) {
+        try {
+          const button = page.locator(selector).first();
+          if (await button.isVisible({ timeout: 1000 })) {
+            await button.click();
+            buttonClicked = true;
+            break;
+          }
+        } catch (e) { continue; }
+      }
+      
+      if (!buttonClicked) {
+        console.log('  → Pressing Enter as fallback...');
+        await page.keyboard.press('Enter');
+      }
+      
+      // ═══════════════════════════════════════════════════════════════════
+      // 🎯 STATE-BASED LOGIN VERIFICATION (SPA-Compatible)
+      // ═══════════════════════════════════════════════════════════════════
+      console.log('\n  🎯 STATE-BASED LOGIN VERIFICATION:');
+      console.log('  ═══════════════════════════════════');
+      console.log('  → Waiting for UI state change (Success or Error)...\n');
+      
+      const LOGIN_TIMEOUT = 15000;
+      
+      // Success indicators: Dashboard appears
+      const successPromise = (async () => {
+        await Promise.race([
+          page.waitForSelector('text=로그아웃', { state: 'visible', timeout: LOGIN_TIMEOUT }),
+          page.waitForSelector('div.css-nd8svt', { state: 'visible', timeout: LOGIN_TIMEOUT }),
+          page.waitForSelector('[id*="tabs"][id*="content-point"]', { state: 'visible', timeout: LOGIN_TIMEOUT }),
+          page.waitForSelector('a[href*="/report/point/"]', { state: 'visible', timeout: LOGIN_TIMEOUT })
+        ]);
+        return { status: 'success' };
+      })();
+      
+      // Failure indicators: Error message appears
+      const failurePromise = (async () => {
+        await Promise.race([
+          page.waitForSelector('text=/invalid|incorrect|wrong|error|failed|실패|오류/i', { state: 'visible', timeout: LOGIN_TIMEOUT }),
+          page.waitForSelector('.error-message, .alert-error, [class*="error"]', { state: 'visible', timeout: LOGIN_TIMEOUT })
+        ]);
+        return { status: 'failure' };
+      })();
+      
+      const timeoutPromise = new Promise((_, reject) => {
+        setTimeout(() => reject(new Error('timeout')), LOGIN_TIMEOUT);
+      });
+      
+      try {
+        const result = await Promise.race([
+          successPromise.catch(() => null),
+          failurePromise.catch(() => null),
+          timeoutPromise
+        ]);
+        
+        if (result === null) {
+          // Fallback: check current state
+          console.log('  → No clear signal, checking page state...');
+          const farmListVisible = await page.locator('div.css-nd8svt, a[href*="/report/point/"], text=로그아웃').first().isVisible().catch(() => false);
+          const errorVisible = await page.locator('text=/invalid|error|실패/i').first().isVisible().catch(() => false);
+          
+          if (farmListVisible) {
+            console.log('  ✅ Login confirmed by UI change');
+          } else if (errorVisible) {
+            const errorScreenshot = path.join(CONFIG.screenshotDir, `login-error-${timestamp}.png`);
+            await page.screenshot({ path: errorScreenshot, fullPage: true });
+            throw new Error('❌ Login failed: Invalid credentials - Check screenshot: ' + errorScreenshot);
+          } else {
+            const timeoutScreenshot = path.join(CONFIG.screenshotDir, `login-timeout-${timestamp}.png`);
+            await page.screenshot({ path: timeoutScreenshot, fullPage: true });
+            throw new Error('❌ Login timed out - Check screenshot: ' + timeoutScreenshot);
+          }
+        } else if (result.status === 'success') {
+          console.log('  ✅ Login confirmed by UI change (Dashboard appeared)');
+        } else if (result.status === 'failure') {
+          const errorScreenshot = path.join(CONFIG.screenshotDir, `login-error-${timestamp}.png`);
+          await page.screenshot({ path: errorScreenshot, fullPage: true });
+          throw new Error('❌ Login failed: Invalid credentials - Check screenshot: ' + errorScreenshot);
+        }
+      } catch (raceError) {
+        if (raceError.message === 'timeout') {
+          const timeoutScreenshot = path.join(CONFIG.screenshotDir, `login-timeout-${timestamp}.png`);
+          await page.screenshot({ path: timeoutScreenshot, fullPage: true });
+          throw new Error('❌ Login timed out - Check screenshot: ' + timeoutScreenshot);
+        }
+        throw raceError;
+      }
+      
+      console.log('  ═══════════════════════════════════\n');
+      
+      // Wait for network to stabilize
+      await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {
+        console.log('  ⚠️  Network not fully idle, continuing...');
+      });
+      
+      const loginScreenshot = path.join(CONFIG.screenshotDir, `2-after-login-${timestamp}.png`);
+      await page.screenshot({ path: loginScreenshot, fullPage: true });
+      console.log(`  ✅ Login completed. Screenshot: ${loginScreenshot}\n`);
+      dashboard.log('Login successful', 'success');
+      
+    } else {
+      // Neither authenticated nor login form visible - unclear state
+      console.log('  ⚠️  Unclear authentication state, attempting to continue...');
+      const debugScreenshot = path.join(CONFIG.screenshotDir, `unclear-auth-${timestamp}.png`);
+      await page.screenshot({ path: debugScreenshot, fullPage: true });
+      console.log(`  → Debug screenshot: ${debugScreenshot}\n`);
     }
     
-    // Step 3: Wait for manager's irrigation to show up
-    console.log(`📊 Step 3: Waiting for "${CONFIG.targetName}'s irrigation" to appear...`);
+    // ─────────────────────────────────────────────────────────────────────────────
+    // STEP 3: NAVIGATE TO REPORT PAGE (only after confirmed auth)
+    // ─────────────────────────────────────────────────────────────────────────────
+    console.log('📊 Step 3: Navigating to Report page...');
+    dashboard.updateStatus('📊 Loading report page...', 'running');
+    dashboard.updateStep('Step 3: Navigate to /report', 30);
+    
+    const currentUrl = page.url();
+    
+    if (!currentUrl.includes('/report')) {
+      console.log('  → Not on /report page, navigating...');
+      await page.goto('https://admin.iofarm.com/report', { 
+        waitUntil: 'domcontentloaded', 
+        timeout: 20000 
+      });
+      console.log(`  → Navigated to: ${page.url()}`);
+    } else {
+      console.log('  → Already on /report page');
+    }
+    
+    // Wait for Farm List to appear (confirms we're authenticated and on the right page)
+    console.log('  → Waiting for Farm List to load...');
+    try {
+      await page.waitForSelector('div.css-nd8svt a[href*="/report/point/"]', { 
+        state: 'visible', 
+        timeout: 20000 
+      });
+      console.log('  ✅ Farm List loaded successfully!\n');
+      dashboard.log('Farm list loaded', 'success');
+    } catch (farmListError) {
+      console.log('  ⚠️  Farm list selector not found, trying alternative...');
+      // Try alternative selector
+      await page.waitForSelector('[id*="tabs"][id*="content-point"] a', { 
+        state: 'visible', 
+        timeout: 10000 
+      }).catch(() => {
+        console.log('  ⚠️  Alternative selector also failed, but continuing...');
+      });
+    }
+    
+    const reportScreenshot = path.join(CONFIG.screenshotDir, `3-report-page-${timestamp}.png`);
+    await page.screenshot({ path: reportScreenshot, fullPage: true });
+    console.log(`  → Screenshot: ${reportScreenshot}\n`);
+    dashboard.log('Report page ready', 'success');
+    
+    // ═══════════════════════════════════════════════════════════════════════════
+    // END OF SEQUENTIAL NAVIGATION FLOW - Now proceed to farm processing
+    // ═══════════════════════════════════════════════════════════════════════════
+    
+    // Step 4: Wait for manager's irrigation to show up
+    console.log(`📊 Step 4: Waiting for "${CONFIG.targetName}'s irrigation" to appear...`);
     
     try {
       // Show current URL
