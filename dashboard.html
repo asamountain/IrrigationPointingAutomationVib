@@ -515,6 +515,31 @@
             </div>
         </div>
 
+        <!-- Report History Panel (shown during Report Sending mode) -->
+        <div class="card hidden" id="report-history-panel" style="margin-bottom: 20px;">
+            <h2>📤 Report History</h2>
+            <div class="report-summary" style="display: flex; gap: 20px; justify-content: center; margin-bottom: 15px; flex-wrap: wrap;">
+                <span id="report-sent-count" style="font-weight: 600; color: #22c55e;">✅ Sent: 0</span>
+                <span id="report-skipped-count" style="font-weight: 600; color: #f59e0b;">⚠️ Skipped: 0</span>
+                <span id="report-error-count" style="font-weight: 600; color: #ef4444;">❌ Errors: 0</span>
+            </div>
+            <div class="report-history-table-container" style="max-height: 300px; overflow-y: auto; border: 1px solid #e5e7eb; border-radius: 8px;">
+                <table style="width: 100%; border-collapse: collapse; font-size: 0.9em;">
+                    <thead style="position: sticky; top: 0; background: #f3f4f6;">
+                        <tr>
+                            <th style="padding: 10px; text-align: left; border-bottom: 2px solid #e5e7eb;">Time</th>
+                            <th style="padding: 10px; text-align: left; border-bottom: 2px solid #e5e7eb;">Farm Name</th>
+                            <th style="padding: 10px; text-align: center; border-bottom: 2px solid #e5e7eb;">Status</th>
+                            <th style="padding: 10px; text-align: left; border-bottom: 2px solid #e5e7eb;">Reason</th>
+                        </tr>
+                    </thead>
+                    <tbody id="report-history-body">
+                        <!-- Report rows will be inserted here -->
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
         <!-- Learning Progress Section -->
         <div class="card" id="learning-card" style="margin-bottom: 20px;">
             <h2>🎓 Learning Progress</h2>
@@ -758,6 +783,63 @@
             // 🔄 NEW: Handle farm count sync from automation
             if (data.type === 'update_farm_count') {
                 updateFarmDropdown(data.count);
+            }
+
+            // 📤 NEW: Handle report_update events for Report History Panel
+            if (data.type === 'report_update') {
+                addReportHistoryEntry(data.status, data.farmName, data.message);
+            }
+        }
+
+        // 📤 Report History Panel state
+        let reportCounts = { sent: 0, skipped: 0, error: 0 };
+
+        function addReportHistoryEntry(status, farmName, message) {
+            // Show the report history panel
+            document.getElementById('report-history-panel').classList.remove('hidden');
+            
+            // Update counters
+            if (status === 'Sent') reportCounts.sent++;
+            else if (status === 'Skipped') reportCounts.skipped++;
+            else if (status === 'Error') reportCounts.error++;
+            
+            document.getElementById('report-sent-count').textContent = `✅ Sent: ${reportCounts.sent}`;
+            document.getElementById('report-skipped-count').textContent = `⚠️ Skipped: ${reportCounts.skipped}`;
+            document.getElementById('report-error-count').textContent = `❌ Errors: ${reportCounts.error}`;
+            
+            // Add row to table
+            const tbody = document.getElementById('report-history-body');
+            const row = document.createElement('tr');
+            
+            // Status badge styling
+            let badgeColor, badgeEmoji;
+            if (status === 'Sent') {
+                badgeColor = '#22c55e';
+                badgeEmoji = '✅';
+            } else if (status === 'Skipped') {
+                badgeColor = '#f59e0b';
+                badgeEmoji = '⚠️';
+            } else {
+                badgeColor = '#ef4444';
+                badgeEmoji = '❌';
+            }
+            
+            const time = new Date().toLocaleTimeString();
+            row.innerHTML = `
+                <td style="padding: 8px; border-bottom: 1px solid #e5e7eb; white-space: nowrap;">${time}</td>
+                <td style="padding: 8px; border-bottom: 1px solid #e5e7eb; font-weight: 500;">${farmName || 'Unknown'}</td>
+                <td style="padding: 8px; border-bottom: 1px solid #e5e7eb; text-align: center;">
+                    <span style="background: ${badgeColor}; color: white; padding: 2px 8px; border-radius: 4px; font-size: 0.85em;">${badgeEmoji} ${status}</span>
+                </td>
+                <td style="padding: 8px; border-bottom: 1px solid #e5e7eb; color: #6b7280; font-size: 0.9em;">${message || '-'}</td>
+            `;
+            
+            // Insert at top of table
+            tbody.insertBefore(row, tbody.firstChild);
+            
+            // Keep only last 100 entries
+            while (tbody.children.length > 100) {
+                tbody.removeChild(tbody.lastChild);
             }
         }
 

@@ -735,17 +735,20 @@ async function runReportSending(config, dashboard, runStats) {
           if (buttonClicked) {
             console.log('  ✅ Report sent successfully!\n');
             dashboard.log(`✅ Report sent for: ${farm.name}`, 'success');
+            dashboard.broadcast('report_update', { status: 'Sent', farmName: farm.name, message: 'Report created successfully' });
             reportsCreated++;
             runStats.successCount++;
             await page.waitForTimeout(1500); // Brief wait for submission
           } else {
             console.log('  ⚠️  "리포트 생성" button not found on page\n');
             dashboard.log(`⚠️ Button not found for: ${farm.name}`, 'warning');
+            dashboard.broadcast('report_update', { status: 'Skipped', farmName: farm.name, message: 'Button not found on page' });
             reportsSkipped++;
           }
         } else {
           console.log('  ⚠️  Validation failed. Skipping report creation.\n');
           dashboard.log(`⚠️ Skipped ${farm.name}: ${validationResult.reason}`, 'warning');
+          dashboard.broadcast('report_update', { status: 'Skipped', farmName: farm.name, message: validationResult.reason });
           reportsSkipped++;
           runStats.skipCount++;
         }
@@ -758,6 +761,7 @@ async function runReportSending(config, dashboard, runStats) {
         console.log(`     → ${error.message}`);
         console.log(`     → Force-continuing to next farm...\n`);
         dashboard.log(`❌ Timeout/Error on ${farm.name}: ${error.message}`, 'error');
+        dashboard.broadcast('report_update', { status: 'Error', farmName: farm.name, message: error.message });
         reportsSkipped++;
         runStats.errorCount++;
         
@@ -1277,44 +1281,80 @@ async function main() {
     }
     
     // Step 4: Click manager radio button to select that manager
-    console.log(`🎯 Step 4: Selecting "${CONFIG.targetName}" manager...`);
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // 🎯 PRECISE TEXT TARGETING: Use Chakra UI segment group class with exact match
+    // ═══════════════════════════════════════════════════════════════════════════════
+    console.log(`🎯 Step 4: Selecting "${CONFIG.targetName}" manager (Precise Targeting)...`);
     
     try {
-      // Use JavaScript to click the radio button (more reliable than Playwright click)
-      const radioClicked = await page.evaluate((managerName) => {
-        // Find radio button by label text
-        const labels = Array.from(document.querySelectorAll('label'));
-        const managerLabel = labels.find(label => label.textContent.includes(managerName));
-        if (managerLabel) {
-          managerLabel.click();
-          return true;
-        }
-        
-        // Fallback: try input directly
-        const radios = Array.from(document.querySelectorAll('input[type="radio"]'));
-        const managerRadio = radios.find(radio => 
-          radio.id.includes(managerName) || radio.value.includes(managerName)
-        );
-        if (managerRadio) {
-          managerRadio.click();
-          return true;
-        }
-        
-        return false;
-      }, CONFIG.targetName); // Pass the manager name from CONFIG
+      // Define precise locator using Chakra UI class + exact text match
+      const managerButton = page.locator('.chakra-segment-group__itemText', { hasText: new RegExp(`^${CONFIG.targetName}$`) });
       
-      if (radioClicked) {
-        console.log(`  ✅ Clicked "${CONFIG.targetName}" radio button via JavaScript`);
-        // ⚡ FAST: No wait needed after JavaScript click
+      // Check if the button exists
+      const buttonCount = await managerButton.count();
+      console.log(`  → Found ${buttonCount} button(s) matching "${CONFIG.targetName}"`);
+      
+      if (buttonCount > 0) {
+        // Primary: Force click on the Playwright locator
+        console.log(`  → Attempting Playwright force-click...`);
+        try {
+          await managerButton.first().click({ force: true, timeout: 5000 });
+          console.log(`  ✅ Playwright click successful`);
+        } catch (clickError) {
+          // Fallback: Use native JavaScript click
+          console.log(`  ⚠️  Playwright click failed, using JS fallback...`);
+          const jsClicked = await page.evaluate((targetName) => {
+            const spans = Array.from(document.querySelectorAll('.chakra-segment-group__itemText'));
+            const targetSpan = spans.find(span => span.textContent.trim() === targetName);
+            if (targetSpan) {
+              // Click the span itself
+              targetSpan.click();
+              // Also try clicking parent label if exists
+              const parentLabel = targetSpan.closest('label');
+              if (parentLabel) parentLabel.click();
+              return true;
+            }
+            return false;
+          }, CONFIG.targetName);
+          
+          if (jsClicked) {
+            console.log(`  ✅ JavaScript fallback click successful`);
+          } else {
+            console.log(`  ❌ JavaScript fallback also failed`);
+          }
+        }
+        
+        // Wait for UI to acknowledge the change
+        console.log(`  → Waiting for UI state change...`);
+        try {
+          // Wait for the target input to become checked
+          await page.waitForFunction((targetName) => {
+            const spans = Array.from(document.querySelectorAll('.chakra-segment-group__itemText'));
+            const targetSpan = spans.find(span => span.textContent.trim() === targetName);
+            if (targetSpan) {
+              const parentLabel = targetSpan.closest('label');
+              if (parentLabel) {
+                return parentLabel.getAttribute('data-state') === 'checked';
+              }
+            }
+            return false;
+          }, CONFIG.targetName, { timeout: 3000 });
+          console.log(`  ✅ UI confirmed: "${CONFIG.targetName}" is now selected`);
+        } catch (waitError) {
+          console.log(`  ⚠️  UI state change not detected, adding safety buffer...`);
+        }
+        
+        // Safety buffer for AJAX reload
+        await page.waitForTimeout(2000);
         
         const step4Screenshot = path.join(CONFIG.screenshotDir, `4-selected-manager-${timestamp}.png`);
         await page.screenshot({ path: step4Screenshot, fullPage: true });
         console.log(`  📸 Screenshot: ${step4Screenshot}\n`);
       } else {
-        console.log(`  ⚠️  Could not find "${CONFIG.targetName}" radio button\n`);
+        console.log(`  ⚠️  Could not find "${CONFIG.targetName}" button using .chakra-segment-group__itemText\n`);
       }
     } catch (error) {
-      console.log(`  ⚠️  Error clicking "${CONFIG.targetName}" radio: ${error.message}\n`);
+      console.log(`  ⚠️  Error selecting "${CONFIG.targetName}" manager: ${error.message}\n`);
     }
     
     // Step 5: Get all farms from the list and loop through them
