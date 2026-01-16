@@ -91,9 +91,68 @@ function loadLearningOffsets() {
   }
 }
 
+// 🔤 AUTO-FONT INSTALLATION: Ensures Korean/CJK fonts are available on Linux
+// Prevents "tofu" (broken squares) when rendering Korean text
+function ensureFontsInstalled() {
+  // Only run on Linux (including WSL)
+  if (process.platform !== 'linux') {
+    return;
+  }
+  
+  console.log('🔤 Checking for CJK font support (Linux)...');
+  
+  // Check if fonts-noto-cjk is installed
+  try {
+    execSync('dpkg -s fonts-noto-cjk', { stdio: 'pipe' });
+    console.log('  ✅ Korean/CJK fonts already installed.');
+    return;
+  } catch (checkError) {
+    // Font package not found - attempt to install
+    console.log('  ⚠️ Korean fonts missing. Attempting auto-installation...');
+    
+    const installCommand = 'sudo apt-get update && sudo apt-get install -y fonts-noto-cjk fonts-noto-core fonts-liberation';
+    
+    try {
+      console.log('  📦 Installing font packages (requires sudo)...');
+      console.log(`  → Running: ${installCommand}`);
+      
+      execSync(installCommand, { 
+        stdio: 'inherit',
+        timeout: 300000 // 5 minutes timeout
+      });
+      
+      console.log('  ✅ Font packages installed successfully.');
+      
+      // Refresh font cache
+      console.log('  🔄 Refreshing font cache...');
+      try {
+        execSync('sudo fc-cache -f -v', { stdio: 'pipe' });
+        console.log('  ✅ Font cache refreshed.');
+      } catch (cacheError) {
+        console.log('  ⚠️ Font cache refresh failed (non-critical).');
+      }
+      
+    } catch (installError) {
+      console.log('\n  ❌ ═══════════════════════════════════════════════════════════');
+      console.log('  ❌ Auto-install failed (needs sudo or other issue).');
+      console.log('  ❌ ═══════════════════════════════════════════════════════════');
+      console.log('  💡 Please run this command manually:\n');
+      console.log(`     ${installCommand}`);
+      console.log('     sudo fc-cache -f -v\n');
+      console.log('  ═══════════════════════════════════════════════════════════\n');
+      // Continue anyway - browser will launch but Korean text may be broken
+    }
+  }
+}
+
 // 🌍 UNIVERSAL BROWSER LAUNCHER: Cross-platform "Write Once, Run Anywhere"
 // Handles: Windows, macOS, Linux/WSL with automatic dependency installation
 async function launchBrowser() {
+  // ═══════════════════════════════════════════════════════════════════
+  // STEP 0: PRE-FLIGHT FONT CHECK (Linux only)
+  // ═══════════════════════════════════════════════════════════════════
+  ensureFontsInstalled();
+  
   // ═══════════════════════════════════════════════════════════════════
   // STEP 1: OS DETECTION
   // ═══════════════════════════════════════════════════════════════════
@@ -267,97 +326,156 @@ async function runReportSending(config, dashboard, runStats) {
     console.log('🔐 Step 1: Navigation & Authentication...');
     dashboard.updateStatus('🔐 Authenticating...', 'running');
     
+    const timestamp = new Date().toISOString().replace(/:/g, '-').split('.')[0];
+    
     console.log('  → Navigating to root URL...');
     await page.goto('https://admin.iofarm.com/', { 
-      waitUntil: 'load', 
+      waitUntil: 'domcontentloaded', 
       timeout: 30000 
     });
     
-    // Wait a moment for any auto-redirects
-    await page.waitForTimeout(1000);
+    // ═══════════════════════════════════════════════════════════════════
+    // 🎯 SMART AUTHENTICATION DETECTION (Wait for React to render)
+    // ═══════════════════════════════════════════════════════════════════
+    console.log('  → Waiting for page to stabilize (networkidle)...');
+    await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {
+      console.log('  ⚠️  Network not fully idle after 15s, continuing...');
+    });
     
     const currentUrl = page.url();
     console.log(`  → Landed at: ${currentUrl}`);
     
-    // Step 2: Check Auth State by URL
-    if (currentUrl.includes('/report')) {
-      // Already logged in and auto-redirected to /report
-      console.log('  ✅ Already authenticated (auto-redirected to /report)');
-    } else {
-      // Check if login form is present
-      console.log('  🔍 Checking for login form...');
-      const emailInputVisible = await page.isVisible('input[type="email"]').catch(() => false);
+    // Take screenshot to see what we're working with
+    const authScreenshot = path.join(CONFIG.screenshotDir, `auth-check-${timestamp}.png`);
+    await page.screenshot({ path: authScreenshot, fullPage: true });
+    console.log(`  → Auth state screenshot: ${authScreenshot}`);
+    
+    // ─────────────────────────────────────────────────────────────────────────────
+    // DUAL-PATH DETECTION: Race between Login Form vs Dashboard
+    // ─────────────────────────────────────────────────────────────────────────────
+    console.log('  🔍 Detecting page state (Login Form vs Dashboard)...');
+    
+    const DETECTION_TIMEOUT = 10000;
+    
+    // Path A: Login form selectors
+    const loginFormPromise = (async () => {
+      await Promise.race([
+        page.waitForSelector('input[name="email"]', { state: 'visible', timeout: DETECTION_TIMEOUT }),
+        page.waitForSelector('input[type="email"]', { state: 'visible', timeout: DETECTION_TIMEOUT }),
+        page.waitForSelector('input[placeholder*="이메일"]', { state: 'visible', timeout: DETECTION_TIMEOUT }),
+        page.waitForSelector('input[placeholder*="email" i]', { state: 'visible', timeout: DETECTION_TIMEOUT })
+      ]);
+      return { state: 'login_form' };
+    })();
+    
+    // Path B: Dashboard/authenticated state selectors
+    const dashboardPromise = (async () => {
+      await Promise.race([
+        page.waitForSelector('text=로그아웃', { state: 'visible', timeout: DETECTION_TIMEOUT }),
+        page.waitForSelector('text=Logout', { state: 'visible', timeout: DETECTION_TIMEOUT }),
+        page.waitForSelector('div.css-nd8svt', { state: 'visible', timeout: DETECTION_TIMEOUT }),
+        page.waitForSelector('a[href*="/report/point/"]', { state: 'visible', timeout: DETECTION_TIMEOUT })
+      ]);
+      return { state: 'dashboard' };
+    })();
+    
+    let pageState;
+    try {
+      pageState = await Promise.race([
+        loginFormPromise.catch(() => null),
+        dashboardPromise.catch(() => null)
+      ]);
       
-      if (emailInputVisible) {
-        console.log('  → Login form detected, filling credentials...');
+      // If neither resolved quickly, wait a bit more and check manually
+      if (!pageState) {
+        await page.waitForTimeout(2000);
+        const hasLoginField = await page.locator('input[type="email"], input[name="email"], input[placeholder*="이메일"]').first().isVisible().catch(() => false);
+        const hasDashboard = await page.locator('text=로그아웃, div.css-nd8svt').first().isVisible().catch(() => false);
         
-        // Fill email
-        console.log(`  → Email: ${CONFIG.username}`);
-        await page.fill('input[type="email"]', CONFIG.username);
-        
-        // Fill password
-        console.log('  → Password: ********');
-        await page.fill('input[type="password"]', CONFIG.password);
-        
-        // Submit
-        console.log('  → Clicking submit button...');
-        await page.click('button[type="submit"]');
-        
-        // ═══════════════════════════════════════════════════════════════════
-        // 🎯 STATE-BASED LOGIN VERIFICATION (SPA-Compatible)
-        // ═══════════════════════════════════════════════════════════════════
-        console.log('  → Verifying login via UI state change...');
-        
-        const LOGIN_TIMEOUT = 10000;
-        
-        const successPromise = (async () => {
-          await Promise.race([
-            page.waitForSelector('div.css-nd8svt', { state: 'visible', timeout: LOGIN_TIMEOUT }),
-            page.waitForSelector('[id*="tabs"][id*="content-point"]', { state: 'visible', timeout: LOGIN_TIMEOUT }),
-            page.waitForSelector('a[href*="/report/point/"]', { state: 'visible', timeout: LOGIN_TIMEOUT })
-          ]);
-          return { status: 'success' };
-        })();
-        
-        const failurePromise = (async () => {
-          await page.waitForSelector('text=/invalid|incorrect|error|실패/i', { state: 'visible', timeout: LOGIN_TIMEOUT });
-          return { status: 'failure' };
-        })();
-        
-        try {
-          const result = await Promise.race([
-            successPromise.catch(() => null),
-            failurePromise.catch(() => null),
-            new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), LOGIN_TIMEOUT))
-          ]);
-          
-          if (result?.status === 'failure') {
-            throw new Error('❌ Login failed: Invalid credentials');
-          } else if (result?.status === 'success') {
-            console.log('  ✅ Login confirmed by UI change');
-          } else {
-            // Check final state
-            const farmListVisible = await page.locator('div.css-nd8svt, a[href*="/report/point/"]').first().isVisible().catch(() => false);
-            if (farmListVisible) {
-              console.log('  ✅ Login confirmed by UI change');
-            } else {
-              throw new Error('❌ Login timed out - Check screenshot');
-            }
-          }
-        } catch (raceError) {
-          if (raceError.message === 'timeout') {
-            throw new Error('❌ Login timed out - Check screenshot');
-          }
-          throw raceError;
-        }
-        
-        console.log(`  ✅ Login successful! Current URL: ${page.url()}`);
-      } else {
-        console.log('  ⚠️  No login form found, assuming authenticated');
+        if (hasLoginField) pageState = { state: 'login_form' };
+        else if (hasDashboard) pageState = { state: 'dashboard' };
       }
+    } catch (e) {
+      pageState = null;
     }
     
-    // Step 3: Ensure We're at Report Page
+    console.log(`  → Detected state: ${pageState?.state || 'unknown'}`);
+    
+    // ─────────────────────────────────────────────────────────────────────────────
+    // ACTION BASED ON DETECTED STATE
+    // ─────────────────────────────────────────────────────────────────────────────
+    
+    if (pageState?.state === 'dashboard') {
+      // Already authenticated
+      console.log('  ✅ Already authenticated (Dashboard detected)');
+      
+    } else if (pageState?.state === 'login_form') {
+      // Login required
+      console.log('  → Found login form, entering credentials...');
+      
+      // Fill email (try multiple selectors)
+      const emailSelectors = [
+        'input[type="email"]',
+        'input[name="email"]',
+        'input[placeholder*="이메일"]',
+        'input[placeholder*="email" i]'
+      ];
+      
+      let emailFilled = false;
+      for (const selector of emailSelectors) {
+        try {
+          const field = page.locator(selector).first();
+          if (await field.isVisible({ timeout: 500 })) {
+            await field.fill(CONFIG.username);
+            console.log(`  → Email entered: ${CONFIG.username}`);
+            emailFilled = true;
+            break;
+          }
+        } catch (e) { continue; }
+      }
+      
+      if (!emailFilled) {
+        throw new Error('❌ Could not find email input field');
+      }
+      
+      // Fill password
+      console.log('  → Password: ********');
+      await page.fill('input[type="password"]', CONFIG.password);
+      
+      // Click login button
+      console.log('  → Clicking login button...');
+      const loginClicked = await page.locator('button[type="submit"], button:has-text("로그인"), button:has-text("Login")').first().click().then(() => true).catch(() => false);
+      if (!loginClicked) {
+        await page.keyboard.press('Enter');
+      }
+      
+      // Wait for dashboard to appear (confirms login success)
+      console.log('  → Waiting for dashboard to appear...');
+      try {
+        await Promise.race([
+          page.waitForSelector('text=로그아웃', { state: 'visible', timeout: 15000 }),
+          page.waitForSelector('div.css-nd8svt', { state: 'visible', timeout: 15000 }),
+          page.waitForSelector('a[href*="/report/point/"]', { state: 'visible', timeout: 15000 })
+        ]);
+        console.log('  ✅ Login successful! Dashboard appeared.');
+      } catch (loginError) {
+        // Check for error message
+        const hasError = await page.locator('text=/invalid|incorrect|error|실패/i').first().isVisible().catch(() => false);
+        if (hasError) {
+          throw new Error('❌ Login failed: Invalid credentials');
+        }
+        throw new Error('❌ Login failed: Dashboard did not appear');
+      }
+      
+    } else {
+      // Unknown state - take debug screenshot and throw
+      const debugScreenshot = path.join(CONFIG.screenshotDir, `debug-auth-state-${timestamp}.png`);
+      await page.screenshot({ path: debugScreenshot, fullPage: true });
+      console.log(`  ❌ Unknown page state. Debug screenshot: ${debugScreenshot}`);
+      throw new Error(`❌ Unknown page state - neither login form nor dashboard detected. Check: ${debugScreenshot}`);
+    }
+    
+    // Step 2: Ensure We're at Report Page
     const finalUrl = page.url();
     if (!finalUrl.includes('/report')) {
       console.log('\n  📍 Not at /report page, navigating there...');
@@ -813,68 +931,103 @@ async function main() {
     console.log(`  → Screenshot: ${screenshotPath}\n`);
     
     // ─────────────────────────────────────────────────────────────────────────────
-    // STEP 2: ROBUST AUTHENTICATION CHECK
+    // STEP 2: SMART AUTHENTICATION DETECTION
     // ─────────────────────────────────────────────────────────────────────────────
-    console.log('🔐 Step 2: Checking authentication status...');
+    console.log('🔐 Step 2: Smart Authentication Detection...');
     dashboard.updateStatus('🔐 Checking authentication...', 'running');
     dashboard.updateStep('Step 2: Authentication check', 20);
     
-    // Check for authenticated state indicators
-    const authCheck = await page.evaluate(() => {
-      // Indicators of authenticated state
-      const hasLogoutButton = document.body.innerText.includes('로그아웃') || 
-                              document.body.innerText.includes('Logout');
-      const hasFarmList = document.querySelector('div.css-nd8svt') !== null ||
-                          document.querySelector('[id*="tabs"][id*="content-point"]') !== null ||
-                          document.querySelectorAll('a[href*="/report/point/"]').length > 0;
-      const hasDashboard = document.querySelector('[class*="dashboard"]') !== null ||
-                           document.querySelector('[class*="sidebar"]') !== null;
-      
-      // Indicators of login page
-      const hasLoginForm = document.querySelector('input[type="email"]') !== null ||
-                           document.querySelector('input[type="password"]') !== null;
-      const hasLoginButton = document.body.innerText.includes('로그인') ||
-                             document.body.innerText.includes('Login');
-      
-      return {
-        isAuthenticated: (hasLogoutButton || hasFarmList || hasDashboard) && !hasLoginForm,
-        hasLoginForm: hasLoginForm,
-        hasFarmList: hasFarmList
-      };
+    // Wait for React app to fully render
+    console.log('  → Waiting for page to stabilize (networkidle)...');
+    await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {
+      console.log('  ⚠️  Network not fully idle after 15s, continuing...');
     });
     
-    console.log(`  → Auth check result: ${JSON.stringify(authCheck)}`);
+    // ═══════════════════════════════════════════════════════════════════
+    // DUAL-PATH DETECTION: Race between Login Form vs Dashboard
+    // ═══════════════════════════════════════════════════════════════════
+    console.log('  🔍 Detecting page state (Login Form vs Dashboard)...');
     
-    if (authCheck.isAuthenticated) {
+    const DETECTION_TIMEOUT = 10000;
+    
+    // Path A: Login form selectors
+    const loginFormPromise = (async () => {
+      await Promise.race([
+        page.waitForSelector('input[name="email"]', { state: 'visible', timeout: DETECTION_TIMEOUT }),
+        page.waitForSelector('input[type="email"]', { state: 'visible', timeout: DETECTION_TIMEOUT }),
+        page.waitForSelector('input[placeholder*="이메일"]', { state: 'visible', timeout: DETECTION_TIMEOUT }),
+        page.waitForSelector('input[placeholder*="email" i]', { state: 'visible', timeout: DETECTION_TIMEOUT })
+      ]);
+      return { state: 'login_form' };
+    })();
+    
+    // Path B: Dashboard/authenticated state selectors  
+    const dashboardPromise = (async () => {
+      await Promise.race([
+        page.waitForSelector('text=로그아웃', { state: 'visible', timeout: DETECTION_TIMEOUT }),
+        page.waitForSelector('text=Logout', { state: 'visible', timeout: DETECTION_TIMEOUT }),
+        page.waitForSelector('div.css-nd8svt', { state: 'visible', timeout: DETECTION_TIMEOUT }),
+        page.waitForSelector('a[href*="/report/point/"]', { state: 'visible', timeout: DETECTION_TIMEOUT })
+      ]);
+      return { state: 'dashboard' };
+    })();
+    
+    let pageState;
+    try {
+      pageState = await Promise.race([
+        loginFormPromise.catch(() => null),
+        dashboardPromise.catch(() => null)
+      ]);
+      
+      // If neither resolved quickly, wait a bit more and check manually
+      if (!pageState) {
+        console.log('  → No immediate detection, checking manually...');
+        await page.waitForTimeout(2000);
+        const hasLoginField = await page.locator('input[type="email"], input[name="email"], input[placeholder*="이메일"]').first().isVisible().catch(() => false);
+        const hasDashboard = await page.locator('text=로그아웃, div.css-nd8svt').first().isVisible().catch(() => false);
+        
+        if (hasLoginField) pageState = { state: 'login_form' };
+        else if (hasDashboard) pageState = { state: 'dashboard' };
+      }
+    } catch (e) {
+      pageState = null;
+    }
+    
+    console.log(`  → Detected state: ${pageState?.state || 'unknown'}`);
+    
+    // ─────────────────────────────────────────────────────────────────────────────
+    // ACTION BASED ON DETECTED STATE
+    // ─────────────────────────────────────────────────────────────────────────────
+    
+    if (pageState?.state === 'dashboard') {
       // ═══════════════════════════════════════════════════════════════════
       // ALREADY AUTHENTICATED
       // ═══════════════════════════════════════════════════════════════════
-      console.log('  ✅ Already authenticated! Dashboard/Farm list detected.');
+      console.log('  ✅ Already authenticated! Dashboard detected.');
       dashboard.log('Already authenticated', 'success');
       
-    } else if (authCheck.hasLoginForm) {
+    } else if (pageState?.state === 'login_form') {
       // ═══════════════════════════════════════════════════════════════════
       // LOGIN REQUIRED
       // ═══════════════════════════════════════════════════════════════════
-      console.log('  → Login form detected, proceeding with authentication...');
+      console.log('  → Found login form, entering credentials...');
       dashboard.updateStatus('🔐 Logging in...', 'running');
       
-      // Fill email
+      // Fill email (try multiple selectors)
       const emailSelectors = [
         'input[type="email"]',
         'input[name="email"]',
-        'input[name="username"]',
-        'input[placeholder*="email" i]',
-        'input[placeholder*="이메일" i]'
+        'input[placeholder*="이메일"]',
+        'input[placeholder*="email" i]'
       ];
       
       let emailFilled = false;
       for (const selector of emailSelectors) {
         try {
-          const emailField = page.locator(selector).first();
-          if (await emailField.isVisible({ timeout: 1000 })) {
-            console.log(`  → Entering email: ${CONFIG.username}`);
-            await emailField.fill(CONFIG.username);
+          const field = page.locator(selector).first();
+          if (await field.isVisible({ timeout: 500 })) {
+            await field.fill(CONFIG.username);
+            console.log(`  → Email entered: ${CONFIG.username}`);
             emailFilled = true;
             break;
           }
@@ -882,8 +1035,7 @@ async function main() {
       }
       
       if (!emailFilled) {
-        console.log('  ⚠️ Fallback: using input[type="text"]');
-        await page.fill('input[type="text"]', CONFIG.username);
+        throw new Error('❌ Could not find email input field');
       }
       
       // Fill password
@@ -1002,11 +1154,11 @@ async function main() {
       dashboard.log('Login successful', 'success');
       
     } else {
-      // Neither authenticated nor login form visible - unclear state
-      console.log('  ⚠️  Unclear authentication state, attempting to continue...');
-      const debugScreenshot = path.join(CONFIG.screenshotDir, `unclear-auth-${timestamp}.png`);
+      // Unknown state - take debug screenshot and throw error
+      const debugScreenshot = path.join(CONFIG.screenshotDir, `debug-auth-state-${timestamp}.png`);
       await page.screenshot({ path: debugScreenshot, fullPage: true });
-      console.log(`  → Debug screenshot: ${debugScreenshot}\n`);
+      console.log(`  ❌ Unknown page state. Debug screenshot: ${debugScreenshot}`);
+      throw new Error(`❌ Unknown page state - neither login form nor dashboard detected. Check: ${debugScreenshot}`);
     }
     
     // ─────────────────────────────────────────────────────────────────────────────
