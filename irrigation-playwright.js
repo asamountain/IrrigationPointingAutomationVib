@@ -13,6 +13,7 @@ import path from 'path';
 import { execSync } from 'child_process';
 import DashboardServer from './dashboard-server.js';
 import { setupNetworkInterception, waitForChartData, extractDataPoints } from './network-interceptor.js';
+import { trainAlgorithm } from './trainAlgorithm.js';
 
 // Configuration (move to config.js later)
 const CONFIG = {
@@ -23,7 +24,8 @@ const CONFIG = {
   outputDir: './data',
   screenshotDir: './screenshots',
   chartLearningMode: false, // Will be set by dashboard
-  watchMode: false // Will be set by dashboard
+  watchMode: false, // Will be set by dashboard
+  trainingMode: process.env.TRAINING_MODE === 'true' // F8-controlled training mode
 };
 
 // Ensure output directories exist
@@ -659,27 +661,27 @@ async function runReportSending(config, dashboard, runStats) {
         break;
       }
       
-      // ═══════════════════════════════════════════════════════════════════════════════
-      // URL ENFORCEMENT: Construct URL with explicit manager parameter
-      // ═══════════════════════════════════════════════════════════════════════════════
-      const targetManager = config.manager; // '승진' - enforce correct manager
-      
-      // Parse the scraped href (might have wrong manager param)
-      const rawUrl = new URL(farm.href, 'https://admin.iofarm.com');
-      
-      // Force the manager parameter to match config (overwrite any existing value)
-      rawUrl.searchParams.set('manager', targetManager);
-      
-      // Convert /point/ to /send-report/
-      const sendReportPath = rawUrl.pathname.replace('/report/point/', '/report/send-report/');
-      
-      // Construct final URL with enforced manager param
-      const fullUrl = `https://admin.iofarm.com${sendReportPath}${rawUrl.search}`;
-      
-      console.log(`  🌐 Navigating to: ${fullUrl}`);
-      console.log(`  ✅ Manager enforced: ${targetManager}\n`);
-      
+      // 🛡️ UNSTOPPABLE FARM LOOP: Wrap entire farm logic in try-catch
       try {
+        // ═══════════════════════════════════════════════════════════════════════════════
+        // URL ENFORCEMENT: Construct URL with explicit manager parameter
+        // ═══════════════════════════════════════════════════════════════════════════════
+        const targetManager = config.manager; // '승진' - enforce correct manager
+        
+        // Parse the scraped href (might have wrong manager param)
+        const rawUrl = new URL(farm.href, 'https://admin.iofarm.com');
+        
+        // Force the manager parameter to match config (overwrite any existing value)
+        rawUrl.searchParams.set('manager', targetManager);
+        
+        // Convert /point/ to /send-report/
+        const sendReportPath = rawUrl.pathname.replace('/report/point/', '/report/send-report/');
+        
+        // Construct final URL with enforced manager param
+        const fullUrl = `https://admin.iofarm.com${sendReportPath}${rawUrl.search}`;
+        
+        console.log(`  🌐 Navigating to: ${fullUrl}`);
+        console.log(`  ✅ Manager enforced: ${targetManager}\n`);
         // 🛡️ TIMEOUT SAFETY: Wrap in try/catch with explicit timeout
         await page.goto(fullUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
         console.log('  ✅ Page loaded');
@@ -860,12 +862,19 @@ async function runReportSending(config, dashboard, runStats) {
         runStats.farmsCompleted++;
         
       } catch (error) {
-        // 🛡️ TIMEOUT SAFETY: Catch and log, then continue
-        console.log(`  ❌ Error processing farm (timeout or page issue):`);
+        // 🛡️ UNSTOPPABLE: Catch all errors and continue to next farm
+        console.log(`  ❌ Error processing Farm ${farm.name}:`);
         console.log(`     → ${error.message}`);
-        console.log(`     → Force-continuing to next farm...\n`);
-        dashboard.log(`❌ Timeout/Error on ${farm.name}: ${error.message}`, 'error');
-        dashboard.broadcast('report_update', { status: 'Error', farmName: farm.name, message: error.message });
+        console.log(`     → Stack: ${error.stack?.split('\n')[0] || 'N/A'}`);
+        console.log(`     → 🔄 Continuing to next farm...\n`);
+        
+        dashboard.log(`❌ Error on ${farm.name}: ${error.message}`, 'error');
+        dashboard.broadcast('report_update', { 
+          status: 'Error', 
+          farmName: farm.name, 
+          message: error.message 
+        });
+        
         reportsSkipped++;
         runStats.errorCount++;
         
@@ -877,6 +886,9 @@ async function runReportSending(config, dashboard, runStats) {
         } catch (ssError) {
           console.log('     ⚠️  Could not save error screenshot\n');
         }
+        
+        // CRITICAL: Force continue to next farm
+        continue;
       }
     }
     
@@ -2118,7 +2130,39 @@ async function main() {
           uniqueEvents.sort((a, b) => a.index - b.index);
           
           const firstEvent = uniqueEvents[0];
-          const lastEvent = uniqueEvents[uniqueEvents.length - 1];
+          let lastEvent = uniqueEvents[uniqueEvents.length - 1];
+          
+          // 🎯 CRITICAL FIX: For LAST event, find the PEAK (end) instead of valley (start)
+          if (uniqueEvents.length > 0) {
+            const lastValleyIndex = lastEvent.index;
+            const PEAK_SEARCH_WINDOW = 30; // Search next 30 points for peak
+            let peakIndex = lastValleyIndex;
+            let peakValue = dataPoints[lastValleyIndex].y;
+            
+            const searchEnd = Math.min(lastValleyIndex + PEAK_SEARCH_WINDOW, dataPoints.length - 1);
+            console.log(`  🔍 Finding PEAK for last event (valley at index ${lastValleyIndex})...`);
+            console.log(`     → Searching indices ${lastValleyIndex} to ${searchEnd}`);
+            
+            for (let j = lastValleyIndex; j <= searchEnd; j++) {
+              if (dataPoints[j].y > peakValue) {
+                peakValue = dataPoints[j].y;
+                peakIndex = j;
+              }
+            }
+            
+            console.log(`     → Peak found at index ${peakIndex} (Y: ${peakValue.toFixed(3)})`);
+            console.log(`     → Rise from valley to peak: ${(peakValue - lastEvent.y).toFixed(3)}`);
+            
+            // Update lastEvent to use PEAK coordinates
+            lastEvent = {
+              index: peakIndex,
+              x: dataPoints[peakIndex].x,
+              y: dataPoints[peakIndex].y,
+              peakIndex: peakIndex,
+              rise: peakValue - lastEvent.y,
+              time: new Date(dataPoints[peakIndex].x).toTimeString().slice(0, 5)
+            };
+          }
           
           console.log(`     → First event at index ${firstEvent.index}`);
           console.log(`     → Last event at index ${lastEvent.index}`);
@@ -2613,6 +2657,38 @@ async function main() {
         // Show separation info
         if (clickResults.separationPercent !== undefined) {
           console.log(`     ✅ First (START) and Last (END) separated by ${clickResults.separationPercent}% of chart`);
+        }
+        
+        // ═══════════════════════════════════════════════════════════════════════
+        // 🎓 F8 TRAINING MODE: Pause and allow manual point correction
+        // ═══════════════════════════════════════════════════════════════════════
+        if (CONFIG.trainingMode && clickResults.firstCoords && clickResults.lastCoords) {
+          console.log(`\n     🎓 F8 TRAINING MODE ACTIVATED`);
+          
+          const trainingResult = await trainAlgorithm(
+            page,
+            farm.name,
+            currentDateStr,
+            clickResults.firstCoords,
+            clickResults.lastCoords
+          );
+          
+          // If user provided corrections, apply them
+          if (trainingResult.hasCorrections && trainingResult.offsets) {
+            console.log(`     🔧 Applying user corrections to coordinates...`);
+            
+            // Update first coordinates
+            clickResults.firstCoords.x += trainingResult.offsets.first.x;
+            clickResults.firstCoords.y += trainingResult.offsets.first.y;
+            
+            // Update last coordinates
+            clickResults.lastCoords.x += trainingResult.offsets.last.x;
+            clickResults.lastCoords.y += trainingResult.offsets.last.y;
+            
+            console.log(`     ✅ Coordinates adjusted with user feedback\n`);
+          } else {
+            console.log(`     ✅ Algorithm prediction accepted\n`);
+          }
         }
         
         // CHART LEARNING MODE: Show detected points and allow user correction
