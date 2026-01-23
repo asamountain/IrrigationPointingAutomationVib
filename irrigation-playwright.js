@@ -342,6 +342,7 @@ async function performRobustLogin(page) {
 /**
  * Select a manager by name using STRICT EXACT matching
  * Uses multiple strategies to ensure the correct manager is selected
+ * Handles DOM structure: <label><span>진우</span><input type="radio" value="진우"></label>
  * @param {Page} page - Playwright page object
  * @param {string} managerName - Exact name of the manager (e.g., '승진', '진우')
  * @returns {Promise<{success: boolean, matched: string, strategy: string}>}
@@ -354,15 +355,20 @@ async function selectManager(page, managerName) {
   let matchedText = '';
   let strategy = '';
   
-  // Strategy 1: Playwright getByLabel with exact: true
-  console.log(`  [1/4] getByLabel("${managerName}", { exact: true })`);
+  // 🔴 CRITICAL: Create regex for exact match (^name$)
+  const exactRegex = new RegExp(`^${managerName}$`);
+  
+  // Strategy 1: Use label.filter() with hasText regex (MOST RELIABLE for Korean)
+  console.log(`  [1/5] label.filter({ hasText: /^${managerName}$/ })`);
   try {
-    const labelLocator = page.getByLabel(managerName, { exact: true });
-    if (await labelLocator.count() > 0) {
-      await labelLocator.first().click({ timeout: 3000 });
+    const filteredLabel = page.locator('label').filter({ hasText: exactRegex });
+    const count = await filteredLabel.count();
+    console.log(`       Found ${count} matching label(s)`);
+    if (count > 0) {
+      await filteredLabel.first().click({ timeout: 3000 });
       clicked = true;
       matchedText = managerName;
-      strategy = 'getByLabel(exact)';
+      strategy = 'label.filter(hasText:regex)';
       console.log(`       ✅ SUCCESS`);
     } else {
       console.log(`       ⚠️ No match found`);
@@ -371,16 +377,18 @@ async function selectManager(page, managerName) {
     console.log(`       ⚠️ Failed: ${e.message}`);
   }
   
-  // Strategy 2: Playwright :text-is() pseudo-selector (exact match)
+  // Strategy 2: Find radio input by exact value attribute
   if (!clicked) {
-    console.log(`  [2/4] locator('label:text-is("${managerName}")')`);
+    console.log(`  [2/5] input[type="radio"][value="${managerName}"]`);
     try {
-      const exactLocator = page.locator(`label:text-is("${managerName}")`);
-      if (await exactLocator.count() > 0) {
-        await exactLocator.first().click({ timeout: 3000 });
+      const radioByValue = page.locator(`input[type="radio"][value="${managerName}"]`);
+      const count = await radioByValue.count();
+      console.log(`       Found ${count} radio(s) with exact value`);
+      if (count > 0) {
+        await radioByValue.first().click({ timeout: 3000 });
         clicked = true;
         matchedText = managerName;
-        strategy = ':text-is()';
+        strategy = 'input[value=exact]';
         console.log(`       ✅ SUCCESS`);
       } else {
         console.log(`       ⚠️ No match found`);
@@ -392,10 +400,12 @@ async function selectManager(page, managerName) {
   
   // Strategy 3: getByRole('radio') with exact name
   if (!clicked) {
-    console.log(`  [3/4] getByRole('radio', { name: "${managerName}", exact: true })`);
+    console.log(`  [3/5] getByRole('radio', { name: "${managerName}", exact: true })`);
     try {
       const radioLocator = page.getByRole('radio', { name: managerName, exact: true });
-      if (await radioLocator.count() > 0) {
+      const count = await radioLocator.count();
+      console.log(`       Found ${count} radio(s) by role`);
+      if (count > 0) {
         await radioLocator.first().click({ timeout: 3000 });
         clicked = true;
         matchedText = managerName;
@@ -409,45 +419,77 @@ async function selectManager(page, managerName) {
     }
   }
   
-  // Strategy 4: JavaScript DOM with strict === equality
+  // Strategy 4: Find span with exact text inside label
   if (!clicked) {
-    console.log(`  [4/4] JavaScript DOM strict === equality`);
+    console.log(`  [4/5] label:has(span:text-is("${managerName}"))`);
+    try {
+      const labelWithSpan = page.locator(`label:has(span:text-is("${managerName}"))`);
+      const count = await labelWithSpan.count();
+      console.log(`       Found ${count} label(s) with matching span`);
+      if (count > 0) {
+        await labelWithSpan.first().click({ timeout: 3000 });
+        clicked = true;
+        matchedText = managerName;
+        strategy = 'label:has(span:text-is)';
+        console.log(`       ✅ SUCCESS`);
+      } else {
+        console.log(`       ⚠️ No match found`);
+      }
+    } catch (e) {
+      console.log(`       ⚠️ Failed: ${e.message}`);
+    }
+  }
+  
+  // Strategy 5: JavaScript DOM with STRICT span text matching
+  if (!clicked) {
+    console.log(`  [5/5] JavaScript DOM - span.textContent === "${managerName}"`);
     const jsResult = await page.evaluate((targetName) => {
+      // First, find all labels with spans inside
       const labels = Array.from(document.querySelectorAll('label'));
+      const availableNames = [];
       
-      // STRICT: Only match if ENTIRE text equals target (trimmed)
       for (const label of labels) {
-        const text = label.textContent.trim();
-        if (text === targetName) {
+        // Check span text (most common pattern)
+        const span = label.querySelector('span');
+        if (span) {
+          const spanText = span.textContent.trim();
+          availableNames.push(spanText);
+          
+          // 🔴 STRICT: Only match if span text EXACTLY equals target
+          if (spanText === targetName) {
+            label.click();
+            return { success: true, matched: spanText, method: 'span.textContent' };
+          }
+        }
+        
+        // Check radio input value (backup)
+        const radio = label.querySelector('input[type="radio"]');
+        if (radio && radio.value === targetName) {
           label.click();
-          return { success: true, matched: text };
+          return { success: true, matched: radio.value, method: 'radio.value' };
         }
       }
       
-      // Try radio inputs by exact value
+      // Also try direct radio selection
       const radios = Array.from(document.querySelectorAll('input[type="radio"]'));
       for (const radio of radios) {
         if (radio.value === targetName) {
           radio.click();
-          return { success: true, matched: radio.value };
+          return { success: true, matched: radio.value, method: 'direct-radio' };
         }
       }
       
-      // Return available options for debugging
-      return { 
-        success: false, 
-        available: labels.map(l => l.textContent.trim()).filter(t => t.length > 0).slice(0, 10)
-      };
+      return { success: false, available: availableNames.filter(n => n.length > 0) };
     }, managerName);
     
     if (jsResult.success) {
       clicked = true;
       matchedText = jsResult.matched;
-      strategy = 'JavaScript(===)';
-      console.log(`       ✅ SUCCESS: Matched "${matchedText}"`);
+      strategy = `JavaScript(${jsResult.method})`;
+      console.log(`       ✅ SUCCESS via ${jsResult.method}`);
     } else {
       console.log(`       ❌ No exact match found`);
-      console.log(`       💡 Available labels: ${jsResult.available?.join(', ') || 'none'}`);
+      console.log(`       💡 Available names: [${jsResult.available?.join('], [') || 'none'}]`);
     }
   }
   
@@ -768,11 +810,16 @@ async function runReportSending(config, dashboard, runStats) {
         break;
       }
       
-      // Construct the send-report URL
+      // Construct the send-report URL with FORCED manager parameter
       const sendReportUrl = farm.href.replace('/report/point/', '/report/send-report/');
-      const fullUrl = `https://admin.iofarm.com${sendReportUrl}`;
       
-      console.log(`  ?? Navigating to: ${fullUrl}`);
+      // 🔴 CRITICAL: Force the manager query parameter to be correct
+      const urlObj = new URL(`https://admin.iofarm.com${sendReportUrl}`);
+      urlObj.searchParams.set('manager', config.manager); // Force overwrite with correct manager
+      const fullUrl = urlObj.toString();
+      
+      console.log(`  🔗 Navigating to: ${fullUrl}`);
+      console.log(`     → Manager param forced to: "${config.manager}"`);
       
       try {
         // ??? TIMEOUT SAFETY: Wrap in try/catch with explicit timeout
@@ -1600,13 +1647,15 @@ async function main() {
         continue;
       }
     
-      // ?? Get the base farm URL (without date parameter) for later navigation
+      // 🔗 Get the base farm URL and FORCE the manager parameter
       const baseFarmUrl = page.url().split('?')[0]; // Remove any existing query params
-      const urlParams = new URL(page.url()).searchParams;
-      const manager = urlParams.get('manager') || CONFIG.targetName;
+      
+      // 🔴 CRITICAL: Always use CONFIG.targetName, never trust URL params
+      const manager = CONFIG.targetName;
       const farmUrlWithManager = `${baseFarmUrl}?manager=${encodeURIComponent(manager)}`;
       
-      console.log(`  ?? Base farm URL: ${farmUrlWithManager}\n`);
+      console.log(`  🔗 Base farm URL: ${farmUrlWithManager}`);
+      console.log(`     → Manager forced to: "${manager}"\n`);
     
     // ???????????????????????????????????????????????????????????????????????????
     // ?? DATE LOOP (INNER) - Process dates from 5 days ago → Today
