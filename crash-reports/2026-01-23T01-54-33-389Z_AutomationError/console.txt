@@ -1,0 +1,59 @@
+=== BROWSER CONSOLE LOGS (Last 50) ===
+
+[2026-01-23T01:53:52.722Z] [LOG] [BROWSER] ✓ Valid farm #41: 논산윤정미0101
+[2026-01-23T01:53:52.722Z] [LOG] [BROWSER] ✓ Valid farm #42: 인제농업기술센터0102
+[2026-01-23T01:53:52.722Z] [LOG] [BROWSER] ✓ Valid farm #43: 제주고택균0101
+[2026-01-23T01:53:52.722Z] [LOG] [BROWSER] ✓ Valid farm #44: 김해장우영0101
+[2026-01-23T01:53:52.722Z] [LOG] [BROWSER] ✓ Valid farm #45: 보성서민석0101
+[2026-01-23T01:53:52.722Z] [LOG] [BROWSER] ✓ Valid farm #46: 상주혁신밸리교육베드0103(오이)
+[2026-01-23T01:53:52.722Z] [LOG] [BROWSER] ✓ Valid farm #47: 방주농원0103
+[2026-01-23T01:53:52.722Z] [LOG] [BROWSER] ✓ Valid farm #48: 방주농원0104
+[2026-01-23T01:53:52.722Z] [LOG] [BROWSER] ✓ Valid farm #49: [월수금]아이오크롭스진천0101(관수1)
+[2026-01-23T01:53:52.722Z] [LOG] [BROWSER] ✓ Valid farm #50: [월수금]아이오크롭스진천0104(관수2)
+[2026-01-23T01:53:52.724Z] [LOG] [BROWSER] ✓ Valid farm #51: [월수금]아이오크롭스진천0102(관수6)
+[2026-01-23T01:53:52.724Z] [LOG] [BROWSER] ✓ Valid farm #52: 경상남도농업기술원0102
+[2026-01-23T01:53:52.724Z] [LOG] [BROWSER] ✓ Valid farm #53: 경상남도농업기술원0103
+[2026-01-23T01:53:54.489Z] [LOG] ✅ F9 Manual Trigger listener installed - Press F9 to save crash report
+[2026-01-23T01:53:56.029Z] [WARNING] Highcharts warning: Consider including the "accessibility.js" module to make your chart more usable for people with disabilities. Set the "accessibility.enabled" option to false to remove this warning. See https://www.highcharts.com/docs/accessibility/accessibility-module.
+[2026-01-23T01:53:57.558Z] [LOG] ✅ F9 Manual Trigger listener installed - Press F9 to save crash report
+[2026-01-23T01:53:59.104Z] [WARNING] Highcharts warning: Consider including the "accessibility.js" module to make your chart more usable for people with disabilities. Set the "accessibility.enabled" option to false to remove this warning. See https://www.highcharts.com/docs/accessibility/accessibility-module.
+[2026-01-23T01:53:59.919Z] [LOG] ✅ F9 Manual Trigger listener installed - Press F9 to save crash report
+[2026-01-23T01:54:01.671Z] [WARNING] Highcharts warning: Consider including the "accessibility.js" module to make your chart more usable for people with disabilities. Set the "accessibility.enabled" option to false to remove this warning. See https://www.highcharts.com/docs/accessibility/accessibility-module.
+[2026-01-23T01:54:03.039Z] [LOG] ✅ F9 Manual Trigger listener installed - Press F9 to save crash report
+[2026-01-23T01:54:04.609Z] [WARNING] Highcharts warning: Consider including the "accessibility.js" module to make your chart more usable for people with disabilities. Set the "accessibility.enabled" option to false to remove this warning. See https://www.highcharts.com/docs/accessibility/accessibility-module.
+[2026-01-23T01:54:06.000Z] [LOG] ✅ F9 Manual Trigger listener installed - Press F9 to save crash report
+[2026-01-23T01:54:07.507Z] [WARNING] Highcharts warning: Consider including the "accessibility.js" module to make your chart more usable for people with disabilities. Set the "accessibility.enabled" option to false to remove this warning. See https://www.highcharts.com/docs/accessibility/accessibility-module.
+[2026-01-23T01:54:08.416Z] [LOG] ✅ F9 Manual Trigger listener installed - Press F9 to save crash report
+[2026-01-23T01:54:09.736Z] [LOG] 🔑 F9 key detected - triggering crash report...
+[2026-01-23T01:54:09.775Z] [WARNING] Highcharts warning: Consider including the "accessibility.js" module to make your chart more usable for people with disabilities. Set the "accessibility.enabled" option to false to remove this warning. See https://www.highcharts.com/docs/accessibility/accessibility-module.
+[2026-01-23T01:54:10.752Z] [LOG] ✅ F9 Manual Trigger listener installed - Press F9 to save crash report
+[2026-01-23T01:54:12.297Z] [WARNING] Highcharts warning: Consider including the "accessibility.js" module to make your chart more usable for people with disabilities. Set the "accessibility.enabled" option to false to remove this warning. See https://www.highcharts.com/docs/accessibility/accessibility-module.
+[2026-01-23T01:54:12.524Z] [LOG] 🔑 F9 key detected - triggering crash report...
+[2026-01-23T01:54:12.958Z] [LOG] ✅ F9 Manual Trigger listener installed - Press F9 to save crash report
+[2026-01-23T01:54:14.570Z] [WARNING] Highcharts warning: Consider including the "accessibility.js" module to make your chart more usable for people with disabilities. Set the "accessibility.enabled" option to false to remove this warning. See https://www.highcharts.com/docs/accessibility/accessibility-module.
+[2026-01-23T01:54:14.932Z] [LOG] 🔑 F9 key detected - triggering crash report...
+[2026-01-23T01:54:15.302Z] [LOG] ✅ F9 Manual Trigger listener installed - Press F9 to save crash report
+[2026-01-23T01:54:16.611Z] [WARNING] Highcharts warning: Consider including the "accessibility.js" module to make your chart more usable for people with disabilities. Set the "accessibility.enabled" option to false to remove this warning. See https://www.highcharts.com/docs/accessibility/accessibility-module.
+[2026-01-23T01:54:16.999Z] [LOG] 🔑 F9 key detected - triggering crash report...
+[2026-01-23T01:54:17.839Z] [LOG] ✅ F9 Manual Trigger listener installed - Press F9 to save crash report
+[2026-01-23T01:54:19.326Z] [WARNING] Highcharts warning: Consider including the "accessibility.js" module to make your chart more usable for people with disabilities. Set the "accessibility.enabled" option to false to remove this warning. See https://www.highcharts.com/docs/accessibility/accessibility-module.
+[2026-01-23T01:54:19.499Z] [LOG] 🔑 F9 key detected - triggering crash report...
+[2026-01-23T01:54:20.916Z] [LOG] ✅ F9 Manual Trigger listener installed - Press F9 to save crash report
+[2026-01-23T01:54:22.309Z] [WARNING] Highcharts warning: Consider including the "accessibility.js" module to make your chart more usable for people with disabilities. Set the "accessibility.enabled" option to false to remove this warning. See https://www.highcharts.com/docs/accessibility/accessibility-module.
+[2026-01-23T01:54:22.309Z] [LOG] 🔑 F9 key detected - triggering crash report...
+[2026-01-23T01:54:23.482Z] [LOG] ✅ F9 Manual Trigger listener installed - Press F9 to save crash report
+[2026-01-23T01:54:25.991Z] [WARNING] Highcharts warning: Consider including the "accessibility.js" module to make your chart more usable for people with disabilities. Set the "accessibility.enabled" option to false to remove this warning. See https://www.highcharts.com/docs/accessibility/accessibility-module.
+[2026-01-23T01:54:27.150Z] [LOG] ✅ F9 Manual Trigger listener installed - Press F9 to save crash report
+[2026-01-23T01:54:28.244Z] [WARNING] Highcharts warning: Consider including the "accessibility.js" module to make your chart more usable for people with disabilities. Set the "accessibility.enabled" option to false to remove this warning. See https://www.highcharts.com/docs/accessibility/accessibility-module.
+[2026-01-23T01:54:28.942Z] [LOG] ✅ F9 Manual Trigger listener installed - Press F9 to save crash report
+[2026-01-23T01:54:29.961Z] [WARNING] Highcharts warning: Consider including the "accessibility.js" module to make your chart more usable for people with disabilities. Set the "accessibility.enabled" option to false to remove this warning. See https://www.highcharts.com/docs/accessibility/accessibility-module.
+[2026-01-23T01:54:30.721Z] [LOG] ✅ F9 Manual Trigger listener installed - Press F9 to save crash report
+[2026-01-23T01:54:32.141Z] [WARNING] Highcharts warning: Consider including the "accessibility.js" module to make your chart more usable for people with disabilities. Set the "accessibility.enabled" option to false to remove this warning. See https://www.highcharts.com/docs/accessibility/accessibility-module.
+[2026-01-23T01:54:33.149Z] [LOG] ✅ F9 Manual Trigger listener installed - Press F9 to save crash report
+
+=== ERROR DETAILS ===
+Error Name: AutomationError
+Error Message: totalDaysToCheck is not defined
+Stack Trace:
+ReferenceError: totalDaysToCheck is not defined
+    at main (file:///C:/Users/iocrops%20admin/Coding/IrrigationReportAutomation/irrigation-playwright.js:2883:20)

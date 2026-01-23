@@ -1,0 +1,12 @@
+=== DASHBOARD SERVER LOGS ===
+
+[2026-01-23T01:47:45.702Z] [SUCCESS] Automation starting with user configuration...
+[2026-01-23T01:47:46.122Z] [SUCCESS] Browser launched successfully
+[2026-01-23T01:47:46.122Z] [SUCCESS] Dashboard accessible at http://localhost:3456
+[2026-01-23T01:47:46.138Z] [INFO] Navigating to admin.iofarm.com/report/
+[2026-01-23T01:47:47.090Z] [INFO] Current URL: https://admin.iofarm.com/
+[2026-01-23T01:47:47.246Z] [SUCCESS] Report page loaded successfully
+[2026-01-23T01:47:47.475Z] [ERROR] Login failed: url.includes is not a function
+[2026-01-23T01:47:47.476Z] [ERROR] Error: url.includes is not a function
+
+=== END DASHBOARD LOGS ===

@@ -1,0 +1,59 @@
+=== BROWSER CONSOLE LOGS (Last 50) ===
+
+[2026-01-23T01:39:02.409Z] [LOG] ✅ F9 Manual Trigger listener installed - Press F9 to save crash report
+[2026-01-23T01:39:02.897Z] [ERROR] Failed to fetch RSC payload for https://admin.iofarm.com/farm. Falling back to browser navigation. TypeError: Failed to fetch
+    at f (https://admin.iofarm.com/_next/static/chunks/2117-3c74e9ba463b16a9.js:1:45578)
+    at https://admin.iofarm.com/_next/static/chunks/2117-3c74e9ba463b16a9.js:1:59129
+    at Object.u [as task] (https://admin.iofarm.com/_next/static/chunks/2117-3c74e9ba463b16a9.js:1:31933)
+    at c.s (https://admin.iofarm.com/_next/static/chunks/2117-3c74e9ba463b16a9.js:1:32638)
+    at c.enqueue (https://admin.iofarm.com/_next/static/chunks/2117-3c74e9ba463b16a9.js:1:32063)
+    at s (https://admin.iofarm.com/_next/static/chunks/2117-3c74e9ba463b16a9.js:1:59092)
+    at i (https://admin.iofarm.com/_next/static/chunks/2117-3c74e9ba463b16a9.js:1:58632)
+    at a (https://admin.iofarm.com/_next/static/chunks/2117-3c74e9ba463b16a9.js:1:65458)
+    at f (https://admin.iofarm.com/_next/static/chunks/2117-3c74e9ba463b16a9.js:1:75372)
+    at Object.action (https://admin.iofarm.com/_next/static/chunks/2117-3c74e9ba463b16a9.js:2:7102)
+[2026-01-23T01:39:02.898Z] [ERROR] Failed to fetch RSC payload for https://admin.iofarm.com/node. Falling back to browser navigation. TypeError: Failed to fetch
+    at f (https://admin.iofarm.com/_next/static/chunks/2117-3c74e9ba463b16a9.js:1:45578)
+    at https://admin.iofarm.com/_next/static/chunks/2117-3c74e9ba463b16a9.js:1:59129
+    at Object.u [as task] (https://admin.iofarm.com/_next/static/chunks/2117-3c74e9ba463b16a9.js:1:31933)
+    at c.s (https://admin.iofarm.com/_next/static/chunks/2117-3c74e9ba463b16a9.js:1:32638)
+    at c.enqueue (https://admin.iofarm.com/_next/static/chunks/2117-3c74e9ba463b16a9.js:1:32063)
+    at s (https://admin.iofarm.com/_next/static/chunks/2117-3c74e9ba463b16a9.js:1:59092)
+    at i (https://admin.iofarm.com/_next/static/chunks/2117-3c74e9ba463b16a9.js:1:58632)
+    at a (https://admin.iofarm.com/_next/static/chunks/2117-3c74e9ba463b16a9.js:1:65458)
+    at f (https://admin.iofarm.com/_next/static/chunks/2117-3c74e9ba463b16a9.js:1:75372)
+    at Object.action (https://admin.iofarm.com/_next/static/chunks/2117-3c74e9ba463b16a9.js:2:7102)
+[2026-01-23T01:39:02.899Z] [ERROR] Failed to fetch RSC payload for https://admin.iofarm.com/thing. Falling back to browser navigation. TypeError: Failed to fetch
+    at f (https://admin.iofarm.com/_next/static/chunks/2117-3c74e9ba463b16a9.js:1:45578)
+    at https://admin.iofarm.com/_next/static/chunks/2117-3c74e9ba463b16a9.js:1:59129
+    at Object.u [as task] (https://admin.iofarm.com/_next/static/chunks/2117-3c74e9ba463b16a9.js:1:31933)
+    at c.s (https://admin.iofarm.com/_next/static/chunks/2117-3c74e9ba463b16a9.js:1:32638)
+    at c.enqueue (https://admin.iofarm.com/_next/static/chunks/2117-3c74e9ba463b16a9.js:1:32063)
+    at s (https://admin.iofarm.com/_next/static/chunks/2117-3c74e9ba463b16a9.js:1:59092)
+    at i (https://admin.iofarm.com/_next/static/chunks/2117-3c74e9ba463b16a9.js:1:58632)
+    at a (https://admin.iofarm.com/_next/static/chunks/2117-3c74e9ba463b16a9.js:1:65458)
+    at f (https://admin.iofarm.com/_next/static/chunks/2117-3c74e9ba463b16a9.js:1:75372)
+    at Object.action (https://admin.iofarm.com/_next/static/chunks/2117-3c74e9ba463b16a9.js:2:7102)
+[2026-01-23T01:39:02.899Z] [ERROR] Failed to fetch RSC payload for https://admin.iofarm.com/user. Falling back to browser navigation. TypeError: Failed to fetch
+    at f (https://admin.iofarm.com/_next/static/chunks/2117-3c74e9ba463b16a9.js:1:45578)
+    at https://admin.iofarm.com/_next/static/chunks/2117-3c74e9ba463b16a9.js:1:59129
+    at Object.u [as task] (https://admin.iofarm.com/_next/static/chunks/2117-3c74e9ba463b16a9.js:1:31933)
+    at c.s (https://admin.iofarm.com/_next/static/chunks/2117-3c74e9ba463b16a9.js:1:32638)
+    at c.enqueue (https://admin.iofarm.com/_next/static/chunks/2117-3c74e9ba463b16a9.js:1:32063)
+    at s (https://admin.iofarm.com/_next/static/chunks/2117-3c74e9ba463b16a9.js:1:59092)
+    at i (https://admin.iofarm.com/_next/static/chunks/2117-3c74e9ba463b16a9.js:1:58632)
+    at a (https://admin.iofarm.com/_next/static/chunks/2117-3c74e9ba463b16a9.js:1:65458)
+    at f (https://admin.iofarm.com/_next/static/chunks/2117-3c74e9ba463b16a9.js:1:75372)
+    at Object.action (https://admin.iofarm.com/_next/static/chunks/2117-3c74e9ba463b16a9.js:2:7102)
+[2026-01-23T01:39:02.911Z] [LOG] ✅ F9 Manual Trigger listener installed - Press F9 to save crash report
+[2026-01-23T01:39:02.991Z] [LOG] No token found, staying on login page
+[2026-01-23T01:39:19.487Z] [LOG] 🔑 F9 key detected - triggering crash report...
+[2026-01-23T01:39:25.212Z] [LOG] 🔑 F9 key detected - triggering crash report...
+[2026-01-23T01:39:25.665Z] [LOG] 🔑 F9 key detected - triggering crash report...
+[2026-01-23T01:39:49.981Z] [LOG] 🔑 F9 key detected - triggering crash report...
+
+=== ERROR DETAILS ===
+Error Name: Manual_F9_Trigger
+Error Message: N/A
+Stack Trace:
+N/A

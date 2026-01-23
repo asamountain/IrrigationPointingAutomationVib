@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Irrigation Report Automation - Playwright Version
  * Purpose: Automate data extraction from admin.iocrops.com 관수리포트 menu
  * 
@@ -10,10 +10,8 @@
 import { chromium } from 'playwright';
 import fs from 'fs';
 import path from 'path';
-import { execSync } from 'child_process';
 import DashboardServer from './dashboard-server.js';
 import { setupNetworkInterception, waitForChartData, extractDataPoints } from './network-interceptor.js';
-import { trainAlgorithm } from './trainAlgorithm.js';
 
 // Configuration (move to config.js later)
 const CONFIG = {
@@ -24,12 +22,11 @@ const CONFIG = {
   outputDir: './data',
   screenshotDir: './screenshots',
   chartLearningMode: false, // Will be set by dashboard
-  watchMode: false, // Will be set by dashboard
-  trainingMode: process.env.TRAINING_MODE === 'true' // F8-controlled training mode
+  watchMode: false // Will be set by dashboard
 };
 
 // Ensure output directories exist
-[CONFIG.outputDir, CONFIG.screenshotDir, './training', './history'].forEach(dir => {
+[CONFIG.outputDir, CONFIG.screenshotDir, './training', './history', './crash-reports'].forEach(dir => {
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
@@ -48,6 +45,314 @@ async function takeScreenshot(page, screenshotPath) {
     globalDashboard.updateScreenshot(screenshotPath);
   }
   return screenshotPath;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 🛠️ CRASH REPORT SYSTEM - Self-diagnosing for AI analysis
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Global storage for browser console logs (captured during page lifecycle)
+let browserConsoleLogs = [];
+let lastFailedNetworkRequests = [];
+
+// Setup console and network listeners on a page
+function setupCrashDiagnostics(page) {
+  // Capture browser console logs
+  page.on('console', msg => {
+    const entry = `[${new Date().toISOString()}] [${msg.type().toUpperCase()}] ${msg.text()}`;
+    browserConsoleLogs.push(entry);
+    // Keep only last 100 entries
+    if (browserConsoleLogs.length > 100) {
+      browserConsoleLogs.shift();
+    }
+  });
+  
+  // Capture failed network requests
+  page.on('requestfailed', request => {
+    lastFailedNetworkRequests.push({
+      url: request.url(),
+      method: request.method(),
+      failure: request.failure()?.errorText || 'Unknown',
+      timestamp: new Date().toISOString()
+    });
+    // Keep only last 20 failed requests
+    if (lastFailedNetworkRequests.length > 20) {
+      lastFailedNetworkRequests.shift();
+    }
+  });
+  
+  console.log('  ✅ Crash diagnostics listeners attached');
+}
+
+/**
+ * Setup F9 Key Listener for manual crash report trigger
+ * Press F9 in the browser window to instantly save a crash report
+ * @param {Page} page - Playwright page object
+ */
+async function setupF9ManualTrigger(page) {
+  // Expose Node.js function to the browser context
+  await page.exposeFunction('triggerCrashReport', async (reason) => {
+    console.log(`\n⌨️  F9 PRESSED - Manual crash report triggered!`);
+    await saveCrashReport(page, reason || 'Manual_F9_Trigger', null);
+  });
+  
+  // Inject script to listen for F9 keypress
+  await page.addInitScript(() => {
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'F9' || event.code === 'F9') {
+        event.preventDefault();
+        console.log('🔑 F9 key detected - triggering crash report...');
+        
+        // Call the exposed Node.js function
+        window.triggerCrashReport('Manual_F9_Trigger');
+      }
+    });
+    
+    console.log('✅ F9 Manual Trigger listener installed - Press F9 to save crash report');
+  });
+  
+  console.log('  ✅ F9 Manual Trigger installed (Press F9 in browser to save crash report)');
+}
+
+/**
+ * Save a comprehensive crash report for AI analysis
+ * @param {Page} page - Playwright page object
+ * @param {string} errorName - Short error name (e.g., "LoginTimeout", "FarmClickFailed")
+ * @param {Error} error - The error object (optional)
+ */
+async function saveCrashReport(page, errorName, error = null) {
+  const timestamp = new Date().toISOString().replace(/:/g, '-').replace(/\./g, '-');
+  const safeName = errorName.replace(/[^a-zA-Z0-9]/g, '_');
+  const crashDir = path.join('./crash-reports', `${timestamp}_${safeName}`);
+  
+  console.log(`\n🚨 SAVING CRASH REPORT: ${crashDir}`);
+  console.log('═'.repeat(60));
+  
+  // Ensure crash-reports directory exists
+  if (!fs.existsSync('./crash-reports')) {
+    fs.mkdirSync('./crash-reports', { recursive: true });
+  }
+  fs.mkdirSync(crashDir, { recursive: true });
+  
+  const report = {
+    errorName: errorName,
+    timestamp: new Date().toISOString(),
+    url: 'unknown',
+    files: []
+  };
+  
+  try {
+    // 1. Screenshot
+    const screenshotPath = path.join(crashDir, 'state.png');
+    await page.screenshot({ path: screenshotPath, fullPage: true });
+    report.files.push('state.png');
+    console.log('  ✅ [1/5] Screenshot saved: state.png');
+  } catch (e) {
+    console.log(`  ❌ [1/5] Screenshot failed: ${e.message}`);
+  }
+  
+  try {
+    // 2. HTML Snapshot (DOM)
+    const htmlContent = await page.content();
+    const htmlPath = path.join(crashDir, 'dom.html');
+    fs.writeFileSync(htmlPath, htmlContent);
+    report.files.push('dom.html');
+    report.url = page.url();
+    console.log('  ✅ [2/5] DOM snapshot saved: dom.html');
+  } catch (e) {
+    console.log(`  ❌ [2/5] DOM snapshot failed: ${e.message}`);
+  }
+  
+  try {
+    // 3. Console Logs (last 50 lines)
+    const consolePath = path.join(crashDir, 'console.txt');
+    const last50Logs = browserConsoleLogs.slice(-50).join('\n');
+    const consoleContent = `=== BROWSER CONSOLE LOGS (Last 50) ===\n\n${last50Logs || '(No console logs captured)'}\n\n=== ERROR DETAILS ===\nError Name: ${errorName}\nError Message: ${error?.message || 'N/A'}\nStack Trace:\n${error?.stack || 'N/A'}`;
+    fs.writeFileSync(consolePath, consoleContent);
+    report.files.push('console.txt');
+    console.log('  ✅ [3/5] Console logs saved: console.txt');
+  } catch (e) {
+    console.log(`  ❌ [3/5] Console logs failed: ${e.message}`);
+  }
+  
+  try {
+    // 4. Failed Network Requests
+    const networkPath = path.join(crashDir, 'network_last_failed.json');
+    const networkData = {
+      description: 'Recently failed network requests (if any)',
+      failedRequests: lastFailedNetworkRequests.slice(-10),
+      currentUrl: page.url()
+    };
+    fs.writeFileSync(networkPath, JSON.stringify(networkData, null, 2));
+    report.files.push('network_last_failed.json');
+    console.log('  ✅ [4/5] Network log saved: network_last_failed.json');
+  } catch (e) {
+    console.log(`  ❌ [4/5] Network log failed: ${e.message}`);
+  }
+  
+  try {
+    // 5. Dashboard Logs (extract from our running dashboard server)
+    const dashboardLogPath = path.join(crashDir, 'dashboard_logs.txt');
+    // Get logs from global dashboard instance if available
+    let dashboardLogs = '(Dashboard logs not available - no global dashboard instance)';
+    if (globalDashboard && globalDashboard.logs && globalDashboard.logs.length > 0) {
+      dashboardLogs = globalDashboard.logs.map(log => {
+        const ts = new Date(log.timestamp).toISOString();
+        return `[${ts}] [${log.type.toUpperCase()}] ${log.message}`;
+      }).join('\n');
+    }
+    const dashboardContent = `=== DASHBOARD SERVER LOGS ===\n\n${dashboardLogs}\n\n=== END DASHBOARD LOGS ===`;
+    fs.writeFileSync(dashboardLogPath, dashboardContent);
+    report.files.push('dashboard_logs.txt');
+    console.log('  ✅ [5/5] Dashboard logs saved: dashboard_logs.txt');
+  } catch (e) {
+    console.log(`  ❌ [5/5] Dashboard logs failed: ${e.message}`);
+  }
+  
+  // Save summary report
+  try {
+    const summaryPath = path.join(crashDir, 'CRASH_SUMMARY.json');
+    fs.writeFileSync(summaryPath, JSON.stringify(report, null, 2));
+    console.log('  ✅ Summary saved: CRASH_SUMMARY.json');
+  } catch (e) {
+    console.log(`  ❌ Summary failed: ${e.message}`);
+  }
+  
+  console.log('═'.repeat(60));
+  console.log(`📁 CRASH REPORT SAVED TO: ${crashDir}`);
+  console.log('💡 Upload this folder to Claude/ChatGPT for AI analysis\n');
+  
+  return crashDir;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 🔐 ROBUST LOGIN FUNCTION - Aggressive click with retry logic
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Perform a robust login with aggressive clicking and retry logic
+ * @param {Page} page - Playwright page object
+ * @returns {Promise<boolean>} - true if login successful
+ */
+async function performRobustLogin(page) {
+  console.log('\n  🔐 ROBUST LOGIN SEQUENCE:');
+  console.log('  ═══════════════════════════════════════');
+  
+  // Step 1: Fill credentials
+  console.log('  [1/5] Filling credentials...');
+  
+  // Wait for email field and fill - IoFarm uses name="userEmail" not type="email"
+  const emailField = page.locator('input[name="userEmail"], input[type="email"], input[name="email"], input[name="username"]').first();
+  await emailField.waitFor({ state: 'visible', timeout: 10000 });
+  await emailField.fill(CONFIG.username);
+  console.log(`       ✅ Email: ${CONFIG.username}`);
+  
+  // Fill password
+  const passwordField = page.locator('input[type="password"]').first();
+  await passwordField.waitFor({ state: 'visible', timeout: 5000 });
+  await passwordField.fill(CONFIG.password);
+  console.log('       ✅ Password: ********');
+  
+  // Step 2: Find and prepare login button
+  console.log('  [2/5] Locating login button...');
+  const buttonSelectors = [
+    'button[type="submit"]',
+    'button:has-text("로그인")',
+    'button:has-text("Login")',
+    'button:has-text("Sign in")',
+    'input[type="submit"]'
+  ];
+  
+  let loginButton = null;
+  for (const selector of buttonSelectors) {
+    try {
+      const btn = page.locator(selector).first();
+      if (await btn.isVisible({ timeout: 1000 })) {
+        loginButton = btn;
+        console.log(`       ✅ Found button: ${selector}`);
+        break;
+      }
+    } catch (e) {
+      continue;
+    }
+  }
+  
+  if (!loginButton) {
+    throw new Error('Login button not found with any known selector');
+  }
+  
+  // Step 3: Wait for button stability (enabled, not animating)
+  console.log('  [3/5] Waiting for button stability...');
+  await loginButton.waitFor({ state: 'visible', timeout: 5000 });
+  
+  // Check if button is enabled
+  const isDisabled = await loginButton.isDisabled();
+  if (isDisabled) {
+    console.log('       ⚠️ Button is disabled, waiting...');
+    await page.waitForTimeout(1000);
+  }
+  console.log('       ✅ Button is stable and ready');
+  
+  // Step 4: AGGRESSIVE CLICK with force
+  console.log('  [4/5] Clicking login button (force: true)...');
+  
+  // First attempt - force click
+  await loginButton.click({ force: true, timeout: 5000 });
+  console.log('       ✅ First click sent');
+  
+  // Step 5: Validate login - Wait for URL change OR error message
+  console.log('  [5/5] Validating login result...');
+  
+  const loginResult = await Promise.race([
+    // Success: URL changes away from login (url is a URL object, use .href)
+    page.waitForURL(url => !url.href.includes('/login') && !url.href.includes('/signin') && url.href !== 'https://admin.iofarm.com/', { timeout: 8000 })
+      .then(() => ({ success: true, reason: 'URL changed' })),
+    
+    // Failure: Error message appears
+    page.locator('text=/invalid|incorrect|failed|error|wrong|실패|오류|잘못/i').first()
+      .waitFor({ state: 'visible', timeout: 8000 })
+      .then(() => ({ success: false, reason: 'Error message visible' })),
+    
+    // Timeout fallback
+    new Promise(resolve => setTimeout(() => resolve({ success: false, reason: 'timeout' }), 8000))
+  ]);
+  
+  if (loginResult.success) {
+    console.log(`       ✅ Login successful! (${loginResult.reason})`);
+    console.log(`       → Redirected to: ${page.url()}`);
+    console.log('  ═══════════════════════════════════════\n');
+    return true;
+  }
+  
+  // DOUBLE-TAP STRATEGY: If first click didn't work, try again
+  if (loginResult.reason === 'timeout') {
+    console.log('       ⚠️ First click may have been ignored, trying DOUBLE-TAP...');
+    
+    // Re-click the button
+    await loginButton.click({ force: true, timeout: 3000 }).catch(() => {});
+    console.log('       🔄 Second click sent');
+    
+    // Wait again for URL change
+    try {
+      await page.waitForURL(url => !url.href.includes('/login') && !url.href.includes('/signin') && url.href !== 'https://admin.iofarm.com/', { timeout: 10000 });
+      console.log(`       ✅ DOUBLE-TAP successful! Redirected to: ${page.url()}`);
+      console.log('  ═══════════════════════════════════════\n');
+      return true;
+    } catch (e) {
+      console.log('       ❌ DOUBLE-TAP also failed');
+    }
+  }
+  
+  // Check for specific error messages
+  const errorText = await page.locator('.error, .alert-error, [class*="error"], text=/error|invalid|failed/i')
+    .first().textContent().catch(() => null);
+  
+  if (errorText) {
+    console.log(`       ❌ Login error detected: "${errorText.trim()}"`);
+  }
+  
+  console.log('  ═══════════════════════════════════════\n');
+  throw new Error(`Login failed: ${loginResult.reason}${errorText ? ' - ' + errorText.trim() : ''}`);
 }
 
 // Load existing learning data for auto-correction
@@ -93,216 +398,17 @@ function loadLearningOffsets() {
   }
 }
 
-// 🔤 AUTO-FONT INSTALLATION: Ensures Korean/CJK fonts are available on Linux
-// Prevents "tofu" (broken squares) when rendering Korean text
-function ensureFontsInstalled() {
-  // Only run on Linux (including WSL)
-  if (process.platform !== 'linux') {
-    return;
-  }
-  
-  console.log('🔤 Checking for CJK font support (Linux)...');
-  
-  // Check if fonts-noto-cjk is installed
-  try {
-    execSync('dpkg -s fonts-noto-cjk', { stdio: 'pipe' });
-    console.log('  ✅ Korean/CJK fonts already installed.');
-    return;
-  } catch (checkError) {
-    // Font package not found - attempt to install
-    console.log('  ⚠️ Korean fonts missing. Attempting auto-installation...');
-    
-    const installCommand = 'sudo apt-get update && sudo apt-get install -y fonts-noto-cjk fonts-noto-core fonts-liberation';
-    
-    try {
-      console.log('  📦 Installing font packages (requires sudo)...');
-      console.log(`  → Running: ${installCommand}`);
-      
-      execSync(installCommand, { 
-        stdio: 'inherit',
-        timeout: 300000 // 5 minutes timeout
-      });
-      
-      console.log('  ✅ Font packages installed successfully.');
-      
-      // Refresh font cache
-      console.log('  🔄 Refreshing font cache...');
-      try {
-        execSync('sudo fc-cache -f -v', { stdio: 'pipe' });
-        console.log('  ✅ Font cache refreshed.');
-      } catch (cacheError) {
-        console.log('  ⚠️ Font cache refresh failed (non-critical).');
-      }
-      
-    } catch (installError) {
-      console.log('\n  ❌ ═══════════════════════════════════════════════════════════');
-      console.log('  ❌ Auto-install failed (needs sudo or other issue).');
-      console.log('  ❌ ═══════════════════════════════════════════════════════════');
-      console.log('  💡 Please run this command manually:\n');
-      console.log(`     ${installCommand}`);
-      console.log('     sudo fc-cache -f -v\n');
-      console.log('  ═══════════════════════════════════════════════════════════\n');
-      // Continue anyway - browser will launch but Korean text may be broken
-    }
-  }
-}
-
-// 🌍 UNIVERSAL BROWSER LAUNCHER: Cross-platform "Write Once, Run Anywhere"
-// Handles: Windows, macOS, Linux/WSL with automatic dependency installation
-async function launchBrowser() {
-  // ═══════════════════════════════════════════════════════════════════
-  // STEP 0: PRE-FLIGHT FONT CHECK (Linux only)
-  // ═══════════════════════════════════════════════════════════════════
-  ensureFontsInstalled();
-  
-  // ═══════════════════════════════════════════════════════════════════
-  // STEP 1: OS DETECTION
-  // ═══════════════════════════════════════════════════════════════════
-  const platform = process.platform;
-  const isLinux = platform === 'linux';
-  const isMac = platform === 'darwin';
-  const isWindows = platform === 'win32';
-  
-  // Detect WSL specifically (Linux with Microsoft in kernel version)
-  const isWSL = isLinux && (() => {
-    try {
-      const release = fs.readFileSync('/proc/version', 'utf8').toLowerCase();
-      return release.includes('microsoft') || release.includes('wsl');
-    } catch { return false; }
-  })();
-
-  const osName = isWSL ? 'WSL (Linux)' : 
-                 isLinux ? 'Linux' : 
-                 isMac ? 'macOS' : 
-                 isWindows ? 'Windows' : 'Unknown';
-  
-  console.log(`🖥️  Detected Environment: ${osName}`);
-
-  // ═══════════════════════════════════════════════════════════════════
-  // STEP 2: HEADLESS MODE DECISION
-  // ═══════════════════════════════════════════════════════════════════
-  // Default: VISIBLE (headless: false) for ALL environments
-  // Override: Set $HEADLESS=true to run in invisible/headless mode
-  const forceHeadless = process.env.HEADLESS?.toLowerCase();
-  let headless;
-  
-  if (forceHeadless === 'true') {
-    headless = true;
-    console.log('🔇 Headless Mode: ENABLED (via $HEADLESS=true)');
-  } else {
-    headless = false;
-    console.log('🖼️  Headless Mode: DISABLED (default - set $HEADLESS=true to hide browser)');
-  }
-
-  const launchArgs = [
-    '--start-maximized',
-    '--window-position=0,0',
-    '--disable-blink-features=AutomationControlled' // Reduce bot detection
-  ];
-
-  // ═══════════════════════════════════════════════════════════════════
-  // STEP 3: SMART LAUNCH STRATEGY
-  // ═══════════════════════════════════════════════════════════════════
-  
-  // --- ATTEMPT 1: Try Google Chrome (preferred) ---
-  try {
-    console.log('🚀 Attempt 1: Launching Google Chrome...');
-    const browser = await chromium.launch({
-      headless,
-      channel: 'chrome',
-      args: launchArgs
-    });
-    console.log('✅ Google Chrome launched successfully.');
-    return browser;
-  } catch (chromeError) {
-    console.log(`⚠️  Chrome launch failed: ${chromeError.message.split('\n')[0]}`);
-
-    // --- PLATFORM-SPECIFIC RECOVERY ---
-    if (isLinux || isWSL) {
-      // Linux/WSL: Auto-install Chrome via Playwright
-      console.log('📦 Linux/WSL detected - attempting to install Chrome...');
-      try {
-        execSync('npx playwright install chrome', { 
-          stdio: 'inherit',
-          timeout: 180000 // 3 minutes for slow connections
-        });
-        console.log('✅ Chrome installation completed.');
-      } catch (installErr) {
-        console.log(`⚠️  Chrome install failed: ${installErr.message}`);
-      }
-    } else if (isMac) {
-      // macOS: Provide helpful guidance
-      console.log('💡 macOS: Chrome may be missing or in a non-standard location.');
-      console.log('   → Try: brew install --cask google-chrome');
-      console.log('   → Or download from: https://www.google.com/chrome/');
-    }
-    // Windows: Chrome is usually installed; skip auto-install
-
-    // --- ATTEMPT 2: Retry Chrome after install (Linux/WSL only) ---
-    if (isLinux || isWSL) {
-      try {
-        console.log('🔄 Attempt 2: Retrying Chrome after installation...');
-        const browser = await chromium.launch({
-          headless,
-          channel: 'chrome',
-          args: launchArgs
-        });
-        console.log('✅ Google Chrome launched successfully (after install).');
-        return browser;
-      } catch (retryError) {
-        console.log(`⚠️  Chrome retry failed: ${retryError.message.split('\n')[0]}`);
-      }
-    }
-
-    // --- ATTEMPT 3: Fallback to Bundled Chromium ---
-    console.log('🔄 Attempt 3: Falling back to bundled Chromium...');
-    
-    // Ensure Chromium is installed
-    try {
-      console.log('📦 Installing Playwright Chromium...');
-      execSync('npx playwright install chromium', { 
-        stdio: 'inherit',
-        timeout: 180000
-      });
-      console.log('✅ Chromium installation completed.');
-    } catch (chromiumInstallErr) {
-      console.log(`⚠️  Chromium install warning: ${chromiumInstallErr.message}`);
-      // Continue anyway - might already be installed
-    }
-
-    try {
-      const browser = await chromium.launch({
-        headless,
-        args: launchArgs
-        // No 'channel' = use bundled Chromium
-      });
-      console.log('✅ Bundled Chromium launched successfully.');
-      return browser;
-    } catch (chromiumError) {
-      // --- FINAL FAILURE ---
-      console.error('\n❌ ═══════════════════════════════════════════════════════════');
-      console.error('❌ CRITICAL: Could not launch any browser!');
-      console.error('❌ ═══════════════════════════════════════════════════════════');
-      console.error(`   Chrome error: ${chromeError.message.split('\n')[0]}`);
-      console.error(`   Chromium error: ${chromiumError.message.split('\n')[0]}`);
-      console.error('\n💡 Manual fix options:');
-      console.error('   1. Run: npx playwright install');
-      console.error('   2. Install Chrome: https://www.google.com/chrome/');
-      if (isLinux || isWSL) {
-        console.error('   3. For WSL GUI: Install an X server (VcXsrv/WSLg)');
-      }
-      throw new Error('❌ Critical: Could not launch any browser after all attempts.');
-    }
-  }
-}
-
 // 📤 REPORT SENDING MODE: Validate table data and click "Create Report" button
 async function runReportSending(config, dashboard, runStats) {
   console.log('\n📤 ========================================');
   console.log('📤   REPORT SENDING AUTOMATION MODE');
   console.log('📤 ========================================\n');
   
-  const browser = await launchBrowser();
+  const browser = await chromium.launch({
+    headless: false,
+    channel: 'chrome',
+    args: ['--start-maximized', '--window-position=0,0']
+  });
   
   const context = await browser.newContext({
     viewport: null,
@@ -315,6 +421,23 @@ async function runReportSending(config, dashboard, runStats) {
   
   const page = await context.newPage();
   
+  // �️ CRASH DIAGNOSTICS: Setup listeners for self-diagnosis
+  setupCrashDiagnostics(page);
+  
+  // F9 MANUAL TRIGGER: Press F9 anytime to save crash report
+  await setupF9ManualTrigger(page);
+  console.log('  [F9] Press anytime to save crash report\n');
+  
+  // �🔍 BLACK BOX DIAGNOSTICS: Listen to browser console
+  page.on('console', msg => {
+    const type = msg.type();
+    const text = msg.text();
+    if (type === 'error' || type === 'warning') {
+      console.log(`🌐 [BROWSER ${type.toUpperCase()}]: ${text}`);
+    }
+  });
+  console.log('  ✅ Browser console listener active (will show errors/warnings)\n');
+  
   // Maximize window via CDP
   const session = await page.context().newCDPSession(page);
   const { windowId } = await session.send('Browser.getWindowForTarget');
@@ -324,11 +447,9 @@ async function runReportSending(config, dashboard, runStats) {
   });
   
   try {
-    // Step 1: Navigate to Root & Check Auth State
+    // 🎯 STEP 1: DUAL STATE DETECTION (Check Success BEFORE Login)
     console.log('🔐 Step 1: Navigation & Authentication...');
     dashboard.updateStatus('🔐 Authenticating...', 'running');
-    
-    const timestamp = new Date().toISOString().replace(/:/g, '-').split('.')[0];
     
     console.log('  → Navigating to root URL...');
     await page.goto('https://admin.iofarm.com/', { 
@@ -336,251 +457,94 @@ async function runReportSending(config, dashboard, runStats) {
       timeout: 30000 
     });
     
-    // ═══════════════════════════════════════════════════════════════════
-    // 🎯 SMART AUTHENTICATION DETECTION (Wait for React to render)
-    // ═══════════════════════════════════════════════════════════════════
-    console.log('  → Waiting for page to stabilize (networkidle)...');
-    await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {
-      console.log('  ⚠️  Network not fully idle after 15s, continuing...');
-    });
+    // Wait for page to settle
+    await page.waitForTimeout(2000);
     
-    const currentUrl = page.url();
-    console.log(`  → Landed at: ${currentUrl}`);
+    // 🎯 SMART CHECK: First check if already authenticated (Success State)
+    console.log('  → Checking authentication state...');
+    const isLoggedIn = await page.locator('div.css-nd8svt a').first().isVisible({ timeout: 3000 }).catch(() => false);
     
-    // Take screenshot to see what we're working with
-    const authScreenshot = path.join(CONFIG.screenshotDir, `auth-check-${timestamp}.png`);
-    await page.screenshot({ path: authScreenshot, fullPage: true });
-    console.log(`  → Auth state screenshot: ${authScreenshot}`);
-    
-    // ─────────────────────────────────────────────────────────────────────────────
-    // DUAL-PATH DETECTION: Race between Login Form vs Dashboard
-    // ─────────────────────────────────────────────────────────────────────────────
-    console.log('  🔍 Detecting page state (Login Form vs Dashboard)...');
-    
-    const DETECTION_TIMEOUT = 10000;
-    
-    // Path A: Login form selectors
-    const loginFormPromise = (async () => {
-      await Promise.race([
-        page.waitForSelector('input[name="email"]', { state: 'visible', timeout: DETECTION_TIMEOUT }),
-        page.waitForSelector('input[type="email"]', { state: 'visible', timeout: DETECTION_TIMEOUT }),
-        page.waitForSelector('input[placeholder*="이메일"]', { state: 'visible', timeout: DETECTION_TIMEOUT }),
-        page.waitForSelector('input[placeholder*="email" i]', { state: 'visible', timeout: DETECTION_TIMEOUT })
-      ]);
-      return { state: 'login_form' };
-    })();
-    
-    // Path B: Dashboard/authenticated state selectors
-    const dashboardPromise = (async () => {
-      await Promise.race([
-        page.waitForSelector('text=로그아웃', { state: 'visible', timeout: DETECTION_TIMEOUT }),
-        page.waitForSelector('text=Logout', { state: 'visible', timeout: DETECTION_TIMEOUT }),
-        page.waitForSelector('div.css-nd8svt', { state: 'visible', timeout: DETECTION_TIMEOUT }),
-        page.waitForSelector('a[href*="/report/point/"]', { state: 'visible', timeout: DETECTION_TIMEOUT })
-      ]);
-      return { state: 'dashboard' };
-    })();
-    
-    let pageState;
-    try {
-      pageState = await Promise.race([
-        loginFormPromise.catch(() => null),
-        dashboardPromise.catch(() => null)
-      ]);
-      
-      // If neither resolved quickly, wait a bit more and check manually
-      if (!pageState) {
-        await page.waitForTimeout(2000);
-        const hasLoginField = await page.locator('input[type="email"], input[name="email"], input[placeholder*="이메일"]').first().isVisible().catch(() => false);
-        const hasDashboard = await page.locator('text=로그아웃, div.css-nd8svt').first().isVisible().catch(() => false);
-        
-        if (hasLoginField) pageState = { state: 'login_form' };
-        else if (hasDashboard) pageState = { state: 'dashboard' };
-      }
-    } catch (e) {
-      pageState = null;
-    }
-    
-    console.log(`  → Detected state: ${pageState?.state || 'unknown'}`);
-    
-    // ─────────────────────────────────────────────────────────────────────────────
-    // ACTION BASED ON DETECTED STATE
-    // ─────────────────────────────────────────────────────────────────────────────
-    
-    if (pageState?.state === 'dashboard') {
-      // Already authenticated
-      console.log('  ✅ Already authenticated (Dashboard detected)');
-      
-    } else if (pageState?.state === 'login_form') {
-      // Login required
-      console.log('  → Found login form, entering credentials...');
-      
-      // Fill email (try multiple selectors)
-      const emailSelectors = [
-        'input[type="email"]',
-        'input[name="email"]',
-        'input[placeholder*="이메일"]',
-        'input[placeholder*="email" i]'
-      ];
-      
-      let emailFilled = false;
-      for (const selector of emailSelectors) {
-        try {
-          const field = page.locator(selector).first();
-          if (await field.isVisible({ timeout: 500 })) {
-            await field.fill(CONFIG.username);
-            console.log(`  → Email entered: ${CONFIG.username}`);
-            emailFilled = true;
-            break;
-          }
-        } catch (e) { continue; }
-      }
-      
-      if (!emailFilled) {
-        throw new Error('❌ Could not find email input field');
-      }
-      
-      // Fill password
-      console.log('  → Password: ********');
-      await page.fill('input[type="password"]', CONFIG.password);
-      
-      // Click login button
-      console.log('  → Clicking login button...');
-      const loginClicked = await page.locator('button[type="submit"], button:has-text("로그인"), button:has-text("Login")').first().click().then(() => true).catch(() => false);
-      if (!loginClicked) {
-        await page.keyboard.press('Enter');
-      }
-      
-      // Wait for dashboard to appear (confirms login success)
-      console.log('  → Waiting for dashboard to appear...');
-      try {
-        await Promise.race([
-          page.waitForSelector('text=로그아웃', { state: 'visible', timeout: 15000 }),
-          page.waitForSelector('div.css-nd8svt', { state: 'visible', timeout: 15000 }),
-          page.waitForSelector('a[href*="/report/point/"]', { state: 'visible', timeout: 15000 })
-        ]);
-        console.log('  ✅ Login successful! Dashboard appeared.');
-      } catch (loginError) {
-        // Check for error message
-        const hasError = await page.locator('text=/invalid|incorrect|error|실패/i').first().isVisible().catch(() => false);
-        if (hasError) {
-          throw new Error('❌ Login failed: Invalid credentials');
-        }
-        throw new Error('❌ Login failed: Dashboard did not appear');
-      }
+    if (isLoggedIn) {
+      // ✅ SCENARIO A: Already Authenticated - Farm list is visible
+      console.log('  ✅ Already authenticated (Farm list visible)');
+      console.log('  → Skipping login flow\n');
       
     } else {
-      // Unknown state - take debug screenshot and throw
-      const debugScreenshot = path.join(CONFIG.screenshotDir, `debug-auth-state-${timestamp}.png`);
-      await page.screenshot({ path: debugScreenshot, fullPage: true });
-      console.log(`  ❌ Unknown page state. Debug screenshot: ${debugScreenshot}`);
-      throw new Error(`❌ Unknown page state - neither login form nor dashboard detected. Check: ${debugScreenshot}`);
+      // 🔒 SCENARIO B: Need to Login
+      console.log('  → Farm list not visible, checking for login form...');
+      
+      let loginFormVisible = await page.locator('input[type="email"]').first().isVisible({ timeout: 5000 }).catch(() => false);
+      
+      if (!loginFormVisible) {
+        console.log('  ⚠️  Login form not visible, performing safety reload...');
+        await page.reload({ waitUntil: 'domcontentloaded' });
+        await page.waitForTimeout(2000);
+        
+        // Check again for already logged in (after reload)
+        const isLoggedInAfterReload = await page.locator('div.css-nd8svt a').first().isVisible({ timeout: 3000 }).catch(() => false);
+        
+        if (isLoggedInAfterReload) {
+          console.log('  ✅ Already authenticated after reload (Farm list visible)');
+          console.log('  → Skipping login flow\n');
+        } else {
+          // Check for login form after reload
+          loginFormVisible = await page.locator('input[type="email"]').first().isVisible({ timeout: 5000 }).catch(() => false);
+          
+          if (!loginFormVisible) {
+            // Take error screenshot to see what the browser is showing
+            const errorScreenshot = path.join(CONFIG.screenshotDir, 'error-login-state.png');
+            await page.screenshot({ path: errorScreenshot, fullPage: true });
+            console.log(`  📸 ERROR SCREENSHOT SAVED: ${errorScreenshot}`);
+            console.log('     → Check this screenshot to see what went wrong!');
+            throw new Error('Login form not found after reload. Check error-login-state.png screenshot.');
+          }
+          
+          // Proceed with login
+          await performLogin();
+        }
+      } else {
+        // Login form visible - proceed with login
+        await performLogin();
+      }
     }
     
-    // Step 2: Ensure We're at Report Page
+    // 🔒 LOGIN ACTION FUNCTION - Uses robust login implementation
+    async function performLogin() {
+      console.log('  ✅ Login form visible, proceeding with authentication...');
+      
+      // Use the robust login function with aggressive clicking and retry
+      await performRobustLogin(page);
+      
+      // Additional verification after redirect
+      console.log('  📍 Post-login verification:');
+      
+      // Wait for network to stabilize
+      console.log('  → Waiting for network to stabilize...');
+      await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {
+        console.log('    ⚠️  Network not idle, continuing...');
+      });
+      console.log('    ✅ Network idle');
+      
+      // Wait for page load
+      console.log('  → Waiting for page to be fully loaded...');
+      await page.waitForLoadState('load', { timeout: 10000 });
+      console.log('    ✅ Page loaded\n');
+    }
+    
+    // 🎯 STEP 2: Navigate to Report Page
     const finalUrl = page.url();
     if (!finalUrl.includes('/report')) {
-      console.log('\n  📍 Not at /report page, navigating there...');
+      console.log('  📍 Navigating to /report page...');
       await page.goto('https://admin.iofarm.com/report', { 
-        waitUntil: 'load', 
+        waitUntil: 'domcontentloaded', 
         timeout: 20000 
       });
-      console.log(`  ✅ Navigated to: ${page.url()}`);
+      console.log(`  ✅ At: ${page.url()}\n`);
     } else {
-      console.log('\n  ✅ Already at /report page');
+      console.log('  ✅ Already at /report page\n');
     }
     
-    // ═══════════════════════════════════════════════════════════════════════════════
-    // STEP 3: SELECT MANAGER (ENFORCED SWITCHING)
-    // ═══════════════════════════════════════════════════════════════════════════════
-    console.log(`\n🎯 Step 3: Selecting Manager "${config.manager}" (Enforced Switching)...`);
-    dashboard.updateStatus(`🎯 Selecting manager: ${config.manager}`, 'running');
-    
-    try {
-      // Wait for manager selector to be visible
-      console.log('  → Waiting for manager selector to appear...');
-      await page.waitForSelector('.chakra-segment-group__itemText', { 
-        state: 'visible',
-        timeout: 10000 
-      });
-      
-      // Define precise locator using Chakra UI class + exact text match
-      const managerButton = page.locator('.chakra-segment-group__itemText', { 
-        hasText: new RegExp(`^${config.manager}$`) 
-      });
-      
-      // Check if the button exists
-      const buttonCount = await managerButton.count();
-      console.log(`  → Found ${buttonCount} button(s) matching "${config.manager}"`);
-      
-      if (buttonCount > 0) {
-        // Primary: Force click on the Playwright locator
-        console.log(`  → Clicking "${config.manager}" button...`);
-        try {
-          await managerButton.first().click({ force: true, timeout: 5000 });
-          console.log(`  ✅ Playwright click successful`);
-        } catch (clickError) {
-          // Fallback: Use native JavaScript click
-          console.log(`  ⚠️  Playwright click failed, using JS fallback...`);
-          const jsClicked = await page.evaluate((targetManager) => {
-            const spans = Array.from(document.querySelectorAll('.chakra-segment-group__itemText'));
-            const targetSpan = spans.find(span => span.textContent.trim() === targetManager);
-            if (targetSpan) {
-              targetSpan.click();
-              const parentLabel = targetSpan.closest('label');
-              if (parentLabel) parentLabel.click();
-              return true;
-            }
-            return false;
-          }, config.manager);
-          
-          if (jsClicked) {
-            console.log(`  ✅ JavaScript fallback click successful`);
-          } else {
-            console.log(`  ❌ JavaScript fallback also failed`);
-          }
-        }
-        
-        // CRITICAL: Wait for UI state change
-        console.log(`  → Waiting for UI state confirmation...`);
-        try {
-          await page.waitForFunction((targetManager) => {
-            const spans = Array.from(document.querySelectorAll('.chakra-segment-group__itemText'));
-            const targetSpan = spans.find(span => span.textContent.trim() === targetManager);
-            if (targetSpan) {
-              const parentLabel = targetSpan.closest('label');
-              if (parentLabel) {
-                return parentLabel.getAttribute('data-state') === 'checked';
-              }
-            }
-            return false;
-          }, config.manager, { timeout: 3000 });
-          console.log(`  ✅ UI confirmed: "${config.manager}" is now selected`);
-        } catch (waitError) {
-          console.log(`  ⚠️  UI state change not detected, continuing anyway...`);
-        }
-        
-        // CRITICAL: Wait for network idle (table reload with new farm IDs)
-        console.log(`  → Waiting for network to idle (table reload)...`);
-        await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {
-          console.log('  ⚠️  Network not fully idle, continuing...');
-        });
-        
-        // Safety buffer for AJAX reload (3 seconds)
-        console.log(`  → Safety buffer (3s for farm list reload)...`);
-        await page.waitForTimeout(3000);
-        console.log(`  ✅ Manager selection complete\n`);
-        
-      } else {
-        console.log(`  ⚠️  Could not find "${config.manager}" button using .chakra-segment-group__itemText`);
-        console.log(`  → Proceeding with default manager selection...\n`);
-      }
-    } catch (error) {
-      console.log(`  ⚠️  Error selecting manager: ${error.message}`);
-      console.log(`  → Proceeding anyway...\n`);
-    }
-    
-    // Step 4: Wait for Farm List Content
+    // 🎯 STEP 3: Final Verification - Wait for Farm List
     console.log('  → Waiting for farm list to appear...');
     await page.waitForSelector('div.css-nd8svt a', { 
       state: 'visible',
@@ -589,7 +553,7 @@ async function runReportSending(config, dashboard, runStats) {
     console.log('  ✅ Farm list loaded\n');
     
     // Step 5: Extract Farm List
-    console.log('🏭 Step 4: Extracting farm list...');
+    console.log('🏭 Step 2: Extracting farm list...');
     dashboard.updateStatus('📋 Loading farms...', 'running');
     
     const farmList = await page.evaluate(() => {
@@ -661,27 +625,13 @@ async function runReportSending(config, dashboard, runStats) {
         break;
       }
       
-      // 🛡️ UNSTOPPABLE FARM LOOP: Wrap entire farm logic in try-catch
+      // Construct the send-report URL
+      const sendReportUrl = farm.href.replace('/report/point/', '/report/send-report/');
+      const fullUrl = `https://admin.iofarm.com${sendReportUrl}`;
+      
+      console.log(`  🌐 Navigating to: ${fullUrl}`);
+      
       try {
-        // ═══════════════════════════════════════════════════════════════════════════════
-        // URL ENFORCEMENT: Construct URL with explicit manager parameter
-        // ═══════════════════════════════════════════════════════════════════════════════
-        const targetManager = config.manager; // '승진' - enforce correct manager
-        
-        // Parse the scraped href (might have wrong manager param)
-        const rawUrl = new URL(farm.href, 'https://admin.iofarm.com');
-        
-        // Force the manager parameter to match config (overwrite any existing value)
-        rawUrl.searchParams.set('manager', targetManager);
-        
-        // Convert /point/ to /send-report/
-        const sendReportPath = rawUrl.pathname.replace('/report/point/', '/report/send-report/');
-        
-        // Construct final URL with enforced manager param
-        const fullUrl = `https://admin.iofarm.com${sendReportPath}${rawUrl.search}`;
-        
-        console.log(`  🌐 Navigating to: ${fullUrl}`);
-        console.log(`  ✅ Manager enforced: ${targetManager}\n`);
         // 🛡️ TIMEOUT SAFETY: Wrap in try/catch with explicit timeout
         await page.goto(fullUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
         console.log('  ✅ Page loaded');
@@ -841,20 +791,17 @@ async function runReportSending(config, dashboard, runStats) {
           if (buttonClicked) {
             console.log('  ✅ Report sent successfully!\n');
             dashboard.log(`✅ Report sent for: ${farm.name}`, 'success');
-            dashboard.broadcast('report_update', { status: 'Sent', farmName: farm.name, message: 'Report created successfully' });
             reportsCreated++;
             runStats.successCount++;
             await page.waitForTimeout(1500); // Brief wait for submission
           } else {
             console.log('  ⚠️  "리포트 생성" button not found on page\n');
             dashboard.log(`⚠️ Button not found for: ${farm.name}`, 'warning');
-            dashboard.broadcast('report_update', { status: 'Skipped', farmName: farm.name, message: 'Button not found on page' });
             reportsSkipped++;
           }
         } else {
           console.log('  ⚠️  Validation failed. Skipping report creation.\n');
           dashboard.log(`⚠️ Skipped ${farm.name}: ${validationResult.reason}`, 'warning');
-          dashboard.broadcast('report_update', { status: 'Skipped', farmName: farm.name, message: validationResult.reason });
           reportsSkipped++;
           runStats.skipCount++;
         }
@@ -862,19 +809,11 @@ async function runReportSending(config, dashboard, runStats) {
         runStats.farmsCompleted++;
         
       } catch (error) {
-        // 🛡️ UNSTOPPABLE: Catch all errors and continue to next farm
-        console.log(`  ❌ Error processing Farm ${farm.name}:`);
+        // 🛡️ TIMEOUT SAFETY: Catch and log, then continue
+        console.log(`  ❌ Error processing farm (timeout or page issue):`);
         console.log(`     → ${error.message}`);
-        console.log(`     → Stack: ${error.stack?.split('\n')[0] || 'N/A'}`);
-        console.log(`     → 🔄 Continuing to next farm...\n`);
-        
-        dashboard.log(`❌ Error on ${farm.name}: ${error.message}`, 'error');
-        dashboard.broadcast('report_update', { 
-          status: 'Error', 
-          farmName: farm.name, 
-          message: error.message 
-        });
-        
+        console.log(`     → Force-continuing to next farm...\n`);
+        dashboard.log(`❌ Timeout/Error on ${farm.name}: ${error.message}`, 'error');
         reportsSkipped++;
         runStats.errorCount++;
         
@@ -886,9 +825,6 @@ async function runReportSending(config, dashboard, runStats) {
         } catch (ssError) {
           console.log('     ⚠️  Could not save error screenshot\n');
         }
-        
-        // CRITICAL: Force continue to next farm
-        continue;
       }
     }
     
@@ -909,6 +845,15 @@ async function runReportSending(config, dashboard, runStats) {
     console.error('   Stack trace:', error.stack);
     dashboard.updateStatus('❌ Fatal error', 'error');
     dashboard.log(`Fatal error: ${error.message}`, 'error');
+    
+    // 🚨 SAVE CRASH REPORT for AI analysis
+    try {
+      const errorName = error.message.includes('Login') ? 'LoginFailed' : 
+                        error.message.includes('timeout') ? 'Timeout' : 'ReportSendingError';
+      await saveCrashReport(page, errorName, error);
+    } catch (crashErr) {
+      console.log(`   ⚠️ Could not save crash report: ${crashErr.message}`);
+    }
   } finally {
     console.log('🔒 Closing browser...');
     await browser.close();
@@ -987,12 +932,18 @@ async function main() {
     return;
   }
 
-  // Launch browser with Universal Browser Launcher (cross-platform)
+  // Launch browser with maximized window
   dashboard.updateStatus('🚀 Launching browser...', 'running');
   dashboard.updateStep('Initializing browser', 5);
   
-  const browser = await launchBrowser();
-  dashboard.log('Browser launched successfully', 'success');
+  const browser = await chromium.launch({
+    headless: false,         // ✅ FORCE VISIBLE (not background)
+    channel: 'chrome',       // ✅ Use real Chrome (not Chromium)
+    args: [
+      '--start-maximized',   // Start with maximized window
+      '--window-position=0,0' // Position at top-left
+    ]
+  });
   
   const context = await browser.newContext({
     viewport: null,  // Use full window size (no fixed viewport)
@@ -1002,7 +953,14 @@ async function main() {
   // Open automation page
   const page = await context.newPage();
   
-  // 🔒 AUTHENTICATION FIX: No resource blocking - allow all auth scripts to run
+  // �️ CRASH DIAGNOSTICS: Setup listeners for self-diagnosis
+  setupCrashDiagnostics(page);
+  
+  // F9 MANUAL TRIGGER: Press F9 anytime to save crash report
+  await setupF9ManualTrigger(page);
+  console.log('  [F9] Press anytime to save crash report\n');
+  
+  // �🔒 AUTHENTICATION FIX: No resource blocking - allow all auth scripts to run
   console.log('🔒 Authentication mode: All resources enabled for stable login');
   dashboard.log('Browser launched successfully', 'success');
   dashboard.log(`Dashboard accessible at ${dashboardUrl}`, 'success');
@@ -1016,322 +974,151 @@ async function main() {
   });
   
   try {
-    // ═══════════════════════════════════════════════════════════════════════════
-    // 🚦 SEQUENTIAL NAVIGATION FLOW (Root → Auth → Report)
-    // ═══════════════════════════════════════════════════════════════════════════
+    // Step 1: Navigate to IoFarm admin report page
+    console.log('📍 Step 1: Navigating to admin.iofarm.com/report/...');
+    dashboard.updateStatus('🌐 Navigating to report page...', 'running');
+    dashboard.updateStep('Step 1: Navigating to report page', 10);
+    dashboard.log('Navigating to admin.iofarm.com/report/', 'info');
     
-    const timestamp = new Date().toISOString().replace(/:/g, '-').split('.')[0];
+    await page.goto(CONFIG.url, { waitUntil: 'domcontentloaded', timeout: 15000 });
+    await page.waitForLoadState('domcontentloaded');
     
-    // ─────────────────────────────────────────────────────────────────────────────
-    // STEP 1: START AT ROOT (not /report)
-    // ─────────────────────────────────────────────────────────────────────────────
-    console.log('📍 Step 1: Navigating to ROOT (admin.iofarm.com/)...');
-    dashboard.updateStatus('🌐 Navigating to root...', 'running');
-    dashboard.updateStep('Step 1: Navigating to root', 10);
-    dashboard.log('Navigating to admin.iofarm.com/ (root)', 'info');
-    
-    // Navigate to ROOT, not /report
-    await page.goto('https://admin.iofarm.com/', { 
-      waitUntil: 'domcontentloaded', 
-      timeout: 20000 
-    });
-    
-    // Wait for page to be interactive
+    // ⚡ SMART: Wait for body and ensure page is interactive
     console.log('  → Waiting for page to be interactive...');
     await page.waitForSelector('body', { state: 'attached', timeout: 5000 });
-    await page.waitForLoadState('load').catch(() => {});
+    await page.waitForLoadState('load').catch(() => {}); // Allow some extra loading time
     
-    const rootUrl = page.url();
-    console.log(`  → Landed at: ${rootUrl}`);
-    dashboard.log(`Landed at: ${rootUrl}`, 'info');
+    // Show current URL
+    const currentUrl1 = page.url();
+    console.log(`  → Current URL: ${currentUrl1}`);
+    dashboard.log(`Current URL: ${currentUrl1}`, 'info');
     
-    // Take initial screenshot
-    const screenshotPath = path.join(CONFIG.screenshotDir, `1-root-page-${timestamp}.png`);
+    // Take screenshot to verify we're on the right page
+    const timestamp = new Date().toISOString().replace(/:/g, '-').split('.')[0];
+    const screenshotPath = path.join(CONFIG.screenshotDir, `1-homepage-${timestamp}.png`);
     await takeScreenshot(page, screenshotPath);
-    console.log(`  → Screenshot: ${screenshotPath}\n`);
+    console.log(`✅ Report page loaded. Screenshot saved: ${screenshotPath}\n`);
+    dashboard.log('Report page loaded successfully', 'success');
     
-    // ─────────────────────────────────────────────────────────────────────────────
-    // STEP 2: SMART AUTHENTICATION DETECTION
-    // ─────────────────────────────────────────────────────────────────────────────
-    console.log('🔐 Step 2: Smart Authentication Detection...');
+    // Step 2: Check if login is needed, if so, login
+    console.log('🔐 Step 2: Checking if login is required...');
     dashboard.updateStatus('🔐 Checking authentication...', 'running');
-    dashboard.updateStep('Step 2: Authentication check', 20);
     
-    // Wait for React app to fully render
-    console.log('  → Waiting for page to stabilize (networkidle)...');
-    await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {
-      console.log('  ⚠️  Network not fully idle after 15s, continuing...');
-    });
-    
-    // ═══════════════════════════════════════════════════════════════════
-    // DUAL-PATH DETECTION: Race between Login Form vs Dashboard
-    // ═══════════════════════════════════════════════════════════════════
-    console.log('  🔍 Detecting page state (Login Form vs Dashboard)...');
-    
-    const DETECTION_TIMEOUT = 10000;
-    
-    // Path A: Login form selectors
-    const loginFormPromise = (async () => {
-      await Promise.race([
-        page.waitForSelector('input[name="email"]', { state: 'visible', timeout: DETECTION_TIMEOUT }),
-        page.waitForSelector('input[type="email"]', { state: 'visible', timeout: DETECTION_TIMEOUT }),
-        page.waitForSelector('input[placeholder*="이메일"]', { state: 'visible', timeout: DETECTION_TIMEOUT }),
-        page.waitForSelector('input[placeholder*="email" i]', { state: 'visible', timeout: DETECTION_TIMEOUT })
-      ]);
-      return { state: 'login_form' };
-    })();
-    
-    // Path B: Dashboard/authenticated state selectors  
-    const dashboardPromise = (async () => {
-      await Promise.race([
-        page.waitForSelector('text=로그아웃', { state: 'visible', timeout: DETECTION_TIMEOUT }),
-        page.waitForSelector('text=Logout', { state: 'visible', timeout: DETECTION_TIMEOUT }),
-        page.waitForSelector('div.css-nd8svt', { state: 'visible', timeout: DETECTION_TIMEOUT }),
-        page.waitForSelector('a[href*="/report/point/"]', { state: 'visible', timeout: DETECTION_TIMEOUT })
-      ]);
-      return { state: 'dashboard' };
-    })();
-    
-    let pageState;
     try {
-      pageState = await Promise.race([
-        loginFormPromise.catch(() => null),
-        dashboardPromise.catch(() => null)
-      ]);
+      // ⚡ SMART: Wait for page to be ready before checking for login form
+      await page.waitForLoadState('domcontentloaded');
+      console.log('  → Checking for login form...');
       
-      // If neither resolved quickly, wait a bit more and check manually
-      if (!pageState) {
-        console.log('  → No immediate detection, checking manually...');
-        await page.waitForTimeout(2000);
-        const hasLoginField = await page.locator('input[type="email"], input[name="email"], input[placeholder*="이메일"]').first().isVisible().catch(() => false);
-        const hasDashboard = await page.locator('text=로그아웃, div.css-nd8svt').first().isVisible().catch(() => false);
-        
-        if (hasLoginField) pageState = { state: 'login_form' };
-        else if (hasDashboard) pageState = { state: 'dashboard' };
-      }
-    } catch (e) {
-      pageState = null;
-    }
-    
-    console.log(`  → Detected state: ${pageState?.state || 'unknown'}`);
-    
-    // ─────────────────────────────────────────────────────────────────────────────
-    // ACTION BASED ON DETECTED STATE
-    // ─────────────────────────────────────────────────────────────────────────────
-    
-    if (pageState?.state === 'dashboard') {
-      // ═══════════════════════════════════════════════════════════════════
-      // ALREADY AUTHENTICATED
-      // ═══════════════════════════════════════════════════════════════════
-      console.log('  ✅ Already authenticated! Dashboard detected.');
-      dashboard.log('Already authenticated', 'success');
-      
-    } else if (pageState?.state === 'login_form') {
-      // ═══════════════════════════════════════════════════════════════════
-      // LOGIN REQUIRED
-      // ═══════════════════════════════════════════════════════════════════
-      console.log('  → Found login form, entering credentials...');
-      dashboard.updateStatus('🔐 Logging in...', 'running');
-      
-      // Fill email (try multiple selectors)
-      const emailSelectors = [
-        'input[type="email"]',
-        'input[name="email"]',
-        'input[placeholder*="이메일"]',
-        'input[placeholder*="email" i]'
-      ];
-      
-      let emailFilled = false;
-      for (const selector of emailSelectors) {
-        try {
-          const field = page.locator(selector).first();
-          if (await field.isVisible({ timeout: 500 })) {
-            await field.fill(CONFIG.username);
-            console.log(`  → Email entered: ${CONFIG.username}`);
-            emailFilled = true;
-            break;
-          }
-        } catch (e) { continue; }
-      }
-      
-      if (!emailFilled) {
-        throw new Error('❌ Could not find email input field');
-      }
-      
-      // Fill password
-      console.log('  → Entering password...');
-      await page.fill('input[type="password"]', CONFIG.password);
-      
-      // Click login button
-      console.log('  → Clicking login button...');
-      const loginButtonSelectors = [
-        'button[type="submit"]',
-        'button:has-text("로그인")',
-        'button:has-text("Login")',
-        'input[type="submit"]'
-      ];
-      
-      let buttonClicked = false;
-      for (const selector of loginButtonSelectors) {
-        try {
-          const button = page.locator(selector).first();
-          if (await button.isVisible({ timeout: 1000 })) {
-            await button.click();
-            buttonClicked = true;
-            break;
-          }
-        } catch (e) { continue; }
-      }
-      
-      if (!buttonClicked) {
-        console.log('  → Pressing Enter as fallback...');
-        await page.keyboard.press('Enter');
-      }
-      
-      // ═══════════════════════════════════════════════════════════════════
-      // 🎯 STATE-BASED LOGIN VERIFICATION (SPA-Compatible)
-      // ═══════════════════════════════════════════════════════════════════
-      console.log('\n  🎯 STATE-BASED LOGIN VERIFICATION:');
-      console.log('  ═══════════════════════════════════');
-      console.log('  → Waiting for UI state change (Success or Error)...\n');
-      
-      const LOGIN_TIMEOUT = 15000;
-      
-      // Success indicators: Dashboard appears
-      const successPromise = (async () => {
-        await Promise.race([
-          page.waitForSelector('text=로그아웃', { state: 'visible', timeout: LOGIN_TIMEOUT }),
-          page.waitForSelector('div.css-nd8svt', { state: 'visible', timeout: LOGIN_TIMEOUT }),
-          page.waitForSelector('[id*="tabs"][id*="content-point"]', { state: 'visible', timeout: LOGIN_TIMEOUT }),
-          page.waitForSelector('a[href*="/report/point/"]', { state: 'visible', timeout: LOGIN_TIMEOUT })
-        ]);
-        return { status: 'success' };
-      })();
-      
-      // Failure indicators: Error message appears
-      const failurePromise = (async () => {
-        await Promise.race([
-          page.waitForSelector('text=/invalid|incorrect|wrong|error|failed|실패|오류/i', { state: 'visible', timeout: LOGIN_TIMEOUT }),
-          page.waitForSelector('.error-message, .alert-error, [class*="error"]', { state: 'visible', timeout: LOGIN_TIMEOUT })
-        ]);
-        return { status: 'failure' };
-      })();
-      
-      const timeoutPromise = new Promise((_, reject) => {
-        setTimeout(() => reject(new Error('timeout')), LOGIN_TIMEOUT);
+      // Check if we're already authenticated by looking for authenticated elements
+      const alreadyAuthenticated = await page.evaluate(() => {
+        // Look for farm list container (only visible when authenticated)
+        const farmContainer = document.querySelector('[id*="tabs"][id*="content-point"]');
+        const hasAuthenticatedContent = farmContainer !== null;
+        const isOnLoginPage = window.location.href.includes('/login') || window.location.href.includes('/signin');
+        return hasAuthenticatedContent && !isOnLoginPage;
       });
       
-      try {
-        const result = await Promise.race([
-          successPromise.catch(() => null),
-          failurePromise.catch(() => null),
-          timeoutPromise
-        ]);
+      if (alreadyAuthenticated) {
+        console.log('  ✅ Already authenticated! Farm list is visible.');
+        console.log(`  → Current URL: ${page.url()}\n`);
+        dashboard.log('Already authenticated', 'success');
+      } else {
+        // Check if login form exists
+        const loginFormExists = await page.locator('input[type="email"], input[type="text"], input[name="email"], input[name="username"]').first().isVisible({ timeout: 5000 }).catch(() => false);
         
-        if (result === null) {
-          // Fallback: check current state
-          console.log('  → No clear signal, checking page state...');
-          const farmListVisible = await page.locator('div.css-nd8svt, a[href*="/report/point/"], text=로그아웃').first().isVisible().catch(() => false);
-          const errorVisible = await page.locator('text=/invalid|error|실패/i').first().isVisible().catch(() => false);
+        if (loginFormExists) {
+          console.log('  → Login form detected, proceeding with ROBUST login...');
+          dashboard.updateStatus('🔐 Logging in...', 'running');
           
-          if (farmListVisible) {
-            console.log('  ✅ Login confirmed by UI change');
-          } else if (errorVisible) {
-            const errorScreenshot = path.join(CONFIG.screenshotDir, `login-error-${timestamp}.png`);
-            await page.screenshot({ path: errorScreenshot, fullPage: true });
-            throw new Error('❌ Login failed: Invalid credentials - Check screenshot: ' + errorScreenshot);
-          } else {
-            const timeoutScreenshot = path.join(CONFIG.screenshotDir, `login-timeout-${timestamp}.png`);
-            await page.screenshot({ path: timeoutScreenshot, fullPage: true });
-            throw new Error('❌ Login timed out - Check screenshot: ' + timeoutScreenshot);
+          // Use the robust login function with aggressive clicking and retry
+          await performRobustLogin(page);
+          
+          // Wait for network to stabilize after login
+          console.log('  📍 Post-login stabilization:');
+          await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {
+            console.log('     ⚠️  Network not idle after 10s, continuing...');
+          });
+          console.log('     ✅ Network idle');
+          
+          // Navigate to report page if not already there
+          const currentUrl = page.url();
+          if (!currentUrl.includes('/report')) {
+            console.log('  📍 Navigating to /report page...');
+            await page.goto('https://admin.iofarm.com/report', { 
+              waitUntil: 'networkidle',
+              timeout: 20000 
+            });
+            console.log(`  ✅ Navigated to: ${page.url()}`);
           }
-        } else if (result.status === 'success') {
-          console.log('  ✅ Login confirmed by UI change (Dashboard appeared)');
-        } else if (result.status === 'failure') {
-          const errorScreenshot = path.join(CONFIG.screenshotDir, `login-error-${timestamp}.png`);
-          await page.screenshot({ path: errorScreenshot, fullPage: true });
-          throw new Error('❌ Login failed: Invalid credentials - Check screenshot: ' + errorScreenshot);
+          
+          // 🎯 CRITICAL: Final verification - wait for farm list to be visible
+          console.log('  🎯 Final verification: Looking for farm list...');
+          
+          try {
+            await page.waitForSelector('[id*="tabs"][id*="content-point"]', { 
+              state: 'visible', 
+              timeout: 15000 
+            });
+            console.log('     ✅ Farm list container is visible');
+          } catch (e) {
+            console.log(`     ❌ Farm list container not found: ${e.message}`);
+            const debugUrl = page.url();
+            console.log(`     → Current URL: ${debugUrl}`);
+            
+            // Take debug screenshot
+            const debugScreenshot = path.join(CONFIG.screenshotDir, `debug-no-farms-${timestamp}.png`);
+            await page.screenshot({ path: debugScreenshot, fullPage: true });
+            console.log(`     → Debug screenshot: ${debugScreenshot}`);
+            
+            // If still on login page, throw error
+            if (debugUrl.includes('/login') || debugUrl.includes('/signin')) {
+              throw new Error('Still on login page after authentication - credentials may be incorrect');
+            }
+          }
+          
+          // Wait for farm links to populate
+          console.log('     → Waiting for farm links to populate...');
+          await page.waitForSelector('div.css-nd8svt a[href*="/report/point/"]', { 
+            state: 'visible', 
+            timeout: 30000 
+          });
+          console.log('     ✅ Farm links are visible and ready\n');
+          
+          const loginScreenshot = path.join(CONFIG.screenshotDir, `2-after-login-${timestamp}.png`);
+          await page.screenshot({ path: loginScreenshot, fullPage: true });
+          console.log(`✅ Login completed successfully. Screenshot: ${loginScreenshot}\n`);
+          dashboard.log('Login successful', 'success');
+          
+        } else {
+          console.log('  ✅ No login form found, checking if already authenticated...');
+          const currentUrl = page.url();
+          console.log(`  → Current URL: ${currentUrl}\n`);
+          
+          // Verify we're on the right page
+          if (currentUrl.includes('/report') || await page.isVisible('[id*="tabs"]')) {
+            console.log('  ✅ Already on authenticated page\n');
+            dashboard.log('Already authenticated', 'success');
+          } else {
+            console.log('  ⚠️  Unclear authentication state, will attempt to continue...\n');
+          }
         }
-      } catch (raceError) {
-        if (raceError.message === 'timeout') {
-          const timeoutScreenshot = path.join(CONFIG.screenshotDir, `login-timeout-${timestamp}.png`);
-          await page.screenshot({ path: timeoutScreenshot, fullPage: true });
-          throw new Error('❌ Login timed out - Check screenshot: ' + timeoutScreenshot);
-        }
-        throw raceError;
       }
       
-      console.log('  ═══════════════════════════════════\n');
+    } catch (loginError) {
+      console.log('❌ Login process failed. Error:', loginError.message);
+      console.log('   Stack:', loginError.stack);
+      console.log('   → Taking error screenshot...');
       
-      // Wait for network to stabilize
-      await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {
-        console.log('  ⚠️  Network not fully idle, continuing...');
-      });
+      const errorScreenshot = path.join(CONFIG.screenshotDir, `error-login-${timestamp}.png`);
+      await page.screenshot({ path: errorScreenshot, fullPage: true });
+      console.log(`   → Error screenshot: ${errorScreenshot}\n`);
       
-      const loginScreenshot = path.join(CONFIG.screenshotDir, `2-after-login-${timestamp}.png`);
-      await page.screenshot({ path: loginScreenshot, fullPage: true });
-      console.log(`  ✅ Login completed. Screenshot: ${loginScreenshot}\n`);
-      dashboard.log('Login successful', 'success');
-      
-    } else {
-      // Unknown state - take debug screenshot and throw error
-      const debugScreenshot = path.join(CONFIG.screenshotDir, `debug-auth-state-${timestamp}.png`);
-      await page.screenshot({ path: debugScreenshot, fullPage: true });
-      console.log(`  ❌ Unknown page state. Debug screenshot: ${debugScreenshot}`);
-      throw new Error(`❌ Unknown page state - neither login form nor dashboard detected. Check: ${debugScreenshot}`);
+      dashboard.log('Login failed: ' + loginError.message, 'error');
+      throw loginError; // Re-throw to stop execution
     }
     
-    // ─────────────────────────────────────────────────────────────────────────────
-    // STEP 3: NAVIGATE TO REPORT PAGE (only after confirmed auth)
-    // ─────────────────────────────────────────────────────────────────────────────
-    console.log('📊 Step 3: Navigating to Report page...');
-    dashboard.updateStatus('📊 Loading report page...', 'running');
-    dashboard.updateStep('Step 3: Navigate to /report', 30);
-    
-    const currentUrl = page.url();
-    
-    if (!currentUrl.includes('/report')) {
-      console.log('  → Not on /report page, navigating...');
-      await page.goto('https://admin.iofarm.com/report', { 
-        waitUntil: 'domcontentloaded', 
-        timeout: 20000 
-      });
-      console.log(`  → Navigated to: ${page.url()}`);
-    } else {
-      console.log('  → Already on /report page');
-    }
-    
-    // Wait for Farm List to appear (confirms we're authenticated and on the right page)
-    console.log('  → Waiting for Farm List to load...');
-    try {
-      await page.waitForSelector('div.css-nd8svt a[href*="/report/point/"]', { 
-        state: 'visible', 
-        timeout: 20000 
-      });
-      console.log('  ✅ Farm List loaded successfully!\n');
-      dashboard.log('Farm list loaded', 'success');
-    } catch (farmListError) {
-      console.log('  ⚠️  Farm list selector not found, trying alternative...');
-      // Try alternative selector
-      await page.waitForSelector('[id*="tabs"][id*="content-point"] a', { 
-        state: 'visible', 
-        timeout: 10000 
-      }).catch(() => {
-        console.log('  ⚠️  Alternative selector also failed, but continuing...');
-      });
-    }
-    
-    const reportScreenshot = path.join(CONFIG.screenshotDir, `3-report-page-${timestamp}.png`);
-    await page.screenshot({ path: reportScreenshot, fullPage: true });
-    console.log(`  → Screenshot: ${reportScreenshot}\n`);
-    dashboard.log('Report page ready', 'success');
-    
-    // ═══════════════════════════════════════════════════════════════════════════
-    // END OF SEQUENTIAL NAVIGATION FLOW - Now proceed to farm processing
-    // ═══════════════════════════════════════════════════════════════════════════
-    
-    // Step 4: Wait for manager's irrigation to show up
-    console.log(`📊 Step 4: Waiting for "${CONFIG.targetName}'s irrigation" to appear...`);
+    // Step 3: Wait for manager's irrigation to show up
+    console.log(`📊 Step 3: Waiting for "${CONFIG.targetName}'s irrigation" to appear...`);
     
     try {
       // Show current URL
@@ -1397,80 +1184,44 @@ async function main() {
     }
     
     // Step 4: Click manager radio button to select that manager
-    // ═══════════════════════════════════════════════════════════════════════════════
-    // 🎯 PRECISE TEXT TARGETING: Use Chakra UI segment group class with exact match
-    // ═══════════════════════════════════════════════════════════════════════════════
-    console.log(`🎯 Step 4: Selecting "${CONFIG.targetName}" manager (Precise Targeting)...`);
+    console.log(`🎯 Step 4: Selecting "${CONFIG.targetName}" manager...`);
     
     try {
-      // Define precise locator using Chakra UI class + exact text match
-      const managerButton = page.locator('.chakra-segment-group__itemText', { hasText: new RegExp(`^${CONFIG.targetName}$`) });
-      
-      // Check if the button exists
-      const buttonCount = await managerButton.count();
-      console.log(`  → Found ${buttonCount} button(s) matching "${CONFIG.targetName}"`);
-      
-      if (buttonCount > 0) {
-        // Primary: Force click on the Playwright locator
-        console.log(`  → Attempting Playwright force-click...`);
-        try {
-          await managerButton.first().click({ force: true, timeout: 5000 });
-          console.log(`  ✅ Playwright click successful`);
-        } catch (clickError) {
-          // Fallback: Use native JavaScript click
-          console.log(`  ⚠️  Playwright click failed, using JS fallback...`);
-          const jsClicked = await page.evaluate((targetName) => {
-            const spans = Array.from(document.querySelectorAll('.chakra-segment-group__itemText'));
-            const targetSpan = spans.find(span => span.textContent.trim() === targetName);
-            if (targetSpan) {
-              // Click the span itself
-              targetSpan.click();
-              // Also try clicking parent label if exists
-              const parentLabel = targetSpan.closest('label');
-              if (parentLabel) parentLabel.click();
-              return true;
-            }
-            return false;
-          }, CONFIG.targetName);
-          
-          if (jsClicked) {
-            console.log(`  ✅ JavaScript fallback click successful`);
-          } else {
-            console.log(`  ❌ JavaScript fallback also failed`);
-          }
+      // Use JavaScript to click the radio button (more reliable than Playwright click)
+      const radioClicked = await page.evaluate((managerName) => {
+        // Find radio button by label text
+        const labels = Array.from(document.querySelectorAll('label'));
+        const managerLabel = labels.find(label => label.textContent.includes(managerName));
+        if (managerLabel) {
+          managerLabel.click();
+          return true;
         }
         
-        // Wait for UI to acknowledge the change
-        console.log(`  → Waiting for UI state change...`);
-        try {
-          // Wait for the target input to become checked
-          await page.waitForFunction((targetName) => {
-            const spans = Array.from(document.querySelectorAll('.chakra-segment-group__itemText'));
-            const targetSpan = spans.find(span => span.textContent.trim() === targetName);
-            if (targetSpan) {
-              const parentLabel = targetSpan.closest('label');
-              if (parentLabel) {
-                return parentLabel.getAttribute('data-state') === 'checked';
-              }
-            }
-            return false;
-          }, CONFIG.targetName, { timeout: 3000 });
-          console.log(`  ✅ UI confirmed: "${CONFIG.targetName}" is now selected`);
-        } catch (waitError) {
-          console.log(`  ⚠️  UI state change not detected, adding safety buffer...`);
+        // Fallback: try input directly
+        const radios = Array.from(document.querySelectorAll('input[type="radio"]'));
+        const managerRadio = radios.find(radio => 
+          radio.id.includes(managerName) || radio.value.includes(managerName)
+        );
+        if (managerRadio) {
+          managerRadio.click();
+          return true;
         }
         
-        // Safety buffer for AJAX reload
-        await page.waitForTimeout(2000);
+        return false;
+      }, CONFIG.targetName); // Pass the manager name from CONFIG
+      
+      if (radioClicked) {
+        console.log(`  ✅ Clicked "${CONFIG.targetName}" radio button via JavaScript`);
+        // ⚡ FAST: No wait needed after JavaScript click
         
         const step4Screenshot = path.join(CONFIG.screenshotDir, `4-selected-manager-${timestamp}.png`);
         await page.screenshot({ path: step4Screenshot, fullPage: true });
         console.log(`  📸 Screenshot: ${step4Screenshot}\n`);
       } else {
-        console.log(`  ⚠️  Could not find "${CONFIG.targetName}" button using .chakra-segment-group__itemText\n`);
+        console.log(`  ⚠️  Could not find "${CONFIG.targetName}" radio button\n`);
       }
     } catch (error) {
-      console.log(`  ⚠️  Error selecting "${CONFIG.targetName}" manager: ${error.message}\n`);
+      console.log(`  ⚠️  Error clicking "${CONFIG.targetName}" radio: ${error.message}\n`);
     }
     
     // Step 5: Get all farms from the list and loop through them
@@ -1586,7 +1337,9 @@ async function main() {
     // Slice the array to get only the farms we want to process
     const farmsToProcess = farmList.slice(startIndex, endIndex);
     
-    // Dynamic loop - checks maxFarms from config each iteration (allows adding farms mid-run)
+    // ═══════════════════════════════════════════════════════════════════════════
+    // 🏭 FARM LOOP (OUTER) - Process each farm with try/catch for robustness
+    // ═══════════════════════════════════════════════════════════════════════════
     for (let farmIdx = 0; farmIdx < farmsToProcess.length; farmIdx++) {
       // Get current config (may have been updated via "Add More Farms")
       const currentConfig = dashboard.getConfig();
@@ -1635,6 +1388,9 @@ async function main() {
       if (dashboard) {
         dashboard.updateProgress(farmIdx + 1, farmsToProcess.length, currentFarm.name);
       }
+      
+      // 🛡️ ROBUST TRY/CATCH: Wrap entire farm processing so failures don't stop the loop
+      try {
       
       // Set up network interception to capture chart data
       console.log('  🌐 Setting up network interception...');
@@ -1698,12 +1454,16 @@ async function main() {
       
       console.log(`  🔗 Base farm URL: ${farmUrlWithManager}\n`);
     
-    // 📅 DATE LOOP: Iterate through past 6 days (T-0 to T-5)
-    const totalDaysToCheck = 6;
+    // ═══════════════════════════════════════════════════════════════════════════
+    // 📅 DATE LOOP (INNER) - Process dates from 5 days ago → Today
+    //    Using DIRECT URL NAVIGATION instead of clicking Previous/Next buttons
+    // ═══════════════════════════════════════════════════════════════════════════
+    const totalDaysToCheck = 6; // T-5 to T-0 (6 days total)
     let dateIdx = 0;
     const farmDateData = []; // Store data for all dates of this farm
     
-    for (let dayOffset = 0; dayOffset < totalDaysToCheck; dayOffset++) {
+    // 🔄 FIXED: Loop from 5 → 0 (5 days ago to Today)
+    for (let dayOffset = 5; dayOffset >= 0; dayOffset--) {
       dateIdx++;
       
       // 📅 CALCULATE TARGET DATE EXPLICITLY
@@ -1724,15 +1484,19 @@ async function main() {
         weekday: 'short'
       });
       
-      console.log(`\n  📅 Processing Date: ${koreanDate} (${dateString}) - T-${dayOffset} days`);
+      console.log(`\n  📅 Processing Date ${dateIdx}/${totalDaysToCheck}: ${koreanDate} (${dateString}) - T-${dayOffset} days`);
       console.log(`  ${'─'.repeat(70)}`);
       
-      // 🌐 NAVIGATE DIRECTLY TO THIS DATE via URL
-      const targetUrl = `${farmUrlWithManager}&date=${dateString}`;
-      console.log(`  🌐 Navigating to: ${targetUrl}`);
+      // 🌐 DIRECT URL NAVIGATION: Construct URL with explicit date parameter
+      const currentUrl = new URL(page.url());
+      currentUrl.searchParams.set('date', dateString);
+      currentUrl.searchParams.set('manager', manager);
+      const targetUrl = currentUrl.toString();
+      
+      console.log(`  🌐 Direct URL navigation to: ${targetUrl}`);
       
       try {
-        await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 10000 });
+        await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
         console.log(`  ✅ Loaded page for date: ${dateString}`);
         
         // Wait for main content to be visible
@@ -1916,26 +1680,7 @@ async function main() {
           await page.screenshot({ path: skipScreenshot, fullPage: true });
           console.log(`     📸 Screenshot: ${skipScreenshot}\n`);
           
-          // Move to next date using "Next period" button (except for last date)
-          if (dayOffset < totalDaysToCheck - 1) {
-            console.log(`     ⏭️  Moving to next date...`);
-            const nextClicked = await page.evaluate(() => {
-              const nextButton = document.querySelector('button[aria-label="다음 기간"]');
-              if (nextButton) {
-                nextButton.click();
-                console.log(`✅ [BROWSER] Clicked "Next period" button`);
-                return true;
-              }
-              return false;
-            });
-            
-            if (nextClicked) {
-              console.log(`     ✅ Moved to next date`);
-              // ⚡ FAST: Brief wait for date picker (unavoidable UI)
-              await page.waitForTimeout(300);
-            }
-          }
-          
+          // ✅ Direct URL navigation handles date change - no button click needed
           continue; // Skip to next date
         }
         
@@ -1975,23 +1720,7 @@ async function main() {
             console.log(`     → Got ${dataPoints?.length || 0} points, need at least 10`);
             console.log('     → Skipping chart interaction for this date\n');
             
-            // Skip to next date
-            if (dayOffset < totalDaysToCheck - 1) {
-              console.log(`     ⏭️  Moving to next date...`);
-              const nextClicked = await page.evaluate(() => {
-                const nextButton = document.querySelector('button[aria-label="다음 기간"]');
-                if (nextButton) {
-                  nextButton.click();
-                  return true;
-                }
-                return false;
-              });
-              
-              if (nextClicked) {
-                // ⚡ FAST: Brief wait for date picker UI
-                await page.waitForTimeout(300);
-              }
-            }
+            // ✅ Direct URL navigation handles date change - no button click needed
             continue; // Skip to next date
           }
           
@@ -2106,23 +1835,7 @@ async function main() {
           
           if (uniqueEvents.length === 0) {
             console.log('     → No irrigation detected for this date\n');
-            // Skip to next date
-            if (dayOffset < totalDaysToCheck - 1) {
-              console.log(`     ⏭️  Moving to next date...`);
-              const nextClicked = await page.evaluate(() => {
-                const nextButton = document.querySelector('button[aria-label="다음 기간"]');
-                if (nextButton) {
-                  nextButton.click();
-                  return true;
-                }
-                return false;
-              });
-              
-              if (nextClicked) {
-                // ⚡ FAST: Brief wait for date picker UI
-                await page.waitForTimeout(300);
-              }
-            }
+            // ✅ Direct URL navigation handles date change - no button click needed
             continue;
           }
           
@@ -2130,39 +1843,7 @@ async function main() {
           uniqueEvents.sort((a, b) => a.index - b.index);
           
           const firstEvent = uniqueEvents[0];
-          let lastEvent = uniqueEvents[uniqueEvents.length - 1];
-          
-          // 🎯 CRITICAL FIX: For LAST event, find the PEAK (end) instead of valley (start)
-          if (uniqueEvents.length > 0) {
-            const lastValleyIndex = lastEvent.index;
-            const PEAK_SEARCH_WINDOW = 30; // Search next 30 points for peak
-            let peakIndex = lastValleyIndex;
-            let peakValue = dataPoints[lastValleyIndex].y;
-            
-            const searchEnd = Math.min(lastValleyIndex + PEAK_SEARCH_WINDOW, dataPoints.length - 1);
-            console.log(`  🔍 Finding PEAK for last event (valley at index ${lastValleyIndex})...`);
-            console.log(`     → Searching indices ${lastValleyIndex} to ${searchEnd}`);
-            
-            for (let j = lastValleyIndex; j <= searchEnd; j++) {
-              if (dataPoints[j].y > peakValue) {
-                peakValue = dataPoints[j].y;
-                peakIndex = j;
-              }
-            }
-            
-            console.log(`     → Peak found at index ${peakIndex} (Y: ${peakValue.toFixed(3)})`);
-            console.log(`     → Rise from valley to peak: ${(peakValue - lastEvent.y).toFixed(3)}`);
-            
-            // Update lastEvent to use PEAK coordinates
-            lastEvent = {
-              index: peakIndex,
-              x: dataPoints[peakIndex].x,
-              y: dataPoints[peakIndex].y,
-              peakIndex: peakIndex,
-              rise: peakValue - lastEvent.y,
-              time: new Date(dataPoints[peakIndex].x).toTimeString().slice(0, 5)
-            };
-          }
+          const lastEvent = uniqueEvents[uniqueEvents.length - 1];
           
           console.log(`     → First event at index ${firstEvent.index}`);
           console.log(`     → Last event at index ${lastEvent.index}`);
@@ -2179,23 +1860,7 @@ async function main() {
           console.log('     → Or API response format is different than expected');
           console.log('     → Skipping chart interaction for this date\n');
           
-          // Skip to next date if data unavailable
-          if (dayOffset < totalDaysToCheck - 1) {
-            console.log(`     ⏭️  Moving to next date...`);
-            const nextClicked = await page.evaluate(() => {
-              const nextButton = document.querySelector('button[aria-label="다음 기간"]');
-              if (nextButton) {
-                nextButton.click();
-                return true;
-              }
-              return false;
-            });
-            
-            if (nextClicked) {
-              // ⚡ FAST: Brief wait for date picker UI
-              await page.waitForTimeout(300);
-            }
-          }
+          // ✅ Direct URL navigation handles date change - no button click needed
           continue; // Skip to next date
         }
 
@@ -2631,19 +2296,7 @@ async function main() {
           await page.screenshot({ path: errorScreenshot, fullPage: true });
           console.log(`     📸 Screenshot: ${errorScreenshot}\n`);
           
-          // Move to next date
-          if (dayOffset < totalDaysToCheck - 1) {
-            const nextClicked = await page.evaluate(() => {
-              const nextButton = document.querySelector('button[aria-label="다음 기간"]');
-              if (nextButton) { nextButton.click(); return true; }
-              return false;
-            });
-            if (nextClicked) {
-              console.log(`     ⏭️  Moving to next date...\n`);
-              // ⚡ FAST: Brief wait for date picker UI
-              await page.waitForTimeout(300);
-            }
-          }
+          // ✅ Direct URL navigation handles date change - no button click needed
           continue; // Skip to next date
         }
         
@@ -2657,38 +2310,6 @@ async function main() {
         // Show separation info
         if (clickResults.separationPercent !== undefined) {
           console.log(`     ✅ First (START) and Last (END) separated by ${clickResults.separationPercent}% of chart`);
-        }
-        
-        // ═══════════════════════════════════════════════════════════════════════
-        // 🎓 F8 TRAINING MODE: Pause and allow manual point correction
-        // ═══════════════════════════════════════════════════════════════════════
-        if (CONFIG.trainingMode && clickResults.firstCoords && clickResults.lastCoords) {
-          console.log(`\n     🎓 F8 TRAINING MODE ACTIVATED`);
-          
-          const trainingResult = await trainAlgorithm(
-            page,
-            farm.name,
-            currentDateStr,
-            clickResults.firstCoords,
-            clickResults.lastCoords
-          );
-          
-          // If user provided corrections, apply them
-          if (trainingResult.hasCorrections && trainingResult.offsets) {
-            console.log(`     🔧 Applying user corrections to coordinates...`);
-            
-            // Update first coordinates
-            clickResults.firstCoords.x += trainingResult.offsets.first.x;
-            clickResults.firstCoords.y += trainingResult.offsets.first.y;
-            
-            // Update last coordinates
-            clickResults.lastCoords.x += trainingResult.offsets.last.x;
-            clickResults.lastCoords.y += trainingResult.offsets.last.y;
-            
-            console.log(`     ✅ Coordinates adjusted with user feedback\n`);
-          } else {
-            console.log(`     ✅ Algorithm prediction accepted\n`);
-          }
         }
         
         // CHART LEARNING MODE: Show detected points and allow user correction
@@ -3205,7 +2826,7 @@ async function main() {
       
       // ✅ NO NEED TO CLICK "Next Period" - We navigate directly via URL on next iteration
       
-    } // End of date loop // End date loop
+    } // End of date loop
     
     // Add all dates data for this farm to collection
     const farmData = {
@@ -3220,9 +2841,34 @@ async function main() {
     // 📊 Track farm completion
     runStats.farmsCompleted++;
     
-    console.log(`\n  ✅ Completed all dates for farm "${currentFarm.name}"`);
+    console.log(`\n  ✅ Finished Farm "${currentFarm.name}"`);
     console.log(`     → Processed ${farmDateData.length} dates`);
     console.log(`     → Data found for ${farmData.datesWithData} dates\n`);
+    
+    // 🛡️ END OF ROBUST TRY BLOCK - Catch any errors and continue to next farm
+    } catch (farmError) {
+      console.log(`\n  ❌ Error processing farm "${currentFarm.name}": ${farmError.message}`);
+      console.log(`     → Stack: ${farmError.stack?.split('\n')[1] || 'N/A'}`);
+      console.log(`     → Continuing to next farm...\n`);
+      
+      if (dashboard) {
+        dashboard.log(`Error on ${currentFarm.name}: ${farmError.message}`, 'error');
+      }
+      
+      runStats.errorCount = (runStats.errorCount || 0) + 1;
+      
+      // Take error screenshot
+      try {
+        const errorScreenshot = path.join(CONFIG.screenshotDir, `error-farm-${farmIdx + 1}-${Date.now()}.png`);
+        await page.screenshot({ path: errorScreenshot, fullPage: true });
+        console.log(`     📸 Error screenshot: ${errorScreenshot}\n`);
+      } catch (ssErr) {
+        console.log(`     ⚠️  Could not save error screenshot\n`);
+      }
+      
+      // Continue to next farm (this will automatically happen when the catch block ends)
+      continue;
+    }
       
     } // End farm loop
     
@@ -3235,7 +2881,7 @@ async function main() {
       dateRange: {
         description: '5 days ago to today',
         totalDays: totalDaysToCheck,
-        method: 'Previous/Next period buttons'
+        method: 'Direct URL navigation with date parameter'
       },
       totalFarms: allFarmData.length,
       farmsWithData: allFarmData.filter(f => f.datesWithData > 0).length,
@@ -3338,14 +2984,24 @@ async function main() {
       dashboard.log(`Error: ${error.message}`, 'error');
     }
     
-    // Try to take error screenshot
+    // 🚨 SAVE CRASH REPORT for AI analysis
+    try {
+      const errorName = error.message.includes('Login') ? 'LoginFailed' : 
+                        error.message.includes('timeout') ? 'Timeout' :
+                        error.message.includes('Farm') ? 'FarmProcessingError' : 'AutomationError';
+      await saveCrashReport(page, errorName, error);
+      if (dashboard) {
+        dashboard.log('Crash report saved to crash-reports/ folder', 'info');
+      }
+    } catch (crashErr) {
+      console.log(`   ⚠️ Could not save crash report: ${crashErr.message}`);
+    }
+    
+    // Also take simple error screenshot (backup)
     try {
       const errorScreenshot = path.join(CONFIG.screenshotDir, `error-${Date.now()}.png`);
       await takeScreenshot(page, errorScreenshot);
       console.log(`📸 Error screenshot saved: ${errorScreenshot}`);
-      if (dashboard) {
-        dashboard.log('Error screenshot captured', 'info');
-      }
     } catch (screenshotError) {
       console.log('   Could not save error screenshot');
     }
