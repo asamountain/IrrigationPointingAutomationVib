@@ -1,0 +1,19 @@
+=== BROWSER CONSOLE LOGS (Last 50) ===
+
+[2026-01-23T05:08:18.617Z] [LOG] No token found, staying on login page
+
+=== ERROR DETAILS ===
+Error Name: ReportSendingError
+Error Message: page.waitForURL: Timeout 8000ms exceeded.
+=========================== logs ===========================
+waiting for navigation until "load"
+============================================================
+Stack Trace:
+page.waitForURL: Timeout 8000ms exceeded.
+=========================== logs ===========================
+waiting for navigation until "load"
+============================================================
+    at performRobustLogin (C:\Users\iocrops admin\Coding\IrrigationReportAutomation\irrigation-playwright.js:282:10)
+    at async performLogin (C:\Users\iocrops admin\Coding\IrrigationReportAutomation\irrigation-playwright.js:659:7)
+    at async runReportSending (C:\Users\iocrops admin\Coding\IrrigationReportAutomation\irrigation-playwright.js:650:9)
+    at async main (C:\Users\iocrops admin\Coding\IrrigationReportAutomation\irrigation-playwright.js:1111:5)

@@ -1,0 +1,14 @@
+=== BROWSER CONSOLE LOGS (Last 50) ===
+
+[2026-01-23T02:19:46.650Z] [LOG] ✅ F9 Manual Trigger listener installed - Press F9 to save crash report
+[2026-01-23T02:19:46.948Z] [LOG] No token found, staying on login page
+[2026-01-23T02:19:48.739Z] [LOG] ✅ F9 Manual Trigger listener installed - Press F9 to save crash report
+[2026-01-23T02:19:48.807Z] [LOG] No token found, staying on login page
+
+=== ERROR DETAILS ===
+Error Name: LoginFailed
+Error Message: Login form not found after reload. Check error-login-state.png screenshot.
+Stack Trace:
+Error: Login form not found after reload. Check error-login-state.png screenshot.
+    at runReportSending (file:///C:/Users/iocrops%20admin/Coding/IrrigationReportAutomation/irrigation-playwright.js:499:19)
+    at async main (file:///C:/Users/iocrops%20admin/Coding/IrrigationReportAutomation/irrigation-playwright.js:931:5)

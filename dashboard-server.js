@@ -142,6 +142,25 @@ class DashboardServer {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ success: true, stopped: true }));
     }
+    else if (url.pathname === '/control/trigger-f9' && req.method === 'POST') {
+      // F9 global hotkey trigger - allows dashboard to trigger crash report
+      console.log('🔴 F9 triggered from Dashboard - Saving crash report...');
+      this.f9Triggered = true;  // Flag that will be checked by the Playwright worker
+      this.broadcast({
+        type: 'log',
+        message: '📸 F9 triggered! Crash report being saved...',
+        level: 'warning'
+      });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true, triggered: true }));
+    }
+    else if (url.pathname === '/control/check-f9' && req.method === 'GET') {
+      // Playwright worker polls this to check if F9 was triggered
+      const triggered = this.f9Triggered || false;
+      this.f9Triggered = false;  // Reset after reading
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ triggered }));
+    }
     else if (url.pathname === '/control/mode' && req.method === 'POST') {
       let body = '';
       req.on('data', chunk => { body += chunk; });

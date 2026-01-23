@@ -12,6 +12,7 @@ import fs from 'fs';
 import path from 'path';
 import DashboardServer from './dashboard-server.js';
 import { setupNetworkInterception, waitForChartData, extractDataPoints } from './network-interceptor.js';
+import { launchBrowser, closeBrowser, captureError, writeStatus, stopHeartbeat } from './browserService.js';
 
 // Configuration (move to config.js later)
 const CONFIG = {
@@ -47,16 +48,16 @@ async function takeScreenshot(page, screenshotPath) {
   return screenshotPath;
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// 🛠️ CRASH REPORT SYSTEM - Self-diagnosing for AI analysis
-// ═══════════════════════════════════════════════════════════════════════════
+// ???????????????????????????????????????????????????????????????????????????
+// ??? CRASH REPORT SYSTEM - Self-diagnosing for AI analysis
+// ???????????????????????????????????????????????????????????????????????????
 
 // Global storage for browser console logs (captured during page lifecycle)
 let browserConsoleLogs = [];
 let lastFailedNetworkRequests = [];
 
 // Setup console and network listeners on a page
-function setupCrashDiagnostics(page) {
+async function setupCrashDiagnostics(page) {
   // Capture browser console logs
   page.on('console', msg => {
     const entry = `[${new Date().toISOString()}] [${msg.type().toUpperCase()}] ${msg.text()}`;
@@ -81,37 +82,29 @@ function setupCrashDiagnostics(page) {
     }
   });
   
-  console.log('  ✅ Crash diagnostics listeners attached');
-}
-
-/**
- * Setup F9 Key Listener for manual crash report trigger
- * Press F9 in the browser window to instantly save a crash report
- * @param {Page} page - Playwright page object
- */
-async function setupF9ManualTrigger(page) {
-  // Expose Node.js function to the browser context
-  await page.exposeFunction('triggerCrashReport', async (reason) => {
-    console.log(`\n⌨️  F9 PRESSED - Manual crash report triggered!`);
-    await saveCrashReport(page, reason || 'Manual_F9_Trigger', null);
-  });
-  
-  // Inject script to listen for F9 keypress
-  await page.addInitScript(() => {
-    document.addEventListener('keydown', (event) => {
-      if (event.key === 'F9' || event.code === 'F9') {
-        event.preventDefault();
-        console.log('🔑 F9 key detected - triggering crash report...');
-        
-        // Call the exposed Node.js function
-        window.triggerCrashReport('Manual_F9_Trigger');
-      }
+  // 🎮 F9 MANUAL TRIGGER: Expose Node.js function to browser
+  try {
+    await page.exposeFunction('__triggerCrashReport__', async () => {
+      console.log('\n⌨️  F9 PRESSED - Manual crash report triggered!');
+      await saveCrashReport(page, 'Manual_F9_Trigger', new Error('User pressed F9 to capture state'));
     });
     
-    console.log('✅ F9 Manual Trigger listener installed - Press F9 to save crash report');
-  });
-  
-  console.log('  ✅ F9 Manual Trigger installed (Press F9 in browser to save crash report)');
+    // Inject keydown listener into page (runs on every navigation)
+    await page.addInitScript(() => {
+      document.addEventListener('keydown', (e) => {
+        if (e.key === 'F9') {
+          e.preventDefault();
+          console.log('✅ F9 Manual Trigger listener installed - Press F9 to save crash report');
+          window.__triggerCrashReport__();
+        }
+      });
+    });
+    
+    console.log('  ✅ Crash diagnostics + F9 manual trigger attached');
+  } catch (e) {
+    // May fail if called twice on same page, that's OK
+    console.log('  ⚠️  F9 trigger already installed or failed:', e.message);
+  }
 }
 
 /**
@@ -125,8 +118,8 @@ async function saveCrashReport(page, errorName, error = null) {
   const safeName = errorName.replace(/[^a-zA-Z0-9]/g, '_');
   const crashDir = path.join('./crash-reports', `${timestamp}_${safeName}`);
   
-  console.log(`\n🚨 SAVING CRASH REPORT: ${crashDir}`);
-  console.log('═'.repeat(60));
+  console.log(`\n?? SAVING CRASH REPORT: ${crashDir}`);
+  console.log('?'.repeat(60));
   
   // Ensure crash-reports directory exists
   if (!fs.existsSync('./crash-reports')) {
@@ -146,9 +139,9 @@ async function saveCrashReport(page, errorName, error = null) {
     const screenshotPath = path.join(crashDir, 'state.png');
     await page.screenshot({ path: screenshotPath, fullPage: true });
     report.files.push('state.png');
-    console.log('  ✅ [1/5] Screenshot saved: state.png');
+    console.log('  ? [1/4] Screenshot saved: state.png');
   } catch (e) {
-    console.log(`  ❌ [1/5] Screenshot failed: ${e.message}`);
+    console.log(`  ? [1/4] Screenshot failed: ${e.message}`);
   }
   
   try {
@@ -158,9 +151,9 @@ async function saveCrashReport(page, errorName, error = null) {
     fs.writeFileSync(htmlPath, htmlContent);
     report.files.push('dom.html');
     report.url = page.url();
-    console.log('  ✅ [2/5] DOM snapshot saved: dom.html');
+    console.log('  ? [2/4] DOM snapshot saved: dom.html');
   } catch (e) {
-    console.log(`  ❌ [2/5] DOM snapshot failed: ${e.message}`);
+    console.log(`  ? [2/4] DOM snapshot failed: ${e.message}`);
   }
   
   try {
@@ -170,9 +163,9 @@ async function saveCrashReport(page, errorName, error = null) {
     const consoleContent = `=== BROWSER CONSOLE LOGS (Last 50) ===\n\n${last50Logs || '(No console logs captured)'}\n\n=== ERROR DETAILS ===\nError Name: ${errorName}\nError Message: ${error?.message || 'N/A'}\nStack Trace:\n${error?.stack || 'N/A'}`;
     fs.writeFileSync(consolePath, consoleContent);
     report.files.push('console.txt');
-    console.log('  ✅ [3/5] Console logs saved: console.txt');
+    console.log('  ? [3/4] Console logs saved: console.txt');
   } catch (e) {
-    console.log(`  ❌ [3/5] Console logs failed: ${e.message}`);
+    console.log(`  ? [3/4] Console logs failed: ${e.message}`);
   }
   
   try {
@@ -185,49 +178,30 @@ async function saveCrashReport(page, errorName, error = null) {
     };
     fs.writeFileSync(networkPath, JSON.stringify(networkData, null, 2));
     report.files.push('network_last_failed.json');
-    console.log('  ✅ [4/5] Network log saved: network_last_failed.json');
+    console.log('  ? [4/4] Network log saved: network_last_failed.json');
   } catch (e) {
-    console.log(`  ❌ [4/5] Network log failed: ${e.message}`);
-  }
-  
-  try {
-    // 5. Dashboard Logs (extract from our running dashboard server)
-    const dashboardLogPath = path.join(crashDir, 'dashboard_logs.txt');
-    // Get logs from global dashboard instance if available
-    let dashboardLogs = '(Dashboard logs not available - no global dashboard instance)';
-    if (globalDashboard && globalDashboard.logs && globalDashboard.logs.length > 0) {
-      dashboardLogs = globalDashboard.logs.map(log => {
-        const ts = new Date(log.timestamp).toISOString();
-        return `[${ts}] [${log.type.toUpperCase()}] ${log.message}`;
-      }).join('\n');
-    }
-    const dashboardContent = `=== DASHBOARD SERVER LOGS ===\n\n${dashboardLogs}\n\n=== END DASHBOARD LOGS ===`;
-    fs.writeFileSync(dashboardLogPath, dashboardContent);
-    report.files.push('dashboard_logs.txt');
-    console.log('  ✅ [5/5] Dashboard logs saved: dashboard_logs.txt');
-  } catch (e) {
-    console.log(`  ❌ [5/5] Dashboard logs failed: ${e.message}`);
+    console.log(`  ? [4/4] Network log failed: ${e.message}`);
   }
   
   // Save summary report
   try {
     const summaryPath = path.join(crashDir, 'CRASH_SUMMARY.json');
     fs.writeFileSync(summaryPath, JSON.stringify(report, null, 2));
-    console.log('  ✅ Summary saved: CRASH_SUMMARY.json');
+    console.log('  ? Summary saved: CRASH_SUMMARY.json');
   } catch (e) {
-    console.log(`  ❌ Summary failed: ${e.message}`);
+    console.log(`  ? Summary failed: ${e.message}`);
   }
   
-  console.log('═'.repeat(60));
-  console.log(`📁 CRASH REPORT SAVED TO: ${crashDir}`);
-  console.log('💡 Upload this folder to Claude/ChatGPT for AI analysis\n');
+  console.log('?'.repeat(60));
+  console.log(`?? CRASH REPORT SAVED TO: ${crashDir}`);
+  console.log('?? Upload this folder to Claude/ChatGPT for AI analysis\n');
   
   return crashDir;
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// 🔐 ROBUST LOGIN FUNCTION - Aggressive click with retry logic
-// ═══════════════════════════════════════════════════════════════════════════
+// ???????????????????????????????????????????????????????????????????????????
+// ?? ROBUST LOGIN FUNCTION - Aggressive click with retry logic
+// ???????????????????????????????????????????????????????????????????????????
 
 /**
  * Perform a robust login with aggressive clicking and retry logic
@@ -235,23 +209,23 @@ async function saveCrashReport(page, errorName, error = null) {
  * @returns {Promise<boolean>} - true if login successful
  */
 async function performRobustLogin(page) {
-  console.log('\n  🔐 ROBUST LOGIN SEQUENCE:');
-  console.log('  ═══════════════════════════════════════');
+  console.log('\n  ?? ROBUST LOGIN SEQUENCE:');
+  console.log('  ???????????????????????????????????????');
   
   // Step 1: Fill credentials
   console.log('  [1/5] Filling credentials...');
   
-  // Wait for email field and fill - IoFarm uses name="userEmail" not type="email"
-  const emailField = page.locator('input[name="userEmail"], input[type="email"], input[name="email"], input[name="username"]').first();
+  // Wait for email field and fill (handles various form structures)
+  const emailField = page.locator('input[name="userEmail"], input[type="email"], input[name="email"], input[name="username"], input[placeholder*="이메일"], input[placeholder*="email" i]').first();
   await emailField.waitFor({ state: 'visible', timeout: 10000 });
   await emailField.fill(CONFIG.username);
-  console.log(`       ✅ Email: ${CONFIG.username}`);
+  console.log(`       ? Email: ${CONFIG.username}`);
   
   // Fill password
   const passwordField = page.locator('input[type="password"]').first();
   await passwordField.waitFor({ state: 'visible', timeout: 5000 });
   await passwordField.fill(CONFIG.password);
-  console.log('       ✅ Password: ********');
+  console.log('       ? Password: ********');
   
   // Step 2: Find and prepare login button
   console.log('  [2/5] Locating login button...');
@@ -269,7 +243,7 @@ async function performRobustLogin(page) {
       const btn = page.locator(selector).first();
       if (await btn.isVisible({ timeout: 1000 })) {
         loginButton = btn;
-        console.log(`       ✅ Found button: ${selector}`);
+        console.log(`       ? Found button: ${selector}`);
         break;
       }
     } catch (e) {
@@ -288,10 +262,10 @@ async function performRobustLogin(page) {
   // Check if button is enabled
   const isDisabled = await loginButton.isDisabled();
   if (isDisabled) {
-    console.log('       ⚠️ Button is disabled, waiting...');
+    console.log('       ?? Button is disabled, waiting...');
     await page.waitForTimeout(1000);
   }
-  console.log('       ✅ Button is stable and ready');
+  console.log('       ? Button is stable and ready');
   
   // Step 4: AGGRESSIVE CLICK with force
   console.log('  [4/5] Clicking login button (force: true)...');
@@ -304,8 +278,11 @@ async function performRobustLogin(page) {
   console.log('  [5/5] Validating login result...');
   
   const loginResult = await Promise.race([
-    // Success: URL changes away from login (url is a URL object, use .href)
-    page.waitForURL(url => !url.href.includes('/login') && !url.href.includes('/signin') && url.href !== 'https://admin.iofarm.com/', { timeout: 8000 })
+    // Success: URL changes away from login (FIX: url.href is string, url is URL object)
+    page.waitForURL(url => {
+      const href = url.href;
+      return !href.includes('/login') && !href.includes('/signin') && href !== 'https://admin.iofarm.com/';
+    }, { timeout: 8000 })
       .then(() => ({ success: true, reason: 'URL changed' })),
     
     // Failure: Error message appears
@@ -332,9 +309,12 @@ async function performRobustLogin(page) {
     await loginButton.click({ force: true, timeout: 3000 }).catch(() => {});
     console.log('       🔄 Second click sent');
     
-    // Wait again for URL change
+    // Wait again for URL change (FIX: url.href is string)
     try {
-      await page.waitForURL(url => !url.href.includes('/login') && !url.href.includes('/signin') && url.href !== 'https://admin.iofarm.com/', { timeout: 10000 });
+      await page.waitForURL(url => {
+        const href = url.href;
+        return !href.includes('/login') && !href.includes('/signin') && href !== 'https://admin.iofarm.com/';
+      }, { timeout: 10000 });
       console.log(`       ✅ DOUBLE-TAP successful! Redirected to: ${page.url()}`);
       console.log('  ═══════════════════════════════════════\n');
       return true;
@@ -353,6 +333,190 @@ async function performRobustLogin(page) {
   
   console.log('  ═══════════════════════════════════════\n');
   throw new Error(`Login failed: ${loginResult.reason}${errorText ? ' - ' + errorText.trim() : ''}`);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 🎯 STRICT MANAGER SELECTION - Prevents '승진' from matching '진우'
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Select a manager by name using STRICT EXACT matching
+ * Uses multiple strategies to ensure the correct manager is selected
+ * @param {Page} page - Playwright page object
+ * @param {string} managerName - Exact name of the manager (e.g., '승진', '진우')
+ * @returns {Promise<{success: boolean, matched: string, strategy: string}>}
+ */
+async function selectManager(page, managerName) {
+  console.log(`\n🎯 selectManager("${managerName}") - Using STRICT EXACT matching`);
+  console.log('═'.repeat(60));
+  
+  let clicked = false;
+  let matchedText = '';
+  let strategy = '';
+  
+  // Strategy 1: Playwright getByLabel with exact: true
+  console.log(`  [1/4] getByLabel("${managerName}", { exact: true })`);
+  try {
+    const labelLocator = page.getByLabel(managerName, { exact: true });
+    if (await labelLocator.count() > 0) {
+      await labelLocator.first().click({ timeout: 3000 });
+      clicked = true;
+      matchedText = managerName;
+      strategy = 'getByLabel(exact)';
+      console.log(`       ✅ SUCCESS`);
+    } else {
+      console.log(`       ⚠️ No match found`);
+    }
+  } catch (e) {
+    console.log(`       ⚠️ Failed: ${e.message}`);
+  }
+  
+  // Strategy 2: Playwright :text-is() pseudo-selector (exact match)
+  if (!clicked) {
+    console.log(`  [2/4] locator('label:text-is("${managerName}")')`);
+    try {
+      const exactLocator = page.locator(`label:text-is("${managerName}")`);
+      if (await exactLocator.count() > 0) {
+        await exactLocator.first().click({ timeout: 3000 });
+        clicked = true;
+        matchedText = managerName;
+        strategy = ':text-is()';
+        console.log(`       ✅ SUCCESS`);
+      } else {
+        console.log(`       ⚠️ No match found`);
+      }
+    } catch (e) {
+      console.log(`       ⚠️ Failed: ${e.message}`);
+    }
+  }
+  
+  // Strategy 3: getByRole('radio') with exact name
+  if (!clicked) {
+    console.log(`  [3/4] getByRole('radio', { name: "${managerName}", exact: true })`);
+    try {
+      const radioLocator = page.getByRole('radio', { name: managerName, exact: true });
+      if (await radioLocator.count() > 0) {
+        await radioLocator.first().click({ timeout: 3000 });
+        clicked = true;
+        matchedText = managerName;
+        strategy = 'getByRole(radio,exact)';
+        console.log(`       ✅ SUCCESS`);
+      } else {
+        console.log(`       ⚠️ No match found`);
+      }
+    } catch (e) {
+      console.log(`       ⚠️ Failed: ${e.message}`);
+    }
+  }
+  
+  // Strategy 4: JavaScript DOM with strict === equality
+  if (!clicked) {
+    console.log(`  [4/4] JavaScript DOM strict === equality`);
+    const jsResult = await page.evaluate((targetName) => {
+      const labels = Array.from(document.querySelectorAll('label'));
+      
+      // STRICT: Only match if ENTIRE text equals target (trimmed)
+      for (const label of labels) {
+        const text = label.textContent.trim();
+        if (text === targetName) {
+          label.click();
+          return { success: true, matched: text };
+        }
+      }
+      
+      // Try radio inputs by exact value
+      const radios = Array.from(document.querySelectorAll('input[type="radio"]'));
+      for (const radio of radios) {
+        if (radio.value === targetName) {
+          radio.click();
+          return { success: true, matched: radio.value };
+        }
+      }
+      
+      // Return available options for debugging
+      return { 
+        success: false, 
+        available: labels.map(l => l.textContent.trim()).filter(t => t.length > 0).slice(0, 10)
+      };
+    }, managerName);
+    
+    if (jsResult.success) {
+      clicked = true;
+      matchedText = jsResult.matched;
+      strategy = 'JavaScript(===)';
+      console.log(`       ✅ SUCCESS: Matched "${matchedText}"`);
+    } else {
+      console.log(`       ❌ No exact match found`);
+      console.log(`       💡 Available labels: ${jsResult.available?.join(', ') || 'none'}`);
+    }
+  }
+  
+  console.log('═'.repeat(60));
+  if (clicked) {
+    console.log(`🎯 RESULT: Selected "${matchedText}" via ${strategy}`);
+  } else {
+    console.log(`❌ RESULT: Could not find exact match for "${managerName}"`);
+  }
+  console.log('═'.repeat(60) + '\n');
+  
+  return { success: clicked, matched: matchedText, strategy };
+}
+
+/**
+ * Check if report was already sent by reading "리포트 수" from table
+ * @param {Page} page - Playwright page object
+ * @returns {Promise<{alreadySent: boolean, count: number}>}
+ */
+async function checkReportCount(page) {
+  console.log('\n🔍 checkReportCount() - Checking if report already sent...');
+  
+  const result = await page.evaluate(() => {
+    // Find the table with "리포트 수" header
+    const tables = Array.from(document.querySelectorAll('table'));
+    
+    for (const table of tables) {
+      const headerCells = Array.from(table.querySelectorAll('th, thead td'));
+      const bodyCells = Array.from(table.querySelectorAll('tbody td'));
+      
+      // Search in header row for "리포트 수"
+      let reportCountIndex = -1;
+      headerCells.forEach((cell, idx) => {
+        if (cell.textContent.includes('리포트 수') || cell.textContent.includes('리포트수')) {
+          reportCountIndex = idx;
+        }
+      });
+      
+      // If found in header, get corresponding value from body
+      if (reportCountIndex >= 0 && bodyCells[reportCountIndex]) {
+        const value = parseInt(bodyCells[reportCountIndex].textContent.trim(), 10) || 0;
+        return { found: true, count: value, alreadySent: value > 0 };
+      }
+      
+      // Alternative: Search in row-based layout (label in first cell, value in last)
+      const rows = Array.from(table.querySelectorAll('tbody tr, tr'));
+      for (const row of rows) {
+        const cells = Array.from(row.querySelectorAll('td'));
+        if (cells.length >= 2) {
+          const label = cells[0].textContent.trim();
+          if (label.includes('리포트 수') || label.includes('리포트수')) {
+            const value = parseInt(cells[cells.length - 1].textContent.trim(), 10) || 0;
+            return { found: true, count: value, alreadySent: value > 0 };
+          }
+        }
+      }
+    }
+    
+    return { found: false, count: 0, alreadySent: false };
+  });
+  
+  if (result.found) {
+    console.log(`   → Report Count: ${result.count}`);
+    console.log(`   → Already Sent: ${result.alreadySent ? '🔴 YES - SKIP!' : '✅ NO - Can send'}`);
+  } else {
+    console.log(`   → ⚠️ Could not find "리포트 수" in table`);
+  }
+  
+  return result;
 }
 
 // Load existing learning data for auto-correction
@@ -404,31 +568,17 @@ async function runReportSending(config, dashboard, runStats) {
   console.log('📤   REPORT SENDING AUTOMATION MODE');
   console.log('📤 ========================================\n');
   
-  const browser = await chromium.launch({
-    headless: false,
-    channel: 'chrome',
-    args: ['--start-maximized', '--window-position=0,0']
-  });
-  
-  const context = await browser.newContext({
-    viewport: null,
-    screen: { width: 1920, height: 1080 }
-  });
+  // 🚀 Use centralized browser service for clean architecture
+  const { browser, context, page } = await launchBrowser({ maximized: true });
   
   // ⚠️ CRITICAL: DO NOT BLOCK RESOURCES for report-sending mode
   // The table needs CSS to render the "-" characters correctly
   console.log('  ℹ️  Resource blocking: DISABLED (table needs full rendering)\n');
   
-  const page = await context.newPage();
+  // 🛠️ CRASH DIAGNOSTICS: Setup listeners for self-diagnosis
+  await setupCrashDiagnostics(page);
   
-  // �️ CRASH DIAGNOSTICS: Setup listeners for self-diagnosis
-  setupCrashDiagnostics(page);
-  
-  // F9 MANUAL TRIGGER: Press F9 anytime to save crash report
-  await setupF9ManualTrigger(page);
-  console.log('  [F9] Press anytime to save crash report\n');
-  
-  // �🔍 BLACK BOX DIAGNOSTICS: Listen to browser console
+  // 🔍 BLACK BOX DIAGNOSTICS: Listen to browser console
   page.on('console', msg => {
     const type = msg.type();
     const text = msg.text();
@@ -438,18 +588,10 @@ async function runReportSending(config, dashboard, runStats) {
   });
   console.log('  ✅ Browser console listener active (will show errors/warnings)\n');
   
-  // Maximize window via CDP
-  const session = await page.context().newCDPSession(page);
-  const { windowId } = await session.send('Browser.getWindowForTarget');
-  await session.send('Browser.setWindowBounds', {
-    windowId,
-    bounds: { windowState: 'maximized' }
-  });
-  
   try {
-    // 🎯 STEP 1: DUAL STATE DETECTION (Check Success BEFORE Login)
-    console.log('🔐 Step 1: Navigation & Authentication...');
-    dashboard.updateStatus('🔐 Authenticating...', 'running');
+    // ?? STEP 1: DUAL STATE DETECTION (Check Success BEFORE Login)
+    console.log('?? Step 1: Navigation & Authentication...');
+    dashboard.updateStatus('?? Authenticating...', 'running');
     
     console.log('  → Navigating to root URL...');
     await page.goto('https://admin.iofarm.com/', { 
@@ -460,23 +602,24 @@ async function runReportSending(config, dashboard, runStats) {
     // Wait for page to settle
     await page.waitForTimeout(2000);
     
-    // 🎯 SMART CHECK: First check if already authenticated (Success State)
+    // ?? SMART CHECK: First check if already authenticated (Success State)
     console.log('  → Checking authentication state...');
     const isLoggedIn = await page.locator('div.css-nd8svt a').first().isVisible({ timeout: 3000 }).catch(() => false);
     
     if (isLoggedIn) {
-      // ✅ SCENARIO A: Already Authenticated - Farm list is visible
-      console.log('  ✅ Already authenticated (Farm list visible)');
+      // ? SCENARIO A: Already Authenticated - Farm list is visible
+      console.log('  ? Already authenticated (Farm list visible)');
       console.log('  → Skipping login flow\n');
       
     } else {
-      // 🔒 SCENARIO B: Need to Login
+      // ?? SCENARIO B: Need to Login
       console.log('  → Farm list not visible, checking for login form...');
       
-      let loginFormVisible = await page.locator('input[type="email"]').first().isVisible({ timeout: 5000 }).catch(() => false);
+      // Check for login form (multiple selectors for different form structures)
+      let loginFormVisible = await page.locator('input[name="userEmail"], input[type="email"], input[placeholder*="이메일"]').first().isVisible({ timeout: 5000 }).catch(() => false);
       
       if (!loginFormVisible) {
-        console.log('  ⚠️  Login form not visible, performing safety reload...');
+        console.log('  ??  Login form not visible, performing safety reload...');
         await page.reload({ waitUntil: 'domcontentloaded' });
         await page.waitForTimeout(2000);
         
@@ -484,17 +627,17 @@ async function runReportSending(config, dashboard, runStats) {
         const isLoggedInAfterReload = await page.locator('div.css-nd8svt a').first().isVisible({ timeout: 3000 }).catch(() => false);
         
         if (isLoggedInAfterReload) {
-          console.log('  ✅ Already authenticated after reload (Farm list visible)');
+          console.log('  ? Already authenticated after reload (Farm list visible)');
           console.log('  → Skipping login flow\n');
         } else {
-          // Check for login form after reload
-          loginFormVisible = await page.locator('input[type="email"]').first().isVisible({ timeout: 5000 }).catch(() => false);
+          // Check for login form after reload (multiple selectors)
+          loginFormVisible = await page.locator('input[name="userEmail"], input[type="email"], input[placeholder*="이메일"]').first().isVisible({ timeout: 5000 }).catch(() => false);
           
           if (!loginFormVisible) {
             // Take error screenshot to see what the browser is showing
             const errorScreenshot = path.join(CONFIG.screenshotDir, 'error-login-state.png');
             await page.screenshot({ path: errorScreenshot, fullPage: true });
-            console.log(`  📸 ERROR SCREENSHOT SAVED: ${errorScreenshot}`);
+            console.log(`  ?? ERROR SCREENSHOT SAVED: ${errorScreenshot}`);
             console.log('     → Check this screenshot to see what went wrong!');
             throw new Error('Login form not found after reload. Check error-login-state.png screenshot.');
           }
@@ -508,53 +651,53 @@ async function runReportSending(config, dashboard, runStats) {
       }
     }
     
-    // 🔒 LOGIN ACTION FUNCTION - Uses robust login implementation
+    // ?? LOGIN ACTION FUNCTION - Uses robust login implementation
     async function performLogin() {
-      console.log('  ✅ Login form visible, proceeding with authentication...');
+      console.log('  ? Login form visible, proceeding with authentication...');
       
       // Use the robust login function with aggressive clicking and retry
       await performRobustLogin(page);
       
       // Additional verification after redirect
-      console.log('  📍 Post-login verification:');
+      console.log('  ?? Post-login verification:');
       
       // Wait for network to stabilize
       console.log('  → Waiting for network to stabilize...');
       await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {
-        console.log('    ⚠️  Network not idle, continuing...');
+        console.log('    ??  Network not idle, continuing...');
       });
-      console.log('    ✅ Network idle');
+      console.log('    ? Network idle');
       
       // Wait for page load
       console.log('  → Waiting for page to be fully loaded...');
       await page.waitForLoadState('load', { timeout: 10000 });
-      console.log('    ✅ Page loaded\n');
+      console.log('    ? Page loaded\n');
     }
     
-    // 🎯 STEP 2: Navigate to Report Page
+    // ?? STEP 2: Navigate to Report Page
     const finalUrl = page.url();
     if (!finalUrl.includes('/report')) {
-      console.log('  📍 Navigating to /report page...');
+      console.log('  ?? Navigating to /report page...');
       await page.goto('https://admin.iofarm.com/report', { 
         waitUntil: 'domcontentloaded', 
         timeout: 20000 
       });
-      console.log(`  ✅ At: ${page.url()}\n`);
+      console.log(`  ? At: ${page.url()}\n`);
     } else {
-      console.log('  ✅ Already at /report page\n');
+      console.log('  ? Already at /report page\n');
     }
     
-    // 🎯 STEP 3: Final Verification - Wait for Farm List
+    // ?? STEP 3: Final Verification - Wait for Farm List
     console.log('  → Waiting for farm list to appear...');
     await page.waitForSelector('div.css-nd8svt a', { 
       state: 'visible',
       timeout: 30000 
     });
-    console.log('  ✅ Farm list loaded\n');
+    console.log('  ? Farm list loaded\n');
     
     // Step 5: Extract Farm List
-    console.log('🏭 Step 2: Extracting farm list...');
-    dashboard.updateStatus('📋 Loading farms...', 'running');
+    console.log('?? Step 2: Extracting farm list...');
+    dashboard.updateStatus('?? Loading farms...', 'running');
     
     const farmList = await page.evaluate(() => {
       const farms = [];
@@ -579,7 +722,7 @@ async function runReportSending(config, dashboard, runStats) {
       return farms;
     });
     
-    console.log(`  ✅ Found ${farmList.length} farms\n`);
+    console.log(`  ? Found ${farmList.length} farms\n`);
     
     // Broadcast farm count
     if (dashboard) {
@@ -594,13 +737,13 @@ async function runReportSending(config, dashboard, runStats) {
     // Auto-correct if needed
     if (startIndex >= totalFarms) {
       startIndex = totalFarms - 1;
-      console.warn(`⚠️  Auto-corrected start index to Farm #${startIndex + 1}\n`);
+      console.warn(`??  Auto-corrected start index to Farm #${startIndex + 1}\n`);
     }
     
     let endIndex = Math.min(startIndex + maxCount, totalFarms);
     const farmsToProcess = farmList.slice(startIndex, endIndex);
     
-    console.log(`📋 Processing Plan:`);
+    console.log(`?? Processing Plan:`);
     console.log(`   → Total farms: ${totalFarms}`);
     console.log(`   → Range: Farm #${startIndex + 1} to #${endIndex}`);
     console.log(`   → Count: ${farmsToProcess.length}\n`);
@@ -613,15 +756,15 @@ async function runReportSending(config, dashboard, runStats) {
       const farm = farmsToProcess[farmIdx];
       const farmNumber = startIndex + farmIdx + 1;
       
-      console.log(`\n${'═'.repeat(70)}`);
-      console.log(`🏭 Farm ${farmNumber}/${totalFarms}: ${farm.name}`);
-      console.log(`${'═'.repeat(70)}\n`);
+      console.log(`\n${'?'.repeat(70)}`);
+      console.log(`?? Farm ${farmNumber}/${totalFarms}: ${farm.name}`);
+      console.log(`${'?'.repeat(70)}\n`);
       
       dashboard.updateProgress(farmIdx + 1, farmsToProcess.length, farm.name);
       
       // Check for STOP
       if (dashboard && dashboard.checkIfStopped()) {
-        console.log('\n⛔ STOP requested. Halting...\n');
+        console.log('\n? STOP requested. Halting...\n');
         break;
       }
       
@@ -629,24 +772,24 @@ async function runReportSending(config, dashboard, runStats) {
       const sendReportUrl = farm.href.replace('/report/point/', '/report/send-report/');
       const fullUrl = `https://admin.iofarm.com${sendReportUrl}`;
       
-      console.log(`  🌐 Navigating to: ${fullUrl}`);
+      console.log(`  ?? Navigating to: ${fullUrl}`);
       
       try {
-        // 🛡️ TIMEOUT SAFETY: Wrap in try/catch with explicit timeout
+        // ??? TIMEOUT SAFETY: Wrap in try/catch with explicit timeout
         await page.goto(fullUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
-        console.log('  ✅ Page loaded');
+        console.log('  ? Page loaded');
         
-        // 🔍 CRITICAL: Wait for network to be idle (table data fully loaded)
-        console.log('  ⏳ Waiting for table data to populate...');
+        // ?? CRITICAL: Wait for network to be idle (table data fully loaded)
+        console.log('  ? Waiting for table data to populate...');
         await page.waitForLoadState('networkidle', { timeout: 10000 });
-        console.log('  ✅ Network idle - table should be ready');
+        console.log('  ? Network idle - table should be ready');
         
         // Additional safety: wait for table to exist
         await page.waitForSelector('table', { state: 'visible', timeout: 5000 });
-        console.log('  ✅ Table element found\n');
+        console.log('  ? Table element found\n');
         
         // Step 5: PRECISE TABLE VALIDATION
-        console.log('  📊 Validating table data (PRECISE MODE)...');
+        console.log('  ?? Validating table data (PRECISE MODE)...');
         
         const validationResult = await page.evaluate(() => {
           // Find all tables on the page
@@ -688,8 +831,16 @@ async function runReportSending(config, dashboard, runStats) {
             console.log(`[BROWSER] Row ${idx + 1}: "${label}" = "${lastCellValue}"`);
           });
           
-          // 🎯 PRECISE VALIDATION RULES
+          // ?? PRECISE VALIDATION RULES (including Report Count check)
           const checks = {
+            // 🔴 NEW: Check if report was already sent today
+            reportCount: {
+              key: '리포트 수',
+              mustBe: 0,
+              actual: null,
+              pass: false,
+              alreadySent: false
+            },
             nightMoisture: { 
               key: '야간 함수율 편차', 
               mustBe: '-', 
@@ -718,26 +869,39 @@ async function runReportSending(config, dashboard, runStats) {
           
           // Find matching rows (partial match on key)
           Object.keys(dataMap).forEach(label => {
+            // 🔴 NEW: Check "리포트 수" (Report Count)
+            if (label.includes('리포트 수') || label.includes('리포트수') || label.includes('Report Count')) {
+              const countValue = parseInt(dataMap[label], 10) || 0;
+              checks.reportCount.actual = countValue;
+              checks.reportCount.pass = (countValue === 0);
+              checks.reportCount.alreadySent = (countValue > 0);
+              console.log(`[BROWSER] 🔴 Report Count: ${countValue} → ${countValue === 0 ? 'Can send' : 'ALREADY SENT - SKIP!'}`);
+            }
             if (label.includes('야간 함수율 편차') || label.includes('야간함수율편차')) {
               checks.nightMoisture.actual = dataMap[label];
-              checks.nightMoisture.pass = (dataMap[label] === '-' || dataMap[label] === '—');
+              checks.nightMoisture.pass = (dataMap[label] === '-' || dataMap[label] === '?');
             }
             if (label.includes('마지막 급액 시간') || label.includes('마지막급액시간')) {
               checks.lastIrrigationTime.actual = dataMap[label];
-              checks.lastIrrigationTime.pass = (dataMap[label] === '-' || dataMap[label] === '—');
+              checks.lastIrrigationTime.pass = (dataMap[label] === '-' || dataMap[label] === '?');
             }
             if (label.includes('첫 급액 시간') || label.includes('첫급액시간')) {
               checks.firstIrrigationTime.actual = dataMap[label];
-              checks.firstIrrigationTime.pass = (dataMap[label] !== '-' && dataMap[label] !== '—' && dataMap[label] !== '');
+              checks.firstIrrigationTime.pass = (dataMap[label] !== '-' && dataMap[label] !== '?' && dataMap[label] !== '');
             }
             if (label.includes('일출 시')) {
               checks.sunrise.actual = dataMap[label];
-              checks.sunrise.pass = (dataMap[label] !== '-' && dataMap[label] !== '—' && dataMap[label] !== '');
+              checks.sunrise.pass = (dataMap[label] !== '-' && dataMap[label] !== '?' && dataMap[label] !== '');
             }
           });
           
           // Check if all conditions are met
           const failedChecks = [];
+          
+          // 🔴 PRIORITY CHECK: If report already sent, fail immediately
+          if (checks.reportCount.alreadySent) {
+            failedChecks.push(`🔴 REPORT ALREADY SENT TODAY (Count: ${checks.reportCount.actual})`);
+          }
           
           if (!checks.nightMoisture.pass) {
             failedChecks.push(`야간 함수율 편차 must be "-" (got: "${checks.nightMoisture.actual || 'NOT FOUND'}")`);
@@ -756,6 +920,8 @@ async function runReportSending(config, dashboard, runStats) {
           
           return {
             ready: allPassed,
+            alreadySent: checks.reportCount.alreadySent,
+            reportCount: checks.reportCount.actual,
             reason: allPassed 
               ? '✅ All validation checks passed' 
               : failedChecks.join(' | '),
@@ -765,12 +931,25 @@ async function runReportSending(config, dashboard, runStats) {
         });
         
         console.log(`     → Ready to send: ${validationResult.ready ? '✅ YES' : '❌ NO'}`);
+        if (validationResult.alreadySent) {
+          console.log(`     → 🔴 REPORT ALREADY SENT: Count = ${validationResult.reportCount}`);
+        }
         console.log(`     → Reason: ${validationResult.reason}`);
         console.log(`     → Debug: ${validationResult.debug}\n`);
         
+        // 🔴 NEW: Skip if report already sent (separate from validation failure)
+        if (validationResult.alreadySent) {
+          console.log(`  🔴 SKIPPING: Report already sent today (Count: ${validationResult.reportCount})\n`);
+          dashboard.log(`🔴 Already sent for ${farm.name} (Count: ${validationResult.reportCount})`, 'warning');
+          reportsSkipped++;
+          runStats.skipCount++;
+          runStats.farmsCompleted++;
+          continue; // Move to next farm
+        }
+        
         if (validationResult.ready) {
           // Step 6: Click "리포트 생성" button
-          console.log('  📤 All checks passed! Clicking "리포트 생성" button...');
+          console.log('  ✅ All checks passed! Clicking "리포트 생성" button...');
           
           const buttonClicked = await page.evaluate(() => {
             const buttons = Array.from(document.querySelectorAll('button'));
@@ -789,19 +968,19 @@ async function runReportSending(config, dashboard, runStats) {
           });
           
           if (buttonClicked) {
-            console.log('  ✅ Report sent successfully!\n');
-            dashboard.log(`✅ Report sent for: ${farm.name}`, 'success');
+            console.log('  ? Report sent successfully!\n');
+            dashboard.log(`? Report sent for: ${farm.name}`, 'success');
             reportsCreated++;
             runStats.successCount++;
             await page.waitForTimeout(1500); // Brief wait for submission
           } else {
-            console.log('  ⚠️  "리포트 생성" button not found on page\n');
-            dashboard.log(`⚠️ Button not found for: ${farm.name}`, 'warning');
+            console.log('  ??  "리포트 생성" button not found on page\n');
+            dashboard.log(`?? Button not found for: ${farm.name}`, 'warning');
             reportsSkipped++;
           }
         } else {
-          console.log('  ⚠️  Validation failed. Skipping report creation.\n');
-          dashboard.log(`⚠️ Skipped ${farm.name}: ${validationResult.reason}`, 'warning');
+          console.log('  ??  Validation failed. Skipping report creation.\n');
+          dashboard.log(`?? Skipped ${farm.name}: ${validationResult.reason}`, 'warning');
           reportsSkipped++;
           runStats.skipCount++;
         }
@@ -809,11 +988,11 @@ async function runReportSending(config, dashboard, runStats) {
         runStats.farmsCompleted++;
         
       } catch (error) {
-        // 🛡️ TIMEOUT SAFETY: Catch and log, then continue
-        console.log(`  ❌ Error processing farm (timeout or page issue):`);
+        // ??? TIMEOUT SAFETY: Catch and log, then continue
+        console.log(`  ? Error processing farm (timeout or page issue):`);
         console.log(`     → ${error.message}`);
         console.log(`     → Force-continuing to next farm...\n`);
-        dashboard.log(`❌ Timeout/Error on ${farm.name}: ${error.message}`, 'error');
+        dashboard.log(`? Timeout/Error on ${farm.name}: ${error.message}`, 'error');
         reportsSkipped++;
         runStats.errorCount++;
         
@@ -821,32 +1000,32 @@ async function runReportSending(config, dashboard, runStats) {
         try {
           const errorScreenshot = path.join(CONFIG.screenshotDir, `error-farm-${farmNumber}-${Date.now()}.png`);
           await page.screenshot({ path: errorScreenshot, fullPage: true });
-          console.log(`     📸 Error screenshot: ${errorScreenshot}\n`);
+          console.log(`     ?? Error screenshot: ${errorScreenshot}\n`);
         } catch (ssError) {
-          console.log('     ⚠️  Could not save error screenshot\n');
+          console.log('     ??  Could not save error screenshot\n');
         }
       }
     }
     
     // Summary
-    console.log(`\n${'═'.repeat(70)}`);
-    console.log('📊 REPORT SENDING SUMMARY');
-    console.log(`${'═'.repeat(70)}`);
-    console.log(`   ✅ Reports Created: ${reportsCreated}`);
-    console.log(`   ⚠️  Reports Skipped: ${reportsSkipped}`);
-    console.log(`   📋 Total Processed: ${runStats.farmsCompleted}`);
-    console.log(`${'═'.repeat(70)}\n`);
+    console.log(`\n${'?'.repeat(70)}`);
+    console.log('?? REPORT SENDING SUMMARY');
+    console.log(`${'?'.repeat(70)}`);
+    console.log(`   ? Reports Created: ${reportsCreated}`);
+    console.log(`   ??  Reports Skipped: ${reportsSkipped}`);
+    console.log(`   ?? Total Processed: ${runStats.farmsCompleted}`);
+    console.log(`${'?'.repeat(70)}\n`);
     
-    dashboard.updateStatus('✅ Report sending complete', 'success');
+    dashboard.updateStatus('? Report sending complete', 'success');
     dashboard.log(`Report sending complete: ${reportsCreated} sent, ${reportsSkipped} skipped`, 'success');
     
   } catch (error) {
-    console.error('❌ Fatal error during report sending:', error);
+    console.error('? Fatal error during report sending:', error);
     console.error('   Stack trace:', error.stack);
-    dashboard.updateStatus('❌ Fatal error', 'error');
+    dashboard.updateStatus('? Fatal error', 'error');
     dashboard.log(`Fatal error: ${error.message}`, 'error');
     
-    // 🚨 SAVE CRASH REPORT for AI analysis
+    // ?? SAVE CRASH REPORT for AI analysis
     try {
       const errorName = error.message.includes('Login') ? 'LoginFailed' : 
                         error.message.includes('timeout') ? 'Timeout' : 'ReportSendingError';
@@ -856,25 +1035,26 @@ async function runReportSending(config, dashboard, runStats) {
     }
   } finally {
     console.log('🔒 Closing browser...');
-    await browser.close();
+    stopHeartbeat();
+    await closeBrowser(browser);
     console.log('✅ Browser closed\n');
   }
 }
 
 async function main() {
-  console.log('🚀 Starting Irrigation Report Automation (Playwright)...\n');
+  console.log('?? Starting Irrigation Report Automation (Playwright)...\n');
   
   // Initialize and start dashboard server
   const dashboard = new DashboardServer();
   globalDashboard = dashboard; // Set global instance
   const dashboardUrl = await dashboard.start();
-  console.log(`📊 Dashboard ready at: ${dashboardUrl}`);
+  console.log(`?? Dashboard ready at: ${dashboardUrl}`);
   console.log(`   → Open this URL to configure and start automation\n`);
   
   // Wait for user to click "Start" in dashboard
   const config = await dashboard.waitUntilStarted();
   
-  // 📊 Initialize Run Statistics Tracking
+  // ?? Initialize Run Statistics Tracking
   const runStats = {
     timestamp: new Date().toISOString(),
     startTime: Date.now(),
@@ -903,87 +1083,82 @@ async function main() {
   // Load learned offsets from previous training
   const learnedOffsets = loadLearningOffsets();
   if (learnedOffsets.count > 0) {
-    console.log(`🎓 Loaded learning data from ${learnedOffsets.count} training sessions`);
+    console.log(`?? Loaded learning data from ${learnedOffsets.count} training sessions`);
     console.log(`   → Applying corrections: First(${learnedOffsets.firstX.toFixed(1)}, ${learnedOffsets.firstY.toFixed(1)}), Last(${learnedOffsets.lastX.toFixed(1)}, ${learnedOffsets.lastY.toFixed(1)})\n`);
     dashboard.log(`Loaded learning data from ${learnedOffsets.count} training sessions`, 'success');
   }
   
   // Show selected configuration
-  console.log(`👤 Manager: ${config.manager}`);
-  console.log(`🏭 Start From: ${config.startFrom === 0 ? 'All farms' : 'Farm #' + config.startFrom}`);
-  console.log(`📊 Mode: ${config.mode}`);
-  console.log(`🔢 Max Farms: ${config.maxFarms === 999 ? 'All' : config.maxFarms}`);
+  console.log(`?? Manager: ${config.manager}`);
+  console.log(`?? Start From: ${config.startFrom === 0 ? 'All farms' : 'Farm #' + config.startFrom}`);
+  console.log(`?? Mode: ${config.mode}`);
+  console.log(`?? Max Farms: ${config.maxFarms === 999 ? 'All' : config.maxFarms}`);
   
   if (CONFIG.watchMode) {
-    console.log(`👁️  WATCH MODE: Script will observe but not interfere`);
+    console.log(`???  WATCH MODE: Script will observe but not interfere`);
     dashboard.log('Watch mode enabled', 'info');
   } else if (CONFIG.chartLearningMode) {
-    console.log(`🎓 LEARNING MODE: Will pause for corrections`);
+    console.log(`?? LEARNING MODE: Will pause for corrections`);
     dashboard.log('Learning mode enabled', 'info');
   } else if (config.mode === 'report-sending') {
-    console.log(`📤 REPORT SENDING MODE: Will validate and send reports`);
+    console.log(`?? REPORT SENDING MODE: Will validate and send reports`);
     dashboard.log('Report sending mode enabled', 'success');
   }
   console.log();
 
-  // 📤 ROUTE: If report-sending mode, use specialized function
+  // ?? ROUTE: If report-sending mode, use specialized function
   if (config.mode === 'report-sending') {
     await runReportSending(config, dashboard, runStats);
     return;
   }
 
-  // Launch browser with maximized window
+  // 🚀 Launch browser with centralized service (includes heartbeat monitoring)
   dashboard.updateStatus('🚀 Launching browser...', 'running');
   dashboard.updateStep('Initializing browser', 5);
   
-  const browser = await chromium.launch({
-    headless: false,         // ✅ FORCE VISIBLE (not background)
-    channel: 'chrome',       // ✅ Use real Chrome (not Chromium)
-    args: [
-      '--start-maximized',   // Start with maximized window
-      '--window-position=0,0' // Position at top-left
-    ]
-  });
+  const { browser, context, page } = await launchBrowser({ maximized: true });
   
-  const context = await browser.newContext({
-    viewport: null,  // Use full window size (no fixed viewport)
-    screen: { width: 1920, height: 1080 }
-  });
+  // 🛠️ CRASH DIAGNOSTICS: Setup listeners for self-diagnosis
+  await setupCrashDiagnostics(page);
   
-  // Open automation page
-  const page = await context.newPage();
+  // � F9 DASHBOARD BRIDGE: Poll server for dashboard-triggered F9
+  let f9PollInterval = null;
+  const startF9Polling = () => {
+    f9PollInterval = setInterval(async () => {
+      try {
+        const response = await fetch('http://localhost:3456/control/check-f9');
+        const data = await response.json();
+        if (data.triggered) {
+          console.log('\n🔴 F9 triggered from Dashboard - Saving crash report...');
+          await saveCrashReport(page, 'Dashboard_F9_Trigger', new Error('F9 triggered from Dashboard'));
+          dashboard.log('✅ Crash report saved from Dashboard F9 trigger', 'success');
+        }
+      } catch (e) {
+        // Server may not be running yet, that's OK
+      }
+    }, 500);  // Check every 500ms
+  };
+  startF9Polling();
+  console.log('  ✅ Dashboard F9 bridge activated (press F9 in dashboard to trigger crash report)');
   
-  // �️ CRASH DIAGNOSTICS: Setup listeners for self-diagnosis
-  setupCrashDiagnostics(page);
-  
-  // F9 MANUAL TRIGGER: Press F9 anytime to save crash report
-  await setupF9ManualTrigger(page);
-  console.log('  [F9] Press anytime to save crash report\n');
-  
-  // �🔒 AUTHENTICATION FIX: No resource blocking - allow all auth scripts to run
+  // 🔒 AUTHENTICATION FIX: No resource blocking - allow all auth scripts to run
   console.log('🔒 Authentication mode: All resources enabled for stable login');
   dashboard.log('Browser launched successfully', 'success');
   dashboard.log(`Dashboard accessible at ${dashboardUrl}`, 'success');
-  
-  // Maximize the window using CDP
-  const session = await page.context().newCDPSession(page);
-  const { windowId } = await session.send('Browser.getWindowForTarget');
-  await session.send('Browser.setWindowBounds', {
-    windowId,
-    bounds: { windowState: 'maximized' }
-  });
+  dashboard.log('💓 Heartbeat monitoring active (check crash-reports/browser-status.json)', 'info');
+  dashboard.log('🔴 Press F9 in browser OR dashboard to save crash report', 'info');
   
   try {
     // Step 1: Navigate to IoFarm admin report page
-    console.log('📍 Step 1: Navigating to admin.iofarm.com/report/...');
-    dashboard.updateStatus('🌐 Navigating to report page...', 'running');
+    console.log('?? Step 1: Navigating to admin.iofarm.com/report/...');
+    dashboard.updateStatus('?? Navigating to report page...', 'running');
     dashboard.updateStep('Step 1: Navigating to report page', 10);
     dashboard.log('Navigating to admin.iofarm.com/report/', 'info');
     
     await page.goto(CONFIG.url, { waitUntil: 'domcontentloaded', timeout: 15000 });
     await page.waitForLoadState('domcontentloaded');
     
-    // ⚡ SMART: Wait for body and ensure page is interactive
+    // ? SMART: Wait for body and ensure page is interactive
     console.log('  → Waiting for page to be interactive...');
     await page.waitForSelector('body', { state: 'attached', timeout: 5000 });
     await page.waitForLoadState('load').catch(() => {}); // Allow some extra loading time
@@ -997,15 +1172,15 @@ async function main() {
     const timestamp = new Date().toISOString().replace(/:/g, '-').split('.')[0];
     const screenshotPath = path.join(CONFIG.screenshotDir, `1-homepage-${timestamp}.png`);
     await takeScreenshot(page, screenshotPath);
-    console.log(`✅ Report page loaded. Screenshot saved: ${screenshotPath}\n`);
+    console.log(`? Report page loaded. Screenshot saved: ${screenshotPath}\n`);
     dashboard.log('Report page loaded successfully', 'success');
     
     // Step 2: Check if login is needed, if so, login
-    console.log('🔐 Step 2: Checking if login is required...');
-    dashboard.updateStatus('🔐 Checking authentication...', 'running');
+    console.log('?? Step 2: Checking if login is required...');
+    dashboard.updateStatus('?? Checking authentication...', 'running');
     
     try {
-      // ⚡ SMART: Wait for page to be ready before checking for login form
+      // ? SMART: Wait for page to be ready before checking for login form
       await page.waitForLoadState('domcontentloaded');
       console.log('  → Checking for login form...');
       
@@ -1019,7 +1194,7 @@ async function main() {
       });
       
       if (alreadyAuthenticated) {
-        console.log('  ✅ Already authenticated! Farm list is visible.');
+        console.log('  ? Already authenticated! Farm list is visible.');
         console.log(`  → Current URL: ${page.url()}\n`);
         dashboard.log('Already authenticated', 'success');
       } else {
@@ -1028,40 +1203,40 @@ async function main() {
         
         if (loginFormExists) {
           console.log('  → Login form detected, proceeding with ROBUST login...');
-          dashboard.updateStatus('🔐 Logging in...', 'running');
+          dashboard.updateStatus('?? Logging in...', 'running');
           
           // Use the robust login function with aggressive clicking and retry
           await performRobustLogin(page);
           
           // Wait for network to stabilize after login
-          console.log('  📍 Post-login stabilization:');
+          console.log('  ?? Post-login stabilization:');
           await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {
-            console.log('     ⚠️  Network not idle after 10s, continuing...');
+            console.log('     ??  Network not idle after 10s, continuing...');
           });
-          console.log('     ✅ Network idle');
+          console.log('     ? Network idle');
           
           // Navigate to report page if not already there
           const currentUrl = page.url();
           if (!currentUrl.includes('/report')) {
-            console.log('  📍 Navigating to /report page...');
+            console.log('  ?? Navigating to /report page...');
             await page.goto('https://admin.iofarm.com/report', { 
               waitUntil: 'networkidle',
               timeout: 20000 
             });
-            console.log(`  ✅ Navigated to: ${page.url()}`);
+            console.log(`  ? Navigated to: ${page.url()}`);
           }
           
-          // 🎯 CRITICAL: Final verification - wait for farm list to be visible
-          console.log('  🎯 Final verification: Looking for farm list...');
+          // ?? CRITICAL: Final verification - wait for farm list to be visible
+          console.log('  ?? Final verification: Looking for farm list...');
           
           try {
             await page.waitForSelector('[id*="tabs"][id*="content-point"]', { 
               state: 'visible', 
               timeout: 15000 
             });
-            console.log('     ✅ Farm list container is visible');
+            console.log('     ? Farm list container is visible');
           } catch (e) {
-            console.log(`     ❌ Farm list container not found: ${e.message}`);
+            console.log(`     ? Farm list container not found: ${e.message}`);
             const debugUrl = page.url();
             console.log(`     → Current URL: ${debugUrl}`);
             
@@ -1082,30 +1257,30 @@ async function main() {
             state: 'visible', 
             timeout: 30000 
           });
-          console.log('     ✅ Farm links are visible and ready\n');
+          console.log('     ? Farm links are visible and ready\n');
           
           const loginScreenshot = path.join(CONFIG.screenshotDir, `2-after-login-${timestamp}.png`);
           await page.screenshot({ path: loginScreenshot, fullPage: true });
-          console.log(`✅ Login completed successfully. Screenshot: ${loginScreenshot}\n`);
+          console.log(`? Login completed successfully. Screenshot: ${loginScreenshot}\n`);
           dashboard.log('Login successful', 'success');
           
         } else {
-          console.log('  ✅ No login form found, checking if already authenticated...');
+          console.log('  ? No login form found, checking if already authenticated...');
           const currentUrl = page.url();
           console.log(`  → Current URL: ${currentUrl}\n`);
           
           // Verify we're on the right page
           if (currentUrl.includes('/report') || await page.isVisible('[id*="tabs"]')) {
-            console.log('  ✅ Already on authenticated page\n');
+            console.log('  ? Already on authenticated page\n');
             dashboard.log('Already authenticated', 'success');
           } else {
-            console.log('  ⚠️  Unclear authentication state, will attempt to continue...\n');
+            console.log('  ??  Unclear authentication state, will attempt to continue...\n');
           }
         }
       }
       
     } catch (loginError) {
-      console.log('❌ Login process failed. Error:', loginError.message);
+      console.log('? Login process failed. Error:', loginError.message);
       console.log('   Stack:', loginError.stack);
       console.log('   → Taking error screenshot...');
       
@@ -1118,14 +1293,14 @@ async function main() {
     }
     
     // Step 3: Wait for manager's irrigation to show up
-    console.log(`📊 Step 3: Waiting for "${CONFIG.targetName}'s irrigation" to appear...`);
+    console.log(`?? Step 3: Waiting for "${CONFIG.targetName}'s irrigation" to appear...`);
     
     try {
       // Show current URL
       const currentUrl3 = page.url();
       console.log(`  → Current URL: ${currentUrl3}`);
       
-      // ⚡ FAST: Wait for main content container
+      // ? FAST: Wait for main content container
       await page.waitForSelector('body', { state: 'visible', timeout: 3000 }).catch(() => {});
       
       // Get page title for verification
@@ -1150,7 +1325,7 @@ async function main() {
         try {
           const element = page.locator(`text=${searchText}`).first();
           if (await element.isVisible({ timeout: 2000 })) {
-            console.log(`  ✅ Found: "${searchText}"`);
+            console.log(`  ? Found: "${searchText}"`);
             foundTarget = true;
           }
         } catch (e) {
@@ -1160,7 +1335,7 @@ async function main() {
       }
       
       if (!foundTarget) {
-        console.log(`  ⚠️  Could not find "${CONFIG.targetName}'s irrigation" text`);
+        console.log(`  ??  Could not find "${CONFIG.targetName}'s irrigation" text`);
         console.log('     → Might be on the page but with different formatting');
       }
       
@@ -1172,10 +1347,10 @@ async function main() {
       // Take screenshot regardless
       const targetScreenshot = path.join(CONFIG.screenshotDir, `3-target-page-${timestamp}.png`);
       await page.screenshot({ path: targetScreenshot, fullPage: true });
-      console.log(`📸 Screenshot saved: ${targetScreenshot}\n`);
+      console.log(`?? Screenshot saved: ${targetScreenshot}\n`);
       
     } catch (searchError) {
-      console.log('⚠️  Error while searching for target. Error:', searchError.message);
+      console.log('??  Error while searching for target. Error:', searchError.message);
       
       // Take screenshot
       const errorScreenshot = path.join(CONFIG.screenshotDir, `3-search-error-${timestamp}.png`);
@@ -1184,60 +1359,39 @@ async function main() {
     }
     
     // Step 4: Click manager radio button to select that manager
-    console.log(`🎯 Step 4: Selecting "${CONFIG.targetName}" manager...`);
-    
+    // 🎯 Using the new selectManager() function with STRICT EXACT matching
     try {
-      // Use JavaScript to click the radio button (more reliable than Playwright click)
-      const radioClicked = await page.evaluate((managerName) => {
-        // Find radio button by label text
-        const labels = Array.from(document.querySelectorAll('label'));
-        const managerLabel = labels.find(label => label.textContent.includes(managerName));
-        if (managerLabel) {
-          managerLabel.click();
-          return true;
-        }
-        
-        // Fallback: try input directly
-        const radios = Array.from(document.querySelectorAll('input[type="radio"]'));
-        const managerRadio = radios.find(radio => 
-          radio.id.includes(managerName) || radio.value.includes(managerName)
-        );
-        if (managerRadio) {
-          managerRadio.click();
-          return true;
-        }
-        
-        return false;
-      }, CONFIG.targetName); // Pass the manager name from CONFIG
+      const selectionResult = await selectManager(page, CONFIG.targetName);
       
-      if (radioClicked) {
-        console.log(`  ✅ Clicked "${CONFIG.targetName}" radio button via JavaScript`);
-        // ⚡ FAST: No wait needed after JavaScript click
-        
+      if (selectionResult.success) {
         const step4Screenshot = path.join(CONFIG.screenshotDir, `4-selected-manager-${timestamp}.png`);
         await page.screenshot({ path: step4Screenshot, fullPage: true });
         console.log(`  📸 Screenshot: ${step4Screenshot}\n`);
+        dashboard.log(`Manager selected: ${selectionResult.matched}`, 'success');
       } else {
-        console.log(`  ⚠️  Could not find "${CONFIG.targetName}" radio button\n`);
+        console.log(`  ❌ FAILED: Could not find exact match for "${CONFIG.targetName}"`);
+        console.log(`  💡 Tip: Check if the manager name in config matches exactly (including spaces)\n`);
+        dashboard.log(`⚠️ Could not select manager: ${CONFIG.targetName}`, 'warning');
       }
     } catch (error) {
-      console.log(`  ⚠️  Error clicking "${CONFIG.targetName}" radio: ${error.message}\n`);
+      console.log(`  ❌ Error selecting "${CONFIG.targetName}" manager: ${error.message}\n`);
+      dashboard.log(`Error selecting manager: ${error.message}`, 'error');
     }
     
     // Step 5: Get all farms from the list and loop through them
-    console.log('🏭 Step 5: Getting list of all farms...');
+    console.log('📋 Step 5: Getting list of all farms...');
     
-    // 🎯 Ensure farm list container is ready before extraction
+    // 🔍 Ensure farm list container is ready before extraction
     console.log('  → Verifying farm list container is present...');
     await page.waitForLoadState('domcontentloaded');
     await page.waitForSelector('[id*="tabs"][id*="content-point"]', { state: 'visible', timeout: 15000 }).catch(() => {
-      console.log('  ⚠️  Warning: Farm list container not found!');
+      console.log('  ??  Warning: Farm list container not found!');
     });
     
-    // ⚡ SMART: Extended wait for farm links to ensure SPA has fully rendered
+    // ? SMART: Extended wait for farm links to ensure SPA has fully rendered
     console.log('  → Waiting for farm links to populate...');
     await page.waitForSelector('div.css-nd8svt a[href*="/report/point/"]', { state: 'visible', timeout: 30000 });
-    console.log('  ✅ Farm links are visible and ready');
+    console.log('  ? Farm links are visible and ready');
     
     let farmList = [];
     try {
@@ -1249,7 +1403,7 @@ async function main() {
           const farmContainer = tabs.querySelector('div > div:first-child > div:nth-child(2)');
           
           if (!farmContainer) {
-            console.error('[BROWSER] ❌ Farm container not found!');
+            console.error('[BROWSER] ? Farm container not found!');
             return farms;
           }
           
@@ -1268,26 +1422,26 @@ async function main() {
             if (/^\d{2}:\d{2}/.test(text)) return; // Skip if starts with time
             if (text.startsWith('구역')) return; // Skip table labels
             
-            console.log(`[BROWSER] ✓ Valid farm #${idx + 1}: ${text}`);
+            console.log(`[BROWSER] ? Valid farm #${idx + 1}: ${text}`);
             farms.push({ index: idx + 1, name: text });
           });
         }
         return farms;
       });
       
-      console.log(`  ✅ Found ${farmList.length} farms`);
+      console.log(`  ? Found ${farmList.length} farms`);
       farmList.forEach((farm, idx) => {
         console.log(`     [${idx + 1}] ${farm.name}`);
       });
       console.log('');
       
-      // 📡 SYNC: Broadcast real farm count to dashboard
+      // ?? SYNC: Broadcast real farm count to dashboard
       if (dashboard) {
         dashboard.broadcast('update_farm_count', { count: farmList.length });
-        console.log(`  📡 Broadcasted farm count to dashboard: ${farmList.length}\n`);
+        console.log(`  ?? Broadcasted farm count to dashboard: ${farmList.length}\n`);
       }
     } catch (error) {
-      console.log(`  ⚠️  Error getting farm list: ${error.message}`);
+      console.log(`  ??  Error getting farm list: ${error.message}`);
       console.log('  → Will try processing just the first farm\n');
       farmList = [{ index: 1, name: 'First Farm (fallback)' }];
     }
@@ -1295,11 +1449,11 @@ async function main() {
     // Array to store all farm data
     const allFarmData = [];
     
-    // 📅 EXPLICIT DATE CALCULATION: Define "Today" and calculate past 5 days
+    // ?? EXPLICIT DATE CALCULATION: Define "Today" and calculate past 5 days
     const today = new Date();
     today.setHours(0, 0, 0, 0); // Normalize to midnight
     
-    console.log('\n📅 Date Range Configuration:');
+    console.log('\n?? Date Range Configuration:');
     console.log(`   → Today: ${today.toLocaleDateString('ko-KR')}`);
     console.log(`   → Method: Direct URL navigation with explicit date parameters`);
     console.log(`   → Range: Today (T-0) back to 5 days ago (T-5)\n`);
@@ -1313,22 +1467,22 @@ async function main() {
     let startIndex = (dashboardConfig.startFrom > 0) ? (dashboardConfig.startFrom - 1) : 0;
     let maxCount = dashboardConfig.maxFarms || totalFarms;
     
-    // 🛡️ SAFETY AUTO-CORRECT: Validate and clamp startIndex if invalid
+    // ??? SAFETY AUTO-CORRECT: Validate and clamp startIndex if invalid
     if (startIndex >= totalFarms) {
       const requestedFarm = startIndex + 1;
       startIndex = totalFarms - 1; // Clamp to last available farm
-      const warningMsg = `⚠️ Request for Farm #${requestedFarm} exceeds limit (${totalFarms} farms exist). Auto-correcting to start from Farm #${startIndex + 1}.`;
+      const warningMsg = `?? Request for Farm #${requestedFarm} exceeds limit (${totalFarms} farms exist). Auto-correcting to start from Farm #${startIndex + 1}.`;
       console.warn(`\n${warningMsg}\n`);
       if (dashboard) {
         dashboard.log(warningMsg, 'warning');
-        dashboard.updateStatus('⚠️ Auto-corrected configuration', 'running');
+        dashboard.updateStatus('?? Auto-corrected configuration', 'running');
       }
     }
     
-    // 🛡️ SAFETY: Ensure endIndex never exceeds totalFarms
+    // ??? SAFETY: Ensure endIndex never exceeds totalFarms
     let endIndex = Math.min(startIndex + maxCount, totalFarms);
     
-    console.log(`\n📋 Farm Processing Plan:`);
+    console.log(`\n?? Farm Processing Plan:`);
     console.log(`   → Total available: ${totalFarms}`);
     console.log(`   → Starting at: Farm #${startIndex + 1}`);
     console.log(`   → Stopping at: Farm #${endIndex}`);
@@ -1337,24 +1491,24 @@ async function main() {
     // Slice the array to get only the farms we want to process
     const farmsToProcess = farmList.slice(startIndex, endIndex);
     
-    // ═══════════════════════════════════════════════════════════════════════════
-    // 🏭 FARM LOOP (OUTER) - Process each farm with try/catch for robustness
-    // ═══════════════════════════════════════════════════════════════════════════
+    // ???????????????????????????????????????????????????????????????????????????
+    // ?? FARM LOOP (OUTER) - Process each farm with try/catch for robustness
+    // ???????????????????????????????????????????????????????????????????????????
     for (let farmIdx = 0; farmIdx < farmsToProcess.length; farmIdx++) {
       // Get current config (may have been updated via "Add More Farms")
       const currentConfig = dashboard.getConfig();
       
       // Check if we've reached the current maxFarms limit
       if (farmIdx >= currentConfig.maxFarms) {
-        console.log(`\n✅ Reached maxFarms limit (${currentConfig.maxFarms}). Stopping farm processing.\n`);
+        console.log(`\n? Reached maxFarms limit (${currentConfig.maxFarms}). Stopping farm processing.\n`);
         dashboard.log(`Completed processing ${currentConfig.maxFarms} farms`, 'success');
         break;
       }
       // Check if user pressed STOP
       if (dashboard && dashboard.checkIfStopped()) {
-        console.log('\n⛔ STOP requested by user. Halting farm processing...\n');
+        console.log('\n? STOP requested by user. Halting farm processing...\n');
         dashboard.log('Processing stopped by user', 'warning');
-        dashboard.updateStatus('⛔ Stopped by user', 'paused');
+        dashboard.updateStatus('? Stopped by user', 'paused');
         break; // Exit the farm loop
       }
       
@@ -1362,17 +1516,17 @@ async function main() {
       if (currentConfig.mode === 'learning' && !CONFIG.chartLearningMode) {
         CONFIG.chartLearningMode = true;
         CONFIG.watchMode = false;
-        console.log('✅ Switched to Learning Mode');
+        console.log('? Switched to Learning Mode');
         dashboard.log('Learning Mode activated', 'success');
       } else if (currentConfig.mode === 'normal' && CONFIG.chartLearningMode) {
         CONFIG.chartLearningMode = false;
         CONFIG.watchMode = false;
-        console.log('✅ Switched to Normal Mode');
+        console.log('? Switched to Normal Mode');
         dashboard.log('Normal Mode activated', 'success');
       } else if (currentConfig.mode === 'watch' && !CONFIG.watchMode) {
         CONFIG.watchMode = true;
         CONFIG.chartLearningMode = false;
-        console.log('✅ Switched to Watch Mode');
+        console.log('? Switched to Watch Mode');
         dashboard.log('Watch Mode activated', 'success');
       }
       
@@ -1381,7 +1535,7 @@ async function main() {
       const actualFarmIndex = startIndex + farmIdx; // Calculate actual index in original farmList for clicking
       
       console.log(`\n${'='.repeat(70)}`);
-      console.log(`🏭 Processing Farm ${farmIdx + 1}/${farmsToProcess.length}: ${currentFarm.name} (Farm #${actualFarmIndex + 1} of ${totalFarms})`);
+      console.log(`?? Processing Farm ${farmIdx + 1}/${farmsToProcess.length}: ${currentFarm.name} (Farm #${actualFarmIndex + 1} of ${totalFarms})`);
       console.log(`${'='.repeat(70)}\n`);
       
       // Update dashboard progress (reuse currentConfig from above)
@@ -1389,22 +1543,22 @@ async function main() {
         dashboard.updateProgress(farmIdx + 1, farmsToProcess.length, currentFarm.name);
       }
       
-      // 🛡️ ROBUST TRY/CATCH: Wrap entire farm processing so failures don't stop the loop
+      // ??? ROBUST TRY/CATCH: Wrap entire farm processing so failures don't stop the loop
       try {
       
       // Set up network interception to capture chart data
-      console.log('  🌐 Setting up network interception...');
+      console.log('  ?? Setting up network interception...');
       const networkData = setupNetworkInterception(page);
       
       // Click the farm - MODERN APPROACH (Scroll + Force Click + Validate)
       try {
-        console.log(`  🎯 Attempting to click farm: "${currentFarm.name}"`);
+        console.log(`  ?? Attempting to click farm: "${currentFarm.name}"`);
         
         // CRITICAL: Re-locate the element inside the loop using the SAME selector that found the farms
         const farmContainer = page.locator('div.css-nd8svt');
         const farmLink = farmContainer.locator('a[href*="/report/point/"]').nth(actualFarmIndex);
         
-        // ⚡ SUPER FAST: Parallel execution - Setup trap, scroll, click, validate
+        // ? SUPER FAST: Parallel execution - Setup trap, scroll, click, validate
         console.log(`     → Setting up navigation trap...`);
         
         // Step 1: Setup the navigation promise (the "trap")
@@ -1427,46 +1581,46 @@ async function main() {
         
         if (navSuccess !== null) {
           const currentURL = page.url();
-          console.log(`  ✅ Successfully navigated to farm "${currentFarm.name}"`);
+          console.log(`  ? Successfully navigated to farm "${currentFarm.name}"`);
           console.log(`     → URL: ${currentURL}`);
           
-          // ⚡ FAST: Wait for main content to be visible
+          // ? FAST: Wait for main content to be visible
           await page.waitForSelector('div.css-nd8svt', { state: 'visible', timeout: 3000 }).catch(() => {});
         } else {
-          console.log(`  ⚠️  Navigation timeout - URL did not change`);
+          console.log(`  ??  Navigation timeout - URL did not change`);
           console.log(`     → Skipping this farm...
 `);
           continue;
         }
       } catch (error) {
-        console.log(`  ⚠️  Error clicking farm: ${error.message}`);
+        console.log(`  ??  Error clicking farm: ${error.message}`);
         console.log(`     → This could be due to: element detached, timeout, or network issue`);
         console.log(`     → Skipping this farm...
 `);
         continue;
       }
     
-      // 🌐 Get the base farm URL (without date parameter) for later navigation
+      // ?? Get the base farm URL (without date parameter) for later navigation
       const baseFarmUrl = page.url().split('?')[0]; // Remove any existing query params
       const urlParams = new URL(page.url()).searchParams;
       const manager = urlParams.get('manager') || CONFIG.targetName;
       const farmUrlWithManager = `${baseFarmUrl}?manager=${encodeURIComponent(manager)}`;
       
-      console.log(`  🔗 Base farm URL: ${farmUrlWithManager}\n`);
+      console.log(`  ?? Base farm URL: ${farmUrlWithManager}\n`);
     
-    // ═══════════════════════════════════════════════════════════════════════════
-    // 📅 DATE LOOP (INNER) - Process dates from 5 days ago → Today
+    // ???????????????????????????????????????????????????????????????????????????
+    // ?? DATE LOOP (INNER) - Process dates from 5 days ago → Today
     //    Using DIRECT URL NAVIGATION instead of clicking Previous/Next buttons
-    // ═══════════════════════════════════════════════════════════════════════════
+    // ???????????????????????????????????????????????????????????????????????????
     const totalDaysToCheck = 6; // T-5 to T-0 (6 days total)
     let dateIdx = 0;
     const farmDateData = []; // Store data for all dates of this farm
     
-    // 🔄 FIXED: Loop from 5 → 0 (5 days ago to Today)
+    // ?? FIXED: Loop from 5 → 0 (5 days ago to Today)
     for (let dayOffset = 5; dayOffset >= 0; dayOffset--) {
       dateIdx++;
       
-      // 📅 CALCULATE TARGET DATE EXPLICITLY
+      // ?? CALCULATE TARGET DATE EXPLICITLY
       const targetDate = new Date(today);
       targetDate.setDate(today.getDate() - dayOffset); // Subtract days to go into past
       
@@ -1484,27 +1638,27 @@ async function main() {
         weekday: 'short'
       });
       
-      console.log(`\n  📅 Processing Date ${dateIdx}/${totalDaysToCheck}: ${koreanDate} (${dateString}) - T-${dayOffset} days`);
+      console.log(`\n  ?? Processing Date ${dateIdx}/${totalDaysToCheck}: ${koreanDate} (${dateString}) - T-${dayOffset} days`);
       console.log(`  ${'─'.repeat(70)}`);
       
-      // 🌐 DIRECT URL NAVIGATION: Construct URL with explicit date parameter
+      // ?? DIRECT URL NAVIGATION: Construct URL with explicit date parameter
       const currentUrl = new URL(page.url());
       currentUrl.searchParams.set('date', dateString);
       currentUrl.searchParams.set('manager', manager);
       const targetUrl = currentUrl.toString();
       
-      console.log(`  🌐 Direct URL navigation to: ${targetUrl}`);
+      console.log(`  ?? Direct URL navigation to: ${targetUrl}`);
       
       try {
         await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
-        console.log(`  ✅ Loaded page for date: ${dateString}`);
+        console.log(`  ? Loaded page for date: ${dateString}`);
         
         // Wait for main content to be visible
         await page.waitForSelector('div.css-nd8svt', { state: 'visible', timeout: 5000 }).catch(() => {
-          console.log('  ⚠️  Main content selector not found (may be normal)');
+          console.log('  ??  Main content selector not found (may be normal)');
         });
       } catch (navError) {
-        console.log(`  ❌ Failed to navigate to date ${dateString}: ${navError.message}`);
+        console.log(`  ? Failed to navigate to date ${dateString}: ${navError.message}`);
         console.log(`  → Skipping this date...\n`);
         continue; // Skip to next date
       }
@@ -1524,11 +1678,11 @@ async function main() {
         return 'Unknown Date';
       });
       
-      console.log(`  📍 Displayed date on page: ${displayedDate}`);
+      console.log(`  ?? Displayed date on page: ${displayedDate}`);
       
       // Check if user pressed STOP
       if (dashboard && dashboard.checkIfStopped()) {
-        console.log('\n⛔ STOP requested. Halting date processing...\n');
+        console.log('\n? STOP requested. Halting date processing...\n');
         break; // Exit date loop
       }
       
@@ -1537,22 +1691,22 @@ async function main() {
       if (currentConfig.mode === 'learning' && !CONFIG.chartLearningMode) {
         CONFIG.chartLearningMode = true;
         CONFIG.watchMode = false;
-        console.log('  ✅ Mode switched to: Learning');
+        console.log('  ? Mode switched to: Learning');
       } else if (currentConfig.mode === 'normal' && CONFIG.chartLearningMode) {
         CONFIG.chartLearningMode = false;
         CONFIG.watchMode = false;
-        console.log('  ✅ Mode switched to: Normal');
+        console.log('  ? Mode switched to: Normal');
       } else if (currentConfig.mode === 'watch' && !CONFIG.watchMode) {
         CONFIG.watchMode = true;
         CONFIG.chartLearningMode = false;
-        console.log('  ✅ Mode switched to: Watch');
+        console.log('  ? Mode switched to: Watch');
       }
       
       // Step 2: Check if tables are already filled for this date
-      console.log('  💧 Checking irrigation time tables...');
+      console.log('  ?? Checking irrigation time tables...');
       
       try {
-        // ⚡ FAST: No wait needed - table data is already loaded
+        // ? FAST: No wait needed - table data is already loaded
         // Check the two table fields - look specifically in the right panel
         const tableStatus = await page.evaluate(() => {
         const results = { debug: [] };
@@ -1654,7 +1808,7 @@ async function main() {
         const tablesAlreadyFilled = !tableStatus.needsFirstClick && !tableStatus.needsLastClick;
         
         if (tablesAlreadyFilled) {
-          console.log(`     ✅ Tables already filled for this date - NO MODIFICATION NEEDED`);
+          console.log(`     ? Tables already filled for this date - NO MODIFICATION NEEDED`);
           console.log(`        → Existing First: ${tableStatus.firstTime}`);
           console.log(`        → Existing Last: ${tableStatus.lastTime}`);
           console.log(`        → Skipping HSSP algorithm (preserving existing data)\n`);
@@ -1669,7 +1823,7 @@ async function main() {
           };
           farmDateData.push(dateData);
           
-          // 📊 Track skip
+          // ?? Track skip
           runStats.skipCount++;
           runStats.datesProcessed++;
           if (!runStats.dateRange.start) runStats.dateRange.start = displayedDate;
@@ -1678,37 +1832,37 @@ async function main() {
           // Take screenshot
           const skipScreenshot = path.join(CONFIG.screenshotDir, `farm-${farmIdx + 1}-date-${dateIdx}-skipped-${timestamp}.png`);
           await page.screenshot({ path: skipScreenshot, fullPage: true });
-          console.log(`     📸 Screenshot: ${skipScreenshot}\n`);
+          console.log(`     ?? Screenshot: ${skipScreenshot}\n`);
           
-          // ✅ Direct URL navigation handles date change - no button click needed
+          // ? Direct URL navigation handles date change - no button click needed
           continue; // Skip to next date
         }
         
         // If either field is empty, click the chart points
         if (tableStatus.needsFirstClick || tableStatus.needsLastClick) {
-        console.log('  ⚠️  Tables need data, clicking chart points...\n');
+        console.log('  ??  Tables need data, clicking chart points...\n');
         
         // NETWORK INTERCEPTION APPROACH (Replaces Highcharts DOM access)
-        console.log('  ⏳ Waiting for chart data from network...');
+        console.log('  ? Waiting for chart data from network...');
         try {
           // Wait for the API response to be captured
           const chartData = await waitForChartData(networkData, 10000);
-          console.log('  ✅ Chart data successfully captured from network!\n');
+          console.log('  ? Chart data successfully captured from network!\n');
           
-          // 🎨 CRITICAL FIX: Wait for Highcharts to render the visual SVG graph
-          console.log('  ⏳ Waiting for chart SVG to render...');
+          // ?? CRITICAL FIX: Wait for Highcharts to render the visual SVG graph
+          console.log('  ? Waiting for chart SVG to render...');
           try {
             await page.waitForSelector('.highcharts-series-0 path.highcharts-graph, .highcharts-root path', { 
               state: 'visible', 
               timeout: 5000 
             });
-            console.log('  ✅ Chart SVG is visible');
+            console.log('  ? Chart SVG is visible');
             
             // Small safety buffer to ensure animation completes
             await page.waitForTimeout(500);
-            console.log('  ✅ Chart render animation complete\n');
+            console.log('  ? Chart render animation complete\n');
           } catch (svgWaitError) {
-            console.log(`  ⚠️  Chart SVG wait timeout: ${svgWaitError.message}`);
+            console.log(`  ??  Chart SVG wait timeout: ${svgWaitError.message}`);
             console.log('  → Will attempt to continue anyway...\n');
           }
           
@@ -1716,17 +1870,17 @@ async function main() {
           const dataPoints = extractDataPoints(chartData);
           
           if (!dataPoints || dataPoints.length < 10) {
-            console.log('  ⚠️  Insufficient data points for analysis');
+            console.log('  ??  Insufficient data points for analysis');
             console.log(`     → Got ${dataPoints?.length || 0} points, need at least 10`);
             console.log('     → Skipping chart interaction for this date\n');
             
-            // ✅ Direct URL navigation handles date change - no button click needed
+            // ? Direct URL navigation handles date change - no button click needed
             continue; // Skip to next date
           }
           
-          console.log(`  📊 Analyzing ${dataPoints.length} data points for irrigation events...`);
+          console.log(`  ?? Analyzing ${dataPoints.length} data points for irrigation events...`);
           
-          // 🔬 ROLLING WINDOW & LOCAL MINIMUM Algorithm
+          // ?? ROLLING WINDOW & LOCAL MINIMUM Algorithm
           // Purpose: Catch gentle sustained rises + Find absolute valley bottom
           
           const yValues = dataPoints.map(p => p.y);
@@ -1786,7 +1940,7 @@ async function main() {
               console.log(`     → Valley time: ${timeStr} (hour: ${eventHour})`);
               console.log(`     → Valley Y: ${dataPoints[valleyIndex].y.toFixed(3)}, Surge Y: ${currentVal.toFixed(3)}`);
               console.log(`     → Total rise from valley: ${(currentVal - dataPoints[valleyIndex].y).toFixed(3)}`);
-              console.log(`     → Daytime filter: ${isDaytime ? '✅ PASS' : '❌ SKIP (outside 07:00-17:00)'}`);
+              console.log(`     → Daytime filter: ${isDaytime ? '? PASS' : '? SKIP (outside 07:00-17:00)'}`);
               
               if (isDaytime) {
                 allEvents.push({
@@ -1806,7 +1960,7 @@ async function main() {
             }
           }
           
-          console.log(`  🔬 [WINDOW-MIN] Raw detections: ${allEvents.length} events`);
+          console.log(`  ?? [WINDOW-MIN] Raw detections: ${allEvents.length} events`);
           
           // DE-DUPLICATE: Keep events at least 5% apart
           const uniqueEvents = [];
@@ -1831,11 +1985,11 @@ async function main() {
           }
           
 
-          console.log(`  ✅ Found ${uniqueEvents.length} irrigation events`);
+          console.log(`  ? Found ${uniqueEvents.length} irrigation events`);
           
           if (uniqueEvents.length === 0) {
             console.log('     → No irrigation detected for this date\n');
-            // ✅ Direct URL navigation handles date change - no button click needed
+            // ? Direct URL navigation handles date change - no button click needed
             continue;
           }
           
@@ -1847,7 +2001,7 @@ async function main() {
           
           console.log(`     → First event at index ${firstEvent.index}`);
           console.log(`     → Last event at index ${lastEvent.index}`);
-          console.log(`  🎯 Now attempting to click chart at these positions...\n`);
+          console.log(`  ?? Now attempting to click chart at these positions...\n`);
           
           // TODO: Actually click the chart points using the indices
           // For now, we've successfully analyzed the data!
@@ -1855,12 +2009,12 @@ async function main() {
           // or we can implement coordinate-based clicking
           
         } catch (timeoutError) {
-          console.log('  ⚠️  Network data capture timed out after 10 seconds');
+          console.log('  ??  Network data capture timed out after 10 seconds');
           console.log('     → Chart data API may not have been called');
           console.log('     → Or API response format is different than expected');
           console.log('     → Skipping chart interaction for this date\n');
           
-          // ✅ Direct URL navigation handles date change - no button click needed
+          // ? Direct URL navigation handles date change - no button click needed
           continue; // Skip to next date
         }
 
@@ -1868,9 +2022,9 @@ async function main() {
           const results = [];
           
           // Log to browser console for debugging
-          console.log('🔍 [BROWSER] Starting irrigation point detection...');
-          console.log('🔍 [BROWSER] Needs first click:', needs.needsFirstClick);
-          console.log('🔍 [BROWSER] Needs last click:', needs.needsLastClick);
+          console.log('?? [BROWSER] Starting irrigation point detection...');
+          console.log('?? [BROWSER] Needs first click:', needs.needsFirstClick);
+          console.log('?? [BROWSER] Needs last click:', needs.needsLastClick);
           
           // ============================================
           // METHOD 1: Try Highcharts API (Most Accurate)
@@ -1881,8 +2035,8 @@ async function main() {
           }
           
           if (chart && chart.series && chart.series[0]) {
-            results.push({ message: '✅ Highcharts API accessible' });
-            console.log('✅ [BROWSER] Highcharts API accessible');
+            results.push({ message: '? Highcharts API accessible' });
+            console.log('? [BROWSER] Highcharts API accessible');
           
           const series = chart.series[0];
           const dataPoints = series.data;
@@ -1921,7 +2075,7 @@ async function main() {
                 firstSpike.point.select(true, false);
                 firstSpike.point.firePointEvent('click');
           results.push({ 
-                  action: '✅ API: Clicked FIRST spike', 
+                  action: '? API: Clicked FIRST spike', 
                   x: Math.round(firstSpike.plotX), 
                   y: Math.round(firstSpike.plotY),
                   time: firstSpike.time
@@ -1938,7 +2092,7 @@ async function main() {
                 lastSpike.point.select(true, false);
                 lastSpike.point.firePointEvent('click');
           results.push({
-                  action: '✅ API: Clicked LAST spike', 
+                  action: '? API: Clicked LAST spike', 
                   x: Math.round(lastSpike.plotX), 
                   y: Math.round(lastSpike.plotY),
                   time: lastSpike.time
@@ -1953,16 +2107,16 @@ async function main() {
           // ============================================
           // METHOD 2: SVG Path Analysis (Fallback)
           // ============================================
-          results.push({ message: '⚠️ Highcharts API not accessible, using SVG path analysis' });
-          console.log('⚠️ [BROWSER] Highcharts API not accessible, using SVG path analysis');
+          results.push({ message: '?? Highcharts API not accessible, using SVG path analysis' });
+          console.log('?? [BROWSER] Highcharts API not accessible, using SVG path analysis');
           
           // Find the series path
           const seriesPath = document.querySelector('.highcharts-series path[data-z-index="1"]');
           if (!seriesPath) {
-            console.error('❌ [BROWSER] No series path found in SVG');
+            console.error('? [BROWSER] No series path found in SVG');
             return { error: 'No series path found in SVG' };
           }
-          console.log('✅ [BROWSER] Found series path in SVG');
+          console.log('? [BROWSER] Found series path in SVG');
           
           const pathData = seriesPath.getAttribute('d');
           if (!pathData) {
@@ -1986,7 +2140,7 @@ async function main() {
             });
           }
           
-          // For Bézier curves (C command), only use the end points (every 3rd point)
+          // For Bezier curves (C command), only use the end points (every 3rd point)
           // This gives us the actual plotted points, not the control points
           const plottedPoints = [];
           plottedPoints.push(coordinates[0]); // First M command point
@@ -2067,10 +2221,10 @@ async function main() {
             }
           }
           
-          console.log(`🔍 [BROWSER] Found ${drops.length} significant drops (≥8% Y-range)`);
+          console.log(`?? [BROWSER] Found ${drops.length} significant drops (≥8% Y-range)`);
           
           if (drops.length === 0) {
-            console.log(`⚠️ [BROWSER] No irrigation drops detected - may have no irrigation this date`);
+            console.log(`?? [BROWSER] No irrigation drops detected - may have no irrigation this date`);
             results.push({ message: 'No irrigation drops found' });
           }
           
@@ -2103,7 +2257,7 @@ async function main() {
             }
           }
           
-          console.log(`🎯 [BROWSER] After de-duplication: ${uniqueDrops.length} unique irrigation events`);
+          console.log(`?? [BROWSER] After de-duplication: ${uniqueDrops.length} unique irrigation events`);
           if (drops.length > uniqueDrops.length) {
             console.log(`   → Removed ${drops.length - uniqueDrops.length} duplicate drops`);
           }
@@ -2159,9 +2313,9 @@ async function main() {
                 dropPercent: drop.dropPercent
               });
               
-              console.log(`✅ [BROWSER] Irrigation ${dIdx + 1}: Start idx=${startIndex} (X=${Math.round(finalCoords[startIndex].x)}), End idx=${endIndex} (X=${Math.round(finalCoords[endIndex].x)}), drop=${drop.dropPercent}%`);
+              console.log(`? [BROWSER] Irrigation ${dIdx + 1}: Start idx=${startIndex} (X=${Math.round(finalCoords[startIndex].x)}), End idx=${endIndex} (X=${Math.round(finalCoords[endIndex].x)}), drop=${drop.dropPercent}%`);
             } else {
-              console.log(`⚠️ [BROWSER] Irrigation ${dIdx + 1}: Could not find valid start/end points, skipping`);
+              console.log(`?? [BROWSER] Irrigation ${dIdx + 1}: Could not find valid start/end points, skipping`);
             }
           }
           
@@ -2170,7 +2324,7 @@ async function main() {
           });
           
           if (irrigationEvents.length === 0) {
-            console.error('❌ [BROWSER] No valid irrigation events found');
+            console.error('? [BROWSER] No valid irrigation events found');
             return {
               needsFirstClick: false,
               needsLastClick: false,
@@ -2203,7 +2357,7 @@ async function main() {
             }
           ];
           
-          console.log(`📌 [BROWSER] Using FIRST irrigation START (idx=${firstEvent.startIndex}) and LAST irrigation END (idx=${lastEvent.endIndex})`);
+          console.log(`?? [BROWSER] Using FIRST irrigation START (idx=${firstEvent.startIndex}) and LAST irrigation END (idx=${lastEvent.endIndex})`);
           
           
           // Get chart container for coordinate conversion
@@ -2218,7 +2372,7 @@ async function main() {
           const totalXRange = finalCoords[finalCoords.length - 1].x - finalCoords[0].x;
           const separationPercent = (xSeparation / totalXRange) * 100;
           
-          console.log(`📊 [BROWSER] First (START) vs Last (END) separation: ${Math.round(separationPercent)}%`);
+          console.log(`?? [BROWSER] First (START) vs Last (END) separation: ${Math.round(separationPercent)}%`);
           
           // IMPORTANT: Click ABOVE the line (lower Y) to hit Highcharts clickable area
           const clickOffsetY = 15; // pixels above the chart line
@@ -2230,7 +2384,7 @@ async function main() {
           results.push({
             message: `Separation: ${Math.round(xSeparation)}px (${Math.round(separationPercent)}% of chart)`
           });
-          console.log(`📏 [BROWSER] First-Last separation: ${Math.round(xSeparation)}px (${Math.round(separationPercent)}% of chart)`);
+          console.log(`?? [BROWSER] First-Last separation: ${Math.round(xSeparation)}px (${Math.round(separationPercent)}% of chart)`);
           
           results.push({ 
             message: `Click offset: ${clickOffsetY}px ABOVE chart line (Highcharts clickable area)`
@@ -2242,7 +2396,7 @@ async function main() {
           const lastX = containerRect.left + lastPoint.x;
           const lastY = containerRect.top + lastPoint.y - clickOffsetY;
           
-          console.log(`🎯 [BROWSER] Final click coordinates:`);
+          console.log(`?? [BROWSER] Final click coordinates:`);
           console.log(`   → FIRST (START): idx=${firstPoint.index} Screen(${Math.round(firstX)}, ${Math.round(firstY)}) SVG(${Math.round(firstPoint.x)}, ${Math.round(firstPoint.y)})`);
           console.log(`   → LAST (END): idx=${lastPoint.index} Screen(${Math.round(lastX)}, ${Math.round(lastY)}) SVG(${Math.round(lastPoint.x)}, ${Math.round(lastPoint.y)})`);
           
@@ -2277,7 +2431,7 @@ async function main() {
           
         // Check if HSSP detection failed
         if (clickResults.error) {
-          console.log(`     ⚠️  HSSP detection failed: ${clickResults.error}`);
+          console.log(`     ??  HSSP detection failed: ${clickResults.error}`);
           console.log(`        → No irrigation points found for this date`);
           console.log(`        → Tables will remain empty\n`);
           
@@ -2294,9 +2448,9 @@ async function main() {
           // Take screenshot
           const errorScreenshot = path.join(CONFIG.screenshotDir, `farm-${farmIdx + 1}-date-${dateIdx}-no-data-${timestamp}.png`);
           await page.screenshot({ path: errorScreenshot, fullPage: true });
-          console.log(`     📸 Screenshot: ${errorScreenshot}\n`);
+          console.log(`     ?? Screenshot: ${errorScreenshot}\n`);
           
-          // ✅ Direct URL navigation handles date change - no button click needed
+          // ? Direct URL navigation handles date change - no button click needed
           continue; // Skip to next date
         }
         
@@ -2309,12 +2463,12 @@ async function main() {
         
         // Show separation info
         if (clickResults.separationPercent !== undefined) {
-          console.log(`     ✅ First (START) and Last (END) separated by ${clickResults.separationPercent}% of chart`);
+          console.log(`     ? First (START) and Last (END) separated by ${clickResults.separationPercent}% of chart`);
         }
         
         // CHART LEARNING MODE: Show detected points and allow user correction
         if (CONFIG.chartLearningMode && clickResults.firstCoords && clickResults.lastCoords) {
-          console.log(`\n     🎓 CHART LEARNING MODE ACTIVE`);
+          console.log(`\n     ?? CHART LEARNING MODE ACTIVE`);
           console.log(`        Algorithm will click at:`);
           console.log(`        → FIRST: Screen(${clickResults.firstCoords.x}, ${clickResults.firstCoords.y})`);
           console.log(`        → LAST: Screen(${clickResults.lastCoords.x}, ${clickResults.lastCoords.y})`);
@@ -2322,7 +2476,7 @@ async function main() {
           // Take screenshot BEFORE showing markers
           const beforeScreenshot = path.join(CONFIG.screenshotDir, `learning-before-${Date.now()}.png`);
           await page.screenshot({ path: beforeScreenshot, fullPage: false });
-          console.log(`        📸 Chart screenshot: ${beforeScreenshot}`);
+          console.log(`        ?? Chart screenshot: ${beforeScreenshot}`);
           
           // Draw BIG visible indicators on the page using HTML overlays
           await page.evaluate((first, last) => {
@@ -2344,10 +2498,10 @@ async function main() {
               font-family: Arial, sans-serif;
             `;
             banner.innerHTML = `
-              🎓 LEARNING MODE ACTIVE 🎓<br>
+              ?? LEARNING MODE ACTIVE ??<br>
               <span style="font-size: 16px; font-weight: normal;">
-                🟢 Green circle = Algorithm's FIRST point | 🔴 Red circle = Algorithm's LAST point<br>
-                ✅ Correct? Just wait 30 seconds | ❌ Wrong? Click correct spots (Yellow then Orange)
+                ?? Green circle = Algorithm's FIRST point | ?? Red circle = Algorithm's LAST point<br>
+                ? Correct? Just wait 30 seconds | ? Wrong? Click correct spots (Yellow then Orange)
               </span>
             `;
             document.body.appendChild(banner);
@@ -2467,7 +2621,7 @@ async function main() {
               `;
               overlay.appendChild(userMarker);
               
-              console.log(`✅ [BROWSER] Recorded user click #${window.learningClicks.length}: (${Math.round(e.clientX)}, ${Math.round(e.clientY)})`);
+              console.log(`? [BROWSER] Recorded user click #${window.learningClicks.length}: (${Math.round(e.clientX)}, ${Math.round(e.clientY)})`);
             };
             document.addEventListener('click', clickHandler, true);
             window.removeClickHandler = () => {
@@ -2515,19 +2669,19 @@ async function main() {
             }, 1000);
           });
           
-          // ⚡ FAST: Markers appear instantly via JavaScript
-          console.log(`\n        🟢 🔴 LOOK AT THE BROWSER WINDOW! 🔴 🟢`);
-          console.log(`        ═══════════════════════════════════════`);
+          // ? FAST: Markers appear instantly via JavaScript
+          console.log(`\n        ?? ?? LOOK AT THE BROWSER WINDOW! ?? ??`);
+          console.log(`        ???????????????????????????????????????`);
           console.log(`        You should see:`);
-          console.log(`        • Purple banner at top with instructions`);
-          console.log(`        • HUGE green circle (100px) = FIRST START`);
-          console.log(`        • HUGE red circle (100px) = LAST END`);
-          console.log(`        • Big countdown timer (top-right corner)`);
-          console.log(`\n        📋 WHAT TO DO:`);
-          console.log(`        ✅ Circles correct? → Just wait for countdown`);
-          console.log(`        ❌ Circles wrong? → Click correct spots before timer ends`);
+          console.log(`        ? Purple banner at top with instructions`);
+          console.log(`        ? HUGE green circle (100px) = FIRST START`);
+          console.log(`        ? HUGE red circle (100px) = LAST END`);
+          console.log(`        ? Big countdown timer (top-right corner)`);
+          console.log(`\n        ?? WHAT TO DO:`);
+          console.log(`        ? Circles correct? → Just wait for countdown`);
+          console.log(`        ? Circles wrong? → Click correct spots before timer ends`);
           console.log(`           (Yellow circle = your FIRST, Orange = your LAST)`);
-          console.log(`\n        ⏱️  Waiting 20 seconds for corrections...`);
+          console.log(`\n        ??  Waiting 20 seconds for corrections...`);
           
           // Wait 20 seconds for user to make corrections (must keep this for human interaction)
           await page.waitForTimeout(20000);
@@ -2564,7 +2718,7 @@ async function main() {
           fs.writeFileSync(TRAINING_FILE, JSON.stringify(trainingData, null, 2));
           
           if (userCorrections.length > 0) {
-            console.log(`\n     📝 Recorded ${userCorrections.length} user corrections`);
+            console.log(`\n     ?? Recorded ${userCorrections.length} user corrections`);
             console.log(`        Saved to training/training-data.json`);
             
             // Calculate differences
@@ -2579,7 +2733,7 @@ async function main() {
               console.log(`        Last point offset: X=${Math.round(lastDiffX)}px, Y=${Math.round(lastDiffY)}px\n`);
             }
           } else {
-            console.log(`\n     ✅ User accepted algorithm detection (no corrections)\n`);
+            console.log(`\n     ? User accepted algorithm detection (no corrections)\n`);
           }
         }
         
@@ -2591,11 +2745,11 @@ async function main() {
           if (learnedOffsets.count > 0 && !CONFIG.chartLearningMode) {
             const correctedX = coords.x + learnedOffsets.firstX;
             const correctedY = coords.y + learnedOffsets.firstY;
-            console.log(`     🎓 Applying learned correction: (${learnedOffsets.firstX.toFixed(1)}, ${learnedOffsets.firstY.toFixed(1)})`);
+            console.log(`     ?? Applying learned correction: (${learnedOffsets.firstX.toFixed(1)}, ${learnedOffsets.firstY.toFixed(1)})`);
             coords = { ...coords, x: Math.round(correctedX), y: Math.round(correctedY) };
           }
           
-          console.log(`     ✅ Clicking FIRST irrigation time (START of irrigation)`);
+          console.log(`     ? Clicking FIRST irrigation time (START of irrigation)`);
           console.log(`        → Screen Coord: (${coords.x}, ${coords.y}) - 15px ABOVE line`);
           console.log(`        → SVG Line Coord: (${coords.svgX}, ${coords.svgY})`);
           console.log(`        → Type: ${coords.type || 'START'}`);
@@ -2603,12 +2757,12 @@ async function main() {
           // Focus first input field
           await page.click('input[type="time"]:nth-of-type(1)');
           
-          // ⚡ FAST: Click chart immediately
+          // ? FAST: Click chart immediately
           await page.mouse.click(coords.x, coords.y);
           // Brief wait for UI to register click before second click
           await page.waitForTimeout(500);
           
-          // 📊 Track chart click
+          // ?? Track chart click
           runStats.chartsClicked++;
         }
         
@@ -2619,11 +2773,11 @@ async function main() {
           if (learnedOffsets.count > 0 && !CONFIG.chartLearningMode) {
             const correctedX = coords.x + learnedOffsets.lastX;
             const correctedY = coords.y + learnedOffsets.lastY;
-            console.log(`     🎓 Applying learned correction: (${learnedOffsets.lastX.toFixed(1)}, ${learnedOffsets.lastY.toFixed(1)})`);
+            console.log(`     ?? Applying learned correction: (${learnedOffsets.lastX.toFixed(1)}, ${learnedOffsets.lastY.toFixed(1)})`);
             coords = { ...coords, x: Math.round(correctedX), y: Math.round(correctedY) };
           }
           
-          console.log(`     ✅ Clicking LAST irrigation time (END of irrigation)`);
+          console.log(`     ? Clicking LAST irrigation time (END of irrigation)`);
           console.log(`        → Screen Coord: (${coords.x}, ${coords.y}) - 15px ABOVE line`);
           console.log(`        → SVG Line Coord: (${coords.svgX}, ${coords.svgY})`);
           console.log(`        → Type: ${coords.type || 'END'}`);
@@ -2634,33 +2788,33 @@ async function main() {
             await timeInputs[timeInputs.length - 1].click();
           }
           
-          // ⚡ FAST: Click chart immediately
+          // ? FAST: Click chart immediately
           await page.mouse.click(coords.x, coords.y);
           // Brief wait for table update
           await page.waitForTimeout(500);
           
-          // 📊 Track chart click
+          // ?? Track chart click
           runStats.chartsClicked++;
         }
         
-        // ⚡ FAST: Tables update instantly after clicks
+        // ? FAST: Tables update instantly after clicks
         
       } else {
-          console.log('     ✅ Some tables already have data, minimal clicks needed\n');
+          console.log('     ? Some tables already have data, minimal clicks needed\n');
         }
         
-        // ⚡ FAST: Brief wait for UI update
+        // ? FAST: Brief wait for UI update
         await page.waitForTimeout(500);
         
         // Take screenshot after clicking
         const step6Screenshot = path.join(CONFIG.screenshotDir, `farm-${farmIdx + 1}-date-${dateIdx}-after-clicks-${timestamp}.png`);
         await page.screenshot({ path: step6Screenshot, fullPage: true });
-        console.log(`     📸 Screenshot: ${step6Screenshot}\n`);
+        console.log(`     ?? Screenshot: ${step6Screenshot}\n`);
         
         // Extract final table values
-        console.log('     📊 Extracting irrigation data from tables...');
+        console.log('     ?? Extracting irrigation data from tables...');
       
-      // ⚡ FAST: Extract data immediately
+      // ? FAST: Extract data immediately
       const finalData = await page.evaluate(() => {
         const results = {
           firstIrrigationTime: null,
@@ -2668,12 +2822,12 @@ async function main() {
           debug: []
         };
         
-        console.log('📊 [BROWSER] Extracting irrigation time data from tables...');
+        console.log('?? [BROWSER] Extracting irrigation time data from tables...');
         
         // Strategy 1: Look for time input fields (type="time")
         const timeInputs = Array.from(document.querySelectorAll('input[type="time"]'));
         results.debug.push(`Found ${timeInputs.length} time input fields`);
-        console.log(`📊 [BROWSER] Found ${timeInputs.length} time input fields`);
+        console.log(`?? [BROWSER] Found ${timeInputs.length} time input fields`);
         
         // For each time input, look backwards in the DOM to find its label
         timeInputs.forEach((input, idx) => {
@@ -2690,14 +2844,14 @@ async function main() {
             // Check if this is the "first irrigation time" field
             if (containerText.includes('첫 급액') || containerText.includes('첫급액')) {
               results.firstIrrigationTime = value;
-              results.debug.push(`✅ Matched FIRST time: "${value}"`);
-              console.log(`✅ [BROWSER] Found FIRST irrigation time: "${value}"`);
+              results.debug.push(`? Matched FIRST time: "${value}"`);
+              console.log(`? [BROWSER] Found FIRST irrigation time: "${value}"`);
             }
             // Check if this is the "last irrigation time" field
             else if (containerText.includes('마지막 급액') || containerText.includes('마지막급액')) {
               results.lastIrrigationTime = value;
-              results.debug.push(`✅ Matched LAST time: "${value}"`);
-              console.log(`✅ [BROWSER] Found LAST irrigation time: "${value}"`);
+              results.debug.push(`? Matched LAST time: "${value}"`);
+              console.log(`? [BROWSER] Found LAST irrigation time: "${value}"`);
             }
           }
         });
@@ -2782,7 +2936,7 @@ async function main() {
           } // End Strategy 3 if block
         } // End fallback if block
         
-        console.log('📋 [BROWSER] Extraction complete:');
+        console.log('?? [BROWSER] Extraction complete:');
         console.log(`   → First time: ${results.firstIrrigationTime || 'NOT FOUND'}`);
         console.log(`   → Last time: ${results.lastIrrigationTime || 'NOT FOUND'}`);
         
@@ -2802,13 +2956,13 @@ async function main() {
         };
         farmDateData.push(dateData);
         
-        // 📊 Track statistics
+        // ?? Track statistics
         runStats.datesProcessed++;
         if (finalData.firstIrrigationTime || finalData.lastIrrigationTime) {
           runStats.successCount++;
-          console.log(`     ✅ Data collected for ${displayedDate}\n`);
+          console.log(`     ? Data collected for ${displayedDate}\n`);
         } else {
-          console.log(`     ⚠️  No irrigation time data found for this date\n`);
+          console.log(`     ??  No irrigation time data found for this date\n`);
         }
         
         // Update date range
@@ -2816,15 +2970,15 @@ async function main() {
         runStats.dateRange.end = displayedDate;
         
       } catch (error) {
-        console.log(`     ⚠️  Error in data extraction: ${error.message}\n`);
+        console.log(`     ??  Error in data extraction: ${error.message}\n`);
       }
       
       // Take screenshot after processing this date
       const dateScreenshot = path.join(CONFIG.screenshotDir, `farm-${farmIdx + 1}-date-${dateIdx}-${timestamp}.png`);
       await page.screenshot({ path: dateScreenshot, fullPage: true });
-      console.log(`     📸 Screenshot: ${dateScreenshot}\n`);
+      console.log(`     ?? Screenshot: ${dateScreenshot}\n`);
       
-      // ✅ NO NEED TO CLICK "Next Period" - We navigate directly via URL on next iteration
+      // ? NO NEED TO CLICK "Next Period" - We navigate directly via URL on next iteration
       
     } // End of date loop
     
@@ -2838,16 +2992,16 @@ async function main() {
     };
     allFarmData.push(farmData);
     
-    // 📊 Track farm completion
+    // ?? Track farm completion
     runStats.farmsCompleted++;
     
-    console.log(`\n  ✅ Finished Farm "${currentFarm.name}"`);
+    console.log(`\n  ? Finished Farm "${currentFarm.name}"`);
     console.log(`     → Processed ${farmDateData.length} dates`);
     console.log(`     → Data found for ${farmData.datesWithData} dates\n`);
     
-    // 🛡️ END OF ROBUST TRY BLOCK - Catch any errors and continue to next farm
+    // ??? END OF ROBUST TRY BLOCK - Catch any errors and continue to next farm
     } catch (farmError) {
-      console.log(`\n  ❌ Error processing farm "${currentFarm.name}": ${farmError.message}`);
+      console.log(`\n  ? Error processing farm "${currentFarm.name}": ${farmError.message}`);
       console.log(`     → Stack: ${farmError.stack?.split('\n')[1] || 'N/A'}`);
       console.log(`     → Continuing to next farm...\n`);
       
@@ -2861,9 +3015,9 @@ async function main() {
       try {
         const errorScreenshot = path.join(CONFIG.screenshotDir, `error-farm-${farmIdx + 1}-${Date.now()}.png`);
         await page.screenshot({ path: errorScreenshot, fullPage: true });
-        console.log(`     📸 Error screenshot: ${errorScreenshot}\n`);
+        console.log(`     ?? Error screenshot: ${errorScreenshot}\n`);
       } catch (ssErr) {
-        console.log(`     ⚠️  Could not save error screenshot\n`);
+        console.log(`     ??  Could not save error screenshot\n`);
       }
       
       // Continue to next farm (this will automatically happen when the catch block ends)
@@ -2873,7 +3027,7 @@ async function main() {
     } // End farm loop
     
     // Save all collected farm data
-    console.log('\n💾 Saving all farm data...');
+    console.log('\n?? Saving all farm data...');
     const allDataFile = path.join(CONFIG.outputDir, `all-farms-data-${timestamp}.json`);
     const summaryData = {
       extractedAt: new Date().toISOString(),
@@ -2890,24 +3044,24 @@ async function main() {
       farms: allFarmData
     };
     fs.writeFileSync(allDataFile, JSON.stringify(summaryData, null, 2));
-    console.log(`✅ Saved data for ${allFarmData.length} farms to: ${allDataFile}\n`);
+    console.log(`? Saved data for ${allFarmData.length} farms to: ${allDataFile}\n`);
     
     // Step 8: Final screenshot
     const finalScreenshot = path.join(CONFIG.screenshotDir, `8-final-state-${timestamp}.png`);
     await page.screenshot({ path: finalScreenshot, fullPage: true });
-    console.log(`📸 Final screenshot saved: ${finalScreenshot}\n`);
+    console.log(`?? Final screenshot saved: ${finalScreenshot}\n`);
     
     // Success summary
-    console.log('✅ Multi-Farm Data Extraction Complete!');
-    console.log('\n📋 Summary:');
-    console.log(`   • Total farms processed: ${allFarmData.length}`);
-    console.log(`   • Farms with data: ${summaryData.farmsWithData}`);
-    console.log(`   • Manager: ${CONFIG.targetName}`);
+    console.log('? Multi-Farm Data Extraction Complete!');
+    console.log('\n?? Summary:');
+    console.log(`   ? Total farms processed: ${allFarmData.length}`);
+    console.log(`   ? Farms with data: ${summaryData.farmsWithData}`);
+    console.log(`   ? Manager: ${CONFIG.targetName}`);
     
     // Show summary table
-    console.log('\n📊 Farm Details:');
+    console.log('\n?? Farm Details:');
     allFarmData.forEach((farm, idx) => {
-      const status = farm.datesWithData > 0 ? '✅' : '⚠️';
+      const status = farm.datesWithData > 0 ? '?' : '??';
       console.log(`   ${status} [${idx + 1}] ${farm.farmName}`);
       console.log(`      Dates processed: ${farm.totalDates} | Data found: ${farm.datesWithData}`);
       
@@ -2916,7 +3070,7 @@ async function main() {
       sampleDates.forEach((dateData, dIdx) => {
         const first = dateData.firstIrrigationTime || '--:--';
         const last = dateData.lastIrrigationTime || '--:--';
-        const dateStatus = (dateData.firstIrrigationTime || dateData.lastIrrigationTime) ? '✓' : '✗';
+        const dateStatus = (dateData.firstIrrigationTime || dateData.lastIrrigationTime) ? '?' : '?';
         console.log(`        ${dateStatus} ${dateData.date}: First ${first} | Last ${last}`);
       });
       
@@ -2925,20 +3079,20 @@ async function main() {
       }
     });
     
-    console.log('\n📋 What Was Accomplished:');
-    console.log('   1. ✅ Navigated to report page');
-    console.log(`   2. ✅ Selected "${CONFIG.targetName}" manager`);
-    console.log(`   3. ✅ Processed ${allFarmData.length} farms`);
-    console.log(`   4. ✅ Checked ${summaryData.dateRange.totalDays} days per farm (last 5 days)`);
-    console.log(`   5. ✅ Total dates processed: ${summaryData.totalDatesProcessed}`);
-    console.log(`   6. ✅ Dates with data: ${summaryData.totalDatesWithData}`);
-    console.log('   7. ✅ Skipped dates with pre-filled tables (efficient!)');
-    console.log('   8. ✅ Used HSSP algorithm for irrigation point detection');
-    console.log('   9. ✅ Extracted data and saved to JSON');
-    console.log('   10. ✅ Captured screenshots of the process\n');
+    console.log('\n?? What Was Accomplished:');
+    console.log('   1. ? Navigated to report page');
+    console.log(`   2. ? Selected "${CONFIG.targetName}" manager`);
+    console.log(`   3. ? Processed ${allFarmData.length} farms`);
+    console.log(`   4. ? Checked ${summaryData.dateRange.totalDays} days per farm (last 5 days)`);
+    console.log(`   5. ? Total dates processed: ${summaryData.totalDatesProcessed}`);
+    console.log(`   6. ? Dates with data: ${summaryData.totalDatesWithData}`);
+    console.log('   7. ? Skipped dates with pre-filled tables (efficient!)');
+    console.log('   8. ? Used HSSP algorithm for irrigation point detection');
+    console.log('   9. ? Extracted data and saved to JSON');
+    console.log('   10. ? Captured screenshots of the process\n');
     
-    // 📊 Save Run Statistics to History
-    console.log('📊 Saving run statistics to history...');
+    // ?? Save Run Statistics to History
+    console.log('?? Saving run statistics to history...');
     runStats.endTime = Date.now();
     runStats.duration = Math.round((runStats.endTime - runStats.startTime) / 1000); // seconds
     runStats.successRate = runStats.datesProcessed > 0 
@@ -2954,7 +3108,7 @@ async function main() {
         historyData = JSON.parse(fileContent);
       }
     } catch (err) {
-      console.log(`   ⚠️  Could not read existing history: ${err.message}`);
+      console.log(`   ??  Could not read existing history: ${err.message}`);
       historyData = [];
     }
     
@@ -2962,7 +3116,7 @@ async function main() {
     
     try {
       fs.writeFileSync(historyFile, JSON.stringify(historyData, null, 2));
-      console.log(`✅ Run statistics saved to: ${historyFile}`);
+      console.log(`? Run statistics saved to: ${historyFile}`);
       console.log(`   → Farms: ${runStats.farmsCompleted}/${runStats.totalFarmsTargeted}`);
       console.log(`   → Charts Clicked: ${runStats.chartsClicked}`);
       console.log(`   → Success Rate: ${runStats.successRate}%`);
@@ -2972,19 +3126,19 @@ async function main() {
         dashboard.log(`Run stats: ${runStats.farmsCompleted} farms, ${runStats.chartsClicked} clicks, ${runStats.successRate}% success`, 'success');
       }
     } catch (err) {
-      console.log(`   ⚠️  Could not save history: ${err.message}`);
+      console.log(`   ??  Could not save history: ${err.message}`);
     }
     
   } catch (error) {
-    console.error('❌ Error during automation:', error);
+    console.error('? Error during automation:', error);
     console.error('   Stack trace:', error.stack);
     
     if (dashboard) {
-      dashboard.updateStatus('❌ Error occurred', 'error');
+      dashboard.updateStatus('? Error occurred', 'error');
       dashboard.log(`Error: ${error.message}`, 'error');
     }
     
-    // 🚨 SAVE CRASH REPORT for AI analysis
+    // ?? SAVE CRASH REPORT for AI analysis
     try {
       const errorName = error.message.includes('Login') ? 'LoginFailed' : 
                         error.message.includes('timeout') ? 'Timeout' :
@@ -2994,21 +3148,27 @@ async function main() {
         dashboard.log('Crash report saved to crash-reports/ folder', 'info');
       }
     } catch (crashErr) {
-      console.log(`   ⚠️ Could not save crash report: ${crashErr.message}`);
+      console.log(`   ?? Could not save crash report: ${crashErr.message}`);
     }
     
     // Also take simple error screenshot (backup)
     try {
       const errorScreenshot = path.join(CONFIG.screenshotDir, `error-${Date.now()}.png`);
       await takeScreenshot(page, errorScreenshot);
-      console.log(`📸 Error screenshot saved: ${errorScreenshot}`);
+      console.log(`?? Error screenshot saved: ${errorScreenshot}`);
     } catch (screenshotError) {
       console.log('   Could not save error screenshot');
     }
     
   } finally {
+    // Clean up F9 polling interval
+    if (f9PollInterval) {
+      clearInterval(f9PollInterval);
+      console.log('  🔴 F9 dashboard polling stopped');
+    }
+    
     // Keep browser open for inspection
-    console.log('\n🔚 Automation complete. Browser will stay open for inspection...');
+    console.log('\n🎯 Automation complete. Browser will stay open for inspection...');
     console.log('   → Check the browser DevTools Console tab to see webpage logs');
     console.log('   → Close the browser manually when done');
     console.log('   → Dashboard will remain accessible');
@@ -3030,7 +3190,7 @@ main().catch(error => {
   console.error('Fatal error:', error);
   if (globalDashboard) {
     globalDashboard.log(`Fatal error: ${error.message}`, 'error');
-    globalDashboard.updateStatus('❌ Fatal Error', 'error');
+    globalDashboard.updateStatus('? Fatal Error', 'error');
   }
   process.exit(1);
 });

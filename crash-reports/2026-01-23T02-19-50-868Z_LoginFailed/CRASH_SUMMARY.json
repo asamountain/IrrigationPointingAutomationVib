@@ -1,0 +1,12 @@
+{
+  "errorName": "LoginFailed",
+  "timestamp": "2026-01-23T02:19:50.870Z",
+  "url": "https://admin.iofarm.com/",
+  "files": [
+    "state.png",
+    "dom.html",
+    "console.txt",
+    "network_last_failed.json",
+    "dashboard_logs.txt"
+  ]
+}

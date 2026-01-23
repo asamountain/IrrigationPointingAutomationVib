@@ -1,0 +1,17 @@
+=== BROWSER CONSOLE LOGS (Last 50) ===
+
+[2026-01-23T03:57:32.458Z] [LOG] No token found, staying on login page
+
+=== ERROR DETAILS ===
+Error Name: ReportSendingError
+Error Message: url.includes is not a function
+Stack Trace:
+TypeError: url.includes is not a function
+    at Promise.race.page.waitForURL.timeout (file:///C:/Users/iocrops%20admin/Coding/IrrigationReportAutomation/irrigation-playwright.js:282:33)
+    at urlMatches (C:\Users\iocrops admin\Coding\IrrigationReportAutomation\node_modules\playwright-core\lib\utils\isomorphic\urlMatch.js:108:10)
+    at Frame.waitForURL (C:\Users\iocrops admin\Coding\IrrigationReportAutomation\node_modules\playwright-core\lib\client\frame.js:162:40)
+    at Page.waitForURL (C:\Users\iocrops admin\Coding\IrrigationReportAutomation\node_modules\playwright-core\lib\client\page.js:322:34)
+    at performRobustLogin (file:///C:/Users/iocrops%20admin/Coding/IrrigationReportAutomation/irrigation-playwright.js:282:10)
+    at async performLogin (file:///C:/Users/iocrops%20admin/Coding/IrrigationReportAutomation/irrigation-playwright.js:469:7)
+    at async runReportSending (file:///C:/Users/iocrops%20admin/Coding/IrrigationReportAutomation/irrigation-playwright.js:460:9)
+    at async main (file:///C:/Users/iocrops%20admin/Coding/IrrigationReportAutomation/irrigation-playwright.js:885:5)

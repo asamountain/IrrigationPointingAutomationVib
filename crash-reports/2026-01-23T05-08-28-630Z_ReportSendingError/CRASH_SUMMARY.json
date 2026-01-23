@@ -1,0 +1,11 @@
+{
+  "errorName": "ReportSendingError",
+  "timestamp": "2026-01-23T05:08:28.631Z",
+  "url": "https://admin.iofarm.com/",
+  "files": [
+    "state.png",
+    "dom.html",
+    "console.txt",
+    "network_last_failed.json"
+  ]
+}

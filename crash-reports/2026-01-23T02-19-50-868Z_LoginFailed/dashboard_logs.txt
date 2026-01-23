@@ -1,0 +1,7 @@
+=== DASHBOARD SERVER LOGS ===
+
+[2026-01-23T02:19:46.056Z] [SUCCESS] Automation starting with user configuration...
+[2026-01-23T02:19:46.057Z] [SUCCESS] Report sending mode enabled
+[2026-01-23T02:19:50.868Z] [ERROR] Fatal error: Login form not found after reload. Check error-login-state.png screenshot.
+
+=== END DASHBOARD LOGS ===
