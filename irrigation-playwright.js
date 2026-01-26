@@ -417,7 +417,9 @@ async function showClickOverlay(page, points) {
   console.log('     → Press ENTER in browser to confirm');
   console.log('     → Press ESC in browser to skip\n');
   
-  return true; // For now, auto-confirm. Interactive version would wait for keypress.
+  // Wait for user to press Enter or Escape
+  const confirmed = await waitForUserConfirmation(page);
+  return confirmed;
 }
 
 /**
@@ -497,6 +499,319 @@ async function waitForUserConfirmation(page, timeout = 60000) {
       }
     });
   });
+}
+
+/**
+ * Calculate screen coordinates for chart points using Highcharts API
+ * @param {Page} page - Playwright page
+ * @param {number} firstIndex - Index of first irrigation point
+ * @param {number} lastIndex - Index of last irrigation point
+ * @returns {Promise<{first: {screenX, screenY, x, y, time}, last: {screenX, screenY, x, y, time}}|null>}
+ */
+async function calculateScreenCoordinates(page, firstIndex, lastIndex) {
+  try {
+    console.log(`  🔍 calculateScreenCoordinates called with firstIndex=${firstIndex}, lastIndex=${lastIndex}`);
+    
+    const coords = await page.evaluate(({ firstIdx, lastIdx }) => {
+      console.log(`[BROWSER] calculateScreenCoordinates: firstIdx=${firstIdx}, lastIdx=${lastIdx}`);
+      
+      // Access Highcharts global
+      if (!window.Highcharts || !window.Highcharts.charts) {
+        console.error('[BROWSER] Highcharts not found!');
+        return { error: 'Highcharts not available' };
+      }
+      
+      const chart = window.Highcharts.charts.find(c => c !== undefined);
+      if (!chart || !chart.series || !chart.series[0]) {
+        console.error('[BROWSER] Chart or series not found!');
+        return { error: 'Chart series not found' };
+      }
+      
+      const dataPoints = chart.series[0].data;
+      if (!dataPoints || dataPoints.length === 0) {
+        console.error('[BROWSER] No data points!');
+        return { error: 'No data points in chart' };
+      }
+      
+      console.log(`[BROWSER] Chart has ${dataPoints.length} data points`);
+      
+      // Get chart container for absolute positioning
+      const chartContainer = document.querySelector('.highcharts-container');
+      if (!chartContainer) {
+        console.error('[BROWSER] Chart container not found!');
+        return { error: 'Chart container not found' };
+      }
+      
+      const containerRect = chartContainer.getBoundingClientRect();
+      console.log(`[BROWSER] Container rect: left=${containerRect.left}, top=${containerRect.top}`);
+      
+      const result = { first: null, last: null, debug: {} };
+      
+      // Get first point coordinates
+      if (firstIdx >= 0 && firstIdx < dataPoints.length) {
+        const firstPoint = dataPoints[firstIdx];
+        if (firstPoint && firstPoint.plotX !== undefined && firstPoint.plotY !== undefined) {
+          // Convert to SCREEN coordinates (add container position)
+          result.first = {
+            screenX: containerRect.left + firstPoint.plotX + chart.plotLeft,
+            screenY: containerRect.top + firstPoint.plotY + chart.plotTop,
+            plotX: firstPoint.plotX,
+            plotY: firstPoint.plotY,
+            x: firstPoint.x,
+            y: firstPoint.y,
+            time: firstPoint.category || new Date(firstPoint.x).toTimeString().slice(0, 5)
+          };
+          console.log(`[BROWSER] First point: screenX=${result.first.screenX}, screenY=${result.first.screenY}`);
+        } else {
+          result.debug.firstError = 'plotX/plotY undefined';
+        }
+      } else {
+        result.debug.firstError = `Index ${firstIdx} out of range (0-${dataPoints.length - 1})`;
+      }
+      
+      // Get last point coordinates
+      if (lastIdx >= 0 && lastIdx < dataPoints.length) {
+        const lastPoint = dataPoints[lastIdx];
+        if (lastPoint && lastPoint.plotX !== undefined && lastPoint.plotY !== undefined) {
+          // Convert to SCREEN coordinates (add container position)
+          result.last = {
+            screenX: containerRect.left + lastPoint.plotX + chart.plotLeft,
+            screenY: containerRect.top + lastPoint.plotY + chart.plotTop,
+            plotX: lastPoint.plotX,
+            plotY: lastPoint.plotY,
+            x: lastPoint.x,
+            y: lastPoint.y,
+            time: lastPoint.category || new Date(lastPoint.x).toTimeString().slice(0, 5)
+          };
+          console.log(`[BROWSER] Last point: screenX=${result.last.screenX}, screenY=${result.last.screenY}`);
+        } else {
+          result.debug.lastError = 'plotX/plotY undefined';
+        }
+      } else {
+        result.debug.lastError = `Index ${lastIdx} out of range (0-${dataPoints.length - 1})`;
+      }
+      
+      return result;
+    }, { firstIdx: firstIndex, lastIdx: lastIndex });
+    
+    if (coords && coords.error) {
+      console.log(`  ⚠️ Browser returned error: ${coords.error}`);
+      return null;
+    }
+    
+    if (coords && coords.debug) {
+      if (coords.debug.firstError) console.log(`  ⚠️ First point error: ${coords.debug.firstError}`);
+      if (coords.debug.lastError) console.log(`  ⚠️ Last point error: ${coords.debug.lastError}`);
+    }
+    
+    return coords;
+  } catch (error) {
+    console.log(`  ❌ calculateScreenCoordinates EXCEPTION: ${error.message}`);
+    console.log(`     Stack: ${error.stack}`);
+    return null;
+  }
+}
+
+/**
+ * Check for empty cells in the report table (except rightmost column)
+ * @param {Page} page - Playwright page
+ * @returns {Promise<{hasEmptyCells: boolean, emptyCells: Array, totalChecked: number}>}
+ */
+async function checkForEmptyCells(page) {
+  return await page.evaluate(() => {
+    const tables = Array.from(document.querySelectorAll('table'));
+    if (tables.length === 0) {
+      return { hasEmptyCells: false, emptyCells: [], totalChecked: 0, error: 'No table found' };
+    }
+    
+    // Use the last table (the data table)
+    const table = tables[tables.length - 1];
+    const rows = Array.from(table.querySelectorAll('tbody tr'));
+    
+    if (rows.length === 0) {
+      return { hasEmptyCells: false, emptyCells: [], totalChecked: 0, error: 'No rows in table' };
+    }
+    
+    const emptyCells = [];
+    let totalChecked = 0;
+    
+    rows.forEach((row, rowIdx) => {
+      const cells = Array.from(row.querySelectorAll('td'));
+      if (cells.length < 2) return;
+      
+      const rowLabel = cells[0].textContent.trim();
+      
+      // Check all cells EXCEPT the first (label) and last (rightmost/today's date)
+      // cells[0] = row label, cells[1..n-2] = date columns to check, cells[n-1] = rightmost (skip)
+      for (let colIdx = 1; colIdx < cells.length - 1; colIdx++) {
+        const cellValue = cells[colIdx].textContent.trim();
+        totalChecked++;
+        
+        // Check if cell is empty (contains "-", "—", or is blank)
+        if (cellValue === '-' || cellValue === '—' || cellValue === '') {
+          emptyCells.push({
+            row: rowIdx,
+            col: colIdx,
+            rowLabel: rowLabel,
+            value: cellValue || '(empty)'
+          });
+        }
+      }
+    });
+    
+    console.log(`[BROWSER] Checked ${totalChecked} cells, found ${emptyCells.length} empty`);
+    
+    return {
+      hasEmptyCells: emptyCells.length > 0,
+      emptyCells: emptyCells,
+      totalChecked: totalChecked
+    };
+  });
+}
+
+/**
+ * Click the "표 새로고침" (Table Refresh) button and wait for table to reload
+ * @param {Page} page - Playwright page
+ * @returns {Promise<boolean>} - true if refresh was successful
+ */
+async function clickTableRefresh(page) {
+  console.log('  🔄 Clicking "표 새로고침" button...');
+  
+  const clicked = await page.evaluate(() => {
+    const buttons = Array.from(document.querySelectorAll('button'));
+    const refreshButton = buttons.find(btn => 
+      btn.textContent.includes('표 새로고침') || 
+      btn.textContent.includes('표새로고침')
+    );
+    
+    if (refreshButton) {
+      console.log('[BROWSER] Found "표 새로고침" button, clicking...');
+      refreshButton.click();
+      return true;
+    }
+    
+    console.error('[BROWSER] "표 새로고침" button not found');
+    return false;
+  });
+  
+  if (clicked) {
+    console.log('  ✅ Refresh button clicked, waiting for table to reload...');
+    
+    // Wait for network to settle (table data to load)
+    try {
+      await page.waitForLoadState('networkidle', { timeout: 10000 });
+      console.log('  ✅ Table refresh complete');
+      
+      // Small additional wait for UI to update
+      await page.waitForTimeout(500);
+      return true;
+    } catch (e) {
+      console.log(`  ⚠️ Network wait timeout: ${e.message}`);
+      // Still return true since button was clicked
+      await page.waitForTimeout(1000);
+      return true;
+    }
+  } else {
+    console.log('  ❌ Could not find "표 새로고침" button');
+    return false;
+  }
+}
+
+/**
+ * Attempt to fill empty cells by refreshing the table
+ * @param {Page} page - Playwright page
+ * @param {number} maxRetries - Maximum number of refresh attempts
+ * @returns {Promise<{success: boolean, attempts: number, remainingEmpty: number}>}
+ */
+async function attemptTableRefresh(page, maxRetries = 3) {
+  let attempts = 0;
+  
+  while (attempts < maxRetries) {
+    // Check for empty cells
+    const emptyCheck = await checkForEmptyCells(page);
+    
+    if (!emptyCheck.hasEmptyCells) {
+      console.log(`  ✅ All cells have data (checked ${emptyCheck.totalChecked} cells)`);
+      return { success: true, attempts: attempts, remainingEmpty: 0 };
+    }
+    
+    console.log(`  ⚠️ Found ${emptyCheck.emptyCells.length} empty cells (attempt ${attempts + 1}/${maxRetries}):`);
+    emptyCheck.emptyCells.slice(0, 5).forEach(cell => {
+      console.log(`     → Row "${cell.rowLabel}", Column ${cell.col}: "${cell.value}"`);
+    });
+    if (emptyCheck.emptyCells.length > 5) {
+      console.log(`     → ... and ${emptyCheck.emptyCells.length - 5} more`);
+    }
+    
+    // Try to refresh the table
+    const refreshed = await clickTableRefresh(page);
+    
+    if (!refreshed) {
+      console.log('  ❌ Could not refresh table, stopping retry loop');
+      return { success: false, attempts: attempts + 1, remainingEmpty: emptyCheck.emptyCells.length };
+    }
+    
+    attempts++;
+  }
+  
+  // Final check after all retries
+  const finalCheck = await checkForEmptyCells(page);
+  
+  if (!finalCheck.hasEmptyCells) {
+    console.log(`  ✅ All cells filled after ${attempts} refresh(es)`);
+    return { success: true, attempts: attempts, remainingEmpty: 0 };
+  }
+  
+  console.log(`  ❌ Still ${finalCheck.emptyCells.length} empty cells after ${attempts} refresh attempts`);
+  return { success: false, attempts: attempts, remainingEmpty: finalCheck.emptyCells.length };
+}
+
+/**
+ * Record a report for dates where no irrigation was detected
+ * @param {Object} farmData - Farm information
+ * @param {Object} dateInfo - Date information
+ * @param {Object} analysisData - Analysis details
+ * @returns {Promise<string>} Path to saved report
+ */
+async function recordNoIrrigationReport(farmData, dateInfo, analysisData) {
+  const report = {
+    farmName: farmData.name,
+    farmId: farmData.id,
+    date: dateInfo.date,
+    dateIndex: dateInfo.index,
+    status: 'checked_no_irrigation',
+    irrigationDetected: false,
+    dataPointsAnalyzed: analysisData.pointCount,
+    yRange: {
+      min: analysisData.yRange?.min,
+      max: analysisData.yRange?.max,
+      span: analysisData.yRange?.span
+    },
+    surgeThreshold: analysisData.threshold,
+    algorithm: 'HSSP Rolling Window Valley Detection',
+    algorithmParams: {
+      surgeWindow: 5,
+      lookbackWindow: 20,
+      debounceMinutes: 30,
+      daytimeHours: '07:00-17:00'
+    },
+    timestamp: new Date().toISOString()
+  };
+  
+  // Ensure no-irrigation directory exists
+  const noIrrigationDir = path.join(CONFIG.outputDir, 'no-irrigation');
+  if (!fs.existsSync(noIrrigationDir)) {
+    fs.mkdirSync(noIrrigationDir, { recursive: true });
+  }
+  
+  // Create safe filename
+  const safeFarmName = farmData.name.replace(/[^a-zA-Z0-9가-힣]/g, '_');
+  const reportPath = path.join(noIrrigationDir, `${safeFarmName}-${dateInfo.date}.json`);
+  
+  fs.writeFileSync(reportPath, JSON.stringify(report, null, 2));
+  console.log(`     📄 No-irrigation report saved: ${reportPath}`);
+  
+  return reportPath;
 }
 
 // Helper function to take screenshots and update dashboard
@@ -1155,6 +1470,20 @@ async function runReportSending(config, dashboard, runStats) {
         await page.waitForSelector('table', { state: 'visible', timeout: 5000 });
         console.log('  ✅ Table element found\n');
         
+        // Step 4.5: CHECK FOR EMPTY CELLS AND REFRESH IF NEEDED
+        console.log('  🔍 Checking for empty cells in table (excluding rightmost column)...');
+        
+        const refreshResult = await attemptTableRefresh(page, 3);
+        
+        if (!refreshResult.success) {
+          console.log(`  ⚠️ Table still has ${refreshResult.remainingEmpty} empty cells after ${refreshResult.attempts} refresh attempts`);
+          console.log('     → Will continue with validation (may fail due to missing data)\n');
+        } else if (refreshResult.attempts > 0) {
+          console.log(`  ✅ Table data complete after ${refreshResult.attempts} refresh(es)\n`);
+        } else {
+          console.log('  ✅ Table data already complete (no refresh needed)\n');
+        }
+        
         // Step 5: PRECISE TABLE VALIDATION
         console.log('  📊 Validating table data (PRECISE MODE)...');
         
@@ -1262,6 +1591,33 @@ async function runReportSending(config, dashboard, runStats) {
             failedChecks.push(`일출 시 must have data (got: "${checks.sunrise.actual || 'NOT FOUND'}")`);
           }
           
+          // 🆕 ADDITIONAL CHECK: Verify no empty cells in non-rightmost columns
+          let emptyCellCount = 0;
+          const emptyCellDetails = [];
+          
+          rows.forEach((row, rowIdx) => {
+            const cells = Array.from(row.querySelectorAll('td'));
+            if (cells.length < 2) return;
+            
+            const rowLabel = cells[0].textContent.trim();
+            
+            // Check all cells except first (label) and last (rightmost/today)
+            for (let colIdx = 1; colIdx < cells.length - 1; colIdx++) {
+              const cellValue = cells[colIdx].textContent.trim();
+              if (cellValue === '-' || cellValue === '—' || cellValue === '') {
+                emptyCellCount++;
+                if (emptyCellDetails.length < 3) {
+                  emptyCellDetails.push(`${rowLabel}[col ${colIdx}]`);
+                }
+              }
+            }
+          });
+          
+          if (emptyCellCount > 0) {
+            const details = emptyCellDetails.join(', ') + (emptyCellCount > 3 ? ` +${emptyCellCount - 3} more` : '');
+            failedChecks.push(`${emptyCellCount} empty cells found in non-rightmost columns: ${details}`);
+          }
+          
           const allPassed = failedChecks.length === 0;
           
           return {
@@ -1270,6 +1626,7 @@ async function runReportSending(config, dashboard, runStats) {
               ? '✅ All validation checks passed' 
               : failedChecks.join(' | '),
             checks: checks,
+            emptyCellCount: emptyCellCount,
             debug: `Rows found: ${rows.length}, Data map keys: ${Object.keys(dataMap).join(', ')}`
           };
         });
@@ -1422,6 +1779,7 @@ async function main() {
     chartsClicked: 0,
     successCount: 0,
     skipCount: 0,
+    noIrrigationCount: 0,  // Dates checked but no irrigation found
     errorCount: 0,
     dateRange: { start: null, end: null },
     mode: config.mode
@@ -2235,8 +2593,14 @@ async function main() {
       if (prevClicked) {
         console.log(`     ◀️  Clicked previous (${i + 1}/5)`);
         // Wait for chart to reload after date change
-        await page.waitForTimeout(800);
-        await waitForPageReady(page, { waitForChart: true });
+        try {
+          await page.waitForTimeout(800);
+          await waitForPageReady(page, { waitForChart: true });
+        } catch (error) {
+          console.log(`     ⚠️  Error during wait: ${error.message}`);
+          console.log(`     → Browser may have been closed. Stopping navigation.`);
+          throw error;
+        }
       } else {
         console.log(`     ⚠️  Previous button not found at step ${i + 1}`);
         break;
@@ -2502,10 +2866,13 @@ async function main() {
         
         // NETWORK INTERCEPTION APPROACH (Replaces Highcharts DOM access)
         console.log('  ⏳ Waiting for chart data from network...');
+        console.log('  🔍 DEBUG: About to call waitForChartData()...');
         try {
           // Wait for the API response to be captured
           const chartData = await waitForChartData(networkData, 10000);
-          console.log('  ✅ Chart data successfully captured from network!\n');
+          console.log('  ✅ Chart data successfully captured from network!');
+          console.log('  🔍 DEBUG: chartData keys:', chartData ? Object.keys(chartData).slice(0, 5) : 'null');
+          console.log('');
           
           // 🎨 CRITICAL FIX: Wait for Highcharts to render the visual SVG graph
           console.log('  ⏳ Waiting for chart SVG to render...');
@@ -2525,7 +2892,9 @@ async function main() {
           }
           
           // Extract normalized data points
+          console.log('  🔍 DEBUG: About to extract data points from chart data...');
           const dataPoints = extractDataPoints(chartData);
+          console.log(`  🔍 DEBUG: extractDataPoints returned ${dataPoints?.length || 0} points`);
           
           if (!dataPoints || dataPoints.length < 10) {
             console.log('  ⚠️  Insufficient data points for analysis');
@@ -2553,6 +2922,7 @@ async function main() {
           }
           
           console.log(`  📊 Analyzing ${dataPoints.length} data points for irrigation events...`);
+          console.log('  🔍 DEBUG: Starting irrigation detection algorithm...');
           
           // 🔬 ROLLING WINDOW & LOCAL MINIMUM Algorithm
           // Purpose: Catch gentle sustained rises + Find absolute valley bottom
@@ -2661,7 +3031,31 @@ async function main() {
           console.log(`  ✅ Found ${uniqueEvents.length} irrigation events`);
           
           if (uniqueEvents.length === 0) {
-            console.log('     → No irrigation detected for this date\n');
+            console.log('     → No irrigation detected for this date');
+            console.log('     → Overlay will NOT appear (nothing to review)');
+            console.log('     → Creating "no irrigation" report...\n');
+            
+            // Create report for "checked but found no irrigation"
+            await recordNoIrrigationReport(
+              { 
+                name: currentFarm.name, 
+                id: currentFarm.farmId 
+              },
+              { 
+                date: dateString,
+                index: dateIdx
+              },
+              {
+                pointCount: dataPoints.length,
+                yRange: { min: minY, max: maxY, span: yRange },
+                threshold: SURGE_THRESHOLD
+              }
+            );
+            
+            // Update statistics
+            runStats.noIrrigationCount++;
+            runStats.datesProcessed++;
+            
             // Skip to next date (only if not at T-0)
             if (dayOffset > 0) {
               console.log(`     ⏭️  Moving to next date (T-${dayOffset} → T-${dayOffset - 1})...`);
@@ -2724,10 +3118,98 @@ async function main() {
           console.log(`     → Last event at index ${lastEvent.index}`);
           console.log(`  🎯 Now attempting to click chart at these positions...\n`);
           
-          // TODO: Actually click the chart points using the indices
-          // For now, we've successfully analyzed the data!
-          // The clicking logic using Highcharts API can be kept if it works,
-          // or we can implement coordinate-based clicking
+          // ═══════════════════════════════════════════════════════════════════
+          // VISUAL CONFIRMATION MODE - Show overlay and wait for user input
+          // ═══════════════════════════════════════════════════════════════════
+          console.log('\n');
+          console.log('  ╔════════════════════════════════════════════════════════════════════╗');
+          console.log('  ║                                                                    ║');
+          console.log('  ║   👁️  VISUAL CONFIRMATION MODE - LOOK AT THE BROWSER WINDOW!      ║');
+          console.log('  ║                                                                    ║');
+          console.log('  ║   🔴 RED circle  = FIRST irrigation point (start)                 ║');
+          console.log('  ║   🔵 BLUE circle = LAST irrigation point (end)                    ║');
+          console.log('  ║                                                                    ║');
+          console.log('  ║   ➤ Press ENTER in browser to CONFIRM clicks                      ║');
+          console.log('  ║   ➤ Press ESC in browser to SKIP this date                        ║');
+          console.log('  ║                                                                    ║');
+          console.log('  ╚════════════════════════════════════════════════════════════════════╝');
+          console.log('\n');
+          
+          console.log(`  CONFIG.visualConfirmationMode = ${CONFIG.visualConfirmationMode}`);
+          
+          if (CONFIG.visualConfirmationMode) {
+            console.log('  ✅ Visual confirmation mode is ENABLED - showing overlay now...');
+            
+            // Calculate screen coordinates for the overlay
+            console.log(`  🔍 Calculating screen coords for indices ${firstEvent.index} and ${lastEvent.index}...`);
+            
+            let screenCoords = null;
+            try {
+              screenCoords = await calculateScreenCoordinates(page, firstEvent.index, lastEvent.index);
+              console.log('  📍 Screen coords result:', JSON.stringify(screenCoords, null, 2));
+            } catch (coordError) {
+              console.log(`  ❌ ERROR calculating coordinates: ${coordError.message}`);
+            }
+            
+            if (screenCoords && screenCoords.first && screenCoords.last) {
+              console.log('  ✅ Screen coordinates calculated successfully!');
+              
+              // Prepare overlay data with screen positions
+              const overlayData = {
+                first: {
+                  ...screenCoords.first,
+                  time: firstEvent.time || 'N/A'
+                },
+                last: {
+                  ...screenCoords.last,
+                  time: lastEvent.time || 'N/A'
+                }
+              };
+              
+              console.log('  👁️  SHOWING OVERLAY NOW - Check the browser window!');
+              console.log(`     → FIRST point: ${overlayData.first.time} at (${Math.round(overlayData.first.screenX)}, ${Math.round(overlayData.first.screenY)})`);
+              console.log(`     → LAST point: ${overlayData.last.time} at (${Math.round(overlayData.last.screenX)}, ${Math.round(overlayData.last.screenY)})`);
+              
+              // Show overlay and wait for user confirmation
+              let userConfirmed = false;
+              try {
+                userConfirmed = await showClickOverlay(page, overlayData);
+                console.log(`  🔍 User confirmation result: ${userConfirmed ? 'CONFIRMED' : 'SKIPPED'}`);
+              } catch (overlayError) {
+                console.log(`  ❌ ERROR showing overlay: ${overlayError.message}`);
+                console.log('     → Proceeding without visual confirmation');
+              }
+              
+              if (!userConfirmed) {
+                console.log('  ⏭️  User skipped this date, moving to next...\n');
+                
+                // Skip to next date (only if not at T-0)
+                if (dayOffset > 0) {
+                  const nextClicked = await page.evaluate(() => {
+                    const nextButton = document.querySelector('button[aria-label="다음 기간"]');
+                    if (nextButton) {
+                      nextButton.click();
+                      return true;
+                    }
+                    return false;
+                  });
+                  
+                  if (nextClicked) {
+                    await page.waitForTimeout(300);
+                  }
+                }
+                continue; // Skip to next iteration
+              }
+              
+              console.log('  ✅ User confirmed, proceeding with clicks...\n');
+            } else {
+              console.log('  ⚠️ Could not calculate screen coordinates for overlay');
+              console.log('     → screenCoords:', JSON.stringify(screenCoords));
+              console.log('     → Proceeding without visual confirmation (will auto-click)\n');
+            }
+          } else {
+            console.log('  ⏭️  Visual confirmation mode is DISABLED, auto-clicking...\n');
+          }
           
         } catch (timeoutError) {
           console.log('  ⚠️  Network data capture timed out after 10 seconds');
@@ -3934,7 +4416,14 @@ async function main() {
       console.log(`   → Farms: ${runStats.farmsCompleted}/${runStats.totalFarmsTargeted}`);
       console.log(`   → Charts Clicked: ${runStats.chartsClicked}`);
       console.log(`   → Success Rate: ${runStats.successRate}%`);
-      console.log(`   → Duration: ${runStats.duration}s\n`);
+      console.log(`   → Duration: ${runStats.duration}s`);
+      console.log(``);
+      console.log(`   📊 Processing Results:`);
+      console.log(`      ✅ Irrigation detected: ${runStats.successCount} dates`);
+      console.log(`      ⚠️  No irrigation found: ${runStats.noIrrigationCount} dates`);
+      console.log(`      ⏭️  Skipped/Already sent: ${runStats.skipCount} dates`);
+      console.log(`      ❌ Errors: ${runStats.errorCount} dates`);
+      console.log(`      📁 Total dates checked: ${runStats.datesProcessed} dates\n`);
       
       if (dashboard) {
         dashboard.log(`Run stats: ${runStats.farmsCompleted} farms, ${runStats.chartsClicked} clicks, ${runStats.successRate}% success`, 'success');

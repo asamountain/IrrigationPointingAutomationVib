@@ -1,33 +1,33 @@
 {
-  "savedAt": "2026-01-26T02:38:54.351Z",
-  "farmIndex": 4,
-  "farmName": "하랑0103",
+  "savedAt": "2026-01-26T09:07:51.608Z",
+  "farmIndex": 1,
+  "farmName": "지준구0102",
   "dateIndex": 5,
   "dateString": "2026-01-26",
   "totalFarms": 10,
   "totalDates": 6,
   "lastClickedPoints": [
     {
-      "type": "FIRST",
-      "screenX": 537,
-      "screenY": 408,
-      "svgX": 115,
-      "svgY": 255,
-      "date": "2026-01-26",
-      "timestamp": "2026-01-26T02:38:53.064Z"
+      "type": "LAST",
+      "screenX": 735,
+      "screenY": 457,
+      "svgX": 313,
+      "svgY": 304,
+      "date": "2026-01-21",
+      "timestamp": "2026-01-26T09:07:44.062Z"
     },
     {
       "type": "LAST",
-      "screenX": 647,
-      "screenY": 414,
-      "svgX": 225,
-      "svgY": 261,
+      "screenX": 836,
+      "screenY": 367,
+      "svgX": 414,
+      "svgY": 214,
       "date": "2026-01-26",
-      "timestamp": "2026-01-26T02:38:53.647Z"
+      "timestamp": "2026-01-26T09:07:50.909Z"
     }
   ],
   "resumeInfo": {
-    "nextFarm": 5,
+    "nextFarm": 2,
     "nextDate": 0
   },
   "manager": "승진",

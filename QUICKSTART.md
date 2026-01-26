@@ -78,11 +78,25 @@ await page.fill('#loginUsername', CONFIG.username);
 - [ ] Script runs without crashing
 - [ ] Screenshots are saved
 - [ ] You can see what page it reached
+- [ ] Visual confirmation overlay appears (if enabled)
 
 **Don't worry if login fails!** The goal tonight is just to:
 1. Run the script
 2. Get screenshots
 3. See what needs to be fixed
+
+## 👁️ Visual Confirmation Mode (NEW!)
+
+The automation now includes a **visual confirmation** feature that lets you review each irrigation detection before it's recorded:
+
+- **🔴 RED circle** = FIRST irrigation point
+- **🔵 BLUE circle** = LAST irrigation point
+- **Press ENTER** to confirm and proceed
+- **Press ESC** to skip if the detection looks wrong
+
+This helps you catch mistakes and build confidence in the automation!
+
+📖 **Learn more**: See [`VISUAL_CONFIRMATION_GUIDE.md`](VISUAL_CONFIRMATION_GUIDE.md) for full details.
 
 ## 🆘 Troubleshooting
 
@@ -130,3 +144,4 @@ You're building this for **future-you**, not for IoTCrops. That's what makes it 
 **Ready?** Update your credentials and run `npm start`! 🚀
 
 
+npm

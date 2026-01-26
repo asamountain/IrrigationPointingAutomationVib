@@ -732,18 +732,33 @@
 
         // Connect to Server-Sent Events stream
         function connectToStream() {
-            eventSource = new EventSource('http://localhost:3456/events');
+            try {
+                console.log('Dashboard: Attempting to connect to event stream...');
+                eventSource = new EventSource('http://localhost:3456/events');
 
-            eventSource.onmessage = (event) => {
-                const data = JSON.parse(event.data);
-                updateDashboard(data);
-            };
+                eventSource.onopen = () => {
+                    console.log('Dashboard: EventSource connected successfully');
+                };
 
-            eventSource.onerror = (error) => {
-                console.error('EventSource error:', error);
-                addLog('Connection error. Retrying...', 'error');
+                eventSource.onmessage = (event) => {
+                    const data = JSON.parse(event.data);
+                    updateDashboard(data);
+                };
+
+                eventSource.onerror = (error) => {
+                    console.error('EventSource error:', error);
+                    addLog('Connection error. Retrying...', 'error');
+                    // Close the failed connection before retrying
+                    if (eventSource) {
+                        eventSource.close();
+                    }
+                    setTimeout(connectToStream, 5000);
+                };
+            } catch (error) {
+                console.error('Dashboard: Failed to create EventSource:', error);
+                addLog('Failed to connect to server. Will retry...', 'error');
                 setTimeout(connectToStream, 5000);
-            };
+            }
         }
 
         function updateDashboard(data) {
@@ -1022,10 +1037,18 @@
         }
 
         // Initialize connection when page loads
-        connectToStream();
-        loadLearningData(); // Load initial learning data
-        setInterval(loadLearningData, 10000); // Refresh every 10 seconds
-        addLog('Dashboard connected successfully', 'success');
+        console.log('Dashboard: Starting initialization...');
+        
+        // Use setTimeout to prevent blocking page load
+        setTimeout(() => {
+            console.log('Dashboard: Page loaded, connecting to server...');
+            connectToStream();
+            loadLearningData(); // Load initial learning data
+            setInterval(loadLearningData, 10000); // Refresh every 10 seconds
+            addLog('Dashboard initialized', 'success');
+        }, 100);
+        
+        console.log('Dashboard: Ready');
     </script>
 </body>
 </html>
