@@ -10,9 +10,10 @@
 import { chromium } from 'playwright';
 import fs from 'fs';
 import path from 'path';
+import { execSync } from 'child_process';
 import DashboardServer from './dashboard-server.js';
 import { setupNetworkInterception, waitForChartData, extractDataPoints } from './network-interceptor.js';
-import { launchBrowser, closeBrowser, captureError, writeStatus, stopHeartbeat } from './browserService.js';
+import { trainAlgorithm } from './trainAlgorithm.js';
 
 // Configuration (move to config.js later)
 const CONFIG = {
@@ -23,11 +24,13 @@ const CONFIG = {
   outputDir: './data',
   screenshotDir: './screenshots',
   chartLearningMode: false, // Will be set by dashboard
-  watchMode: false // Will be set by dashboard
+  watchMode: false, // Will be set by dashboard
+  trainingMode: process.env.TRAINING_MODE === 'true', // F8-controlled training mode
+  visualConfirmationMode: true // Enable visual overlay and keyboard confirmation
 };
 
 // Ensure output directories exist
-[CONFIG.outputDir, CONFIG.screenshotDir, './training', './history', './crash-reports'].forEach(dir => {
+[CONFIG.outputDir, CONFIG.screenshotDir, './training', './history'].forEach(dir => {
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
@@ -36,8 +39,465 @@ const CONFIG = {
 // Training data file
 const TRAINING_FILE = './training/training-data.json';
 
+// Checkpoint file for resume functionality
+const CHECKPOINT_FILE = './history/checkpoint.json';
+
+// Adaptive timing configuration
+const TIMING = {
+  API_RESPONSE_TIMEOUT: 15000,    // Max time to wait for chart data API
+  PAGE_LOAD_MIN_EXPECTED: 1500,   // Minimum expected page load time (ms)
+  TOO_FAST_THRESHOLD: 500,        // If faster than this, likely failed silently
+  RETRY_DELAYS: [1000, 3000, 5000, 10000], // Exponential backoff
+  MAX_RETRIES: 3
+};
+
 // Global dashboard instance (will be set in main)
 let globalDashboard = null;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CHECKPOINT SYSTEM - Date-level granularity with click tracking
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Save checkpoint after each date processing
+ * Includes: farm index, date index, farm name, click coordinates for debugging
+ */
+function saveCheckpoint(data) {
+  const checkpoint = {
+    savedAt: new Date().toISOString(),
+    farmIndex: data.farmIndex,
+    farmName: data.farmName,
+    dateIndex: data.dateIndex,
+    dateString: data.dateString,
+    totalFarms: data.totalFarms,
+    totalDates: data.totalDates,
+    // Click tracking for accuracy verification
+    lastClickedPoints: data.clickedPoints || null,
+    // Resume info
+    resumeInfo: {
+      nextFarm: data.dateIndex >= data.totalDates - 1 ? data.farmIndex + 1 : data.farmIndex,
+      nextDate: data.dateIndex >= data.totalDates - 1 ? 0 : data.dateIndex + 1
+    },
+    // Run context
+    manager: data.manager,
+    mode: data.mode
+  };
+  
+  try {
+    fs.writeFileSync(CHECKPOINT_FILE, JSON.stringify(checkpoint, null, 2));
+    console.log(`     💾 Checkpoint saved: Farm ${data.farmIndex + 1}, Date ${data.dateIndex + 1}`);
+  } catch (err) {
+    console.log(`     ⚠️ Failed to save checkpoint: ${err.message}`);
+  }
+}
+
+/**
+ * Load checkpoint for resume functionality
+ * @returns {Object|null} checkpoint data or null if not found
+ */
+function loadCheckpoint() {
+  try {
+    if (fs.existsSync(CHECKPOINT_FILE)) {
+      const data = JSON.parse(fs.readFileSync(CHECKPOINT_FILE, 'utf-8'));
+      return data;
+    }
+  } catch (err) {
+    console.log(`⚠️ Could not load checkpoint: ${err.message}`);
+  }
+  return null;
+}
+
+/**
+ * Clear checkpoint (call after successful completion)
+ */
+function clearCheckpoint() {
+  try {
+    if (fs.existsSync(CHECKPOINT_FILE)) {
+      fs.unlinkSync(CHECKPOINT_FILE);
+      console.log('✅ Checkpoint cleared (run completed successfully)');
+    }
+  } catch (err) {
+    console.log(`⚠️ Could not clear checkpoint: ${err.message}`);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ADAPTIVE PAGE READINESS - Event-based instead of fixed delays
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Navigate to URL with timing diagnostics and retry logic
+ * Detects "too fast" loads that might indicate silent failures
+ */
+async function navigateWithDiagnostics(page, url, options = {}) {
+  const { expectedMinTime = TIMING.PAGE_LOAD_MIN_EXPECTED, retries = TIMING.MAX_RETRIES } = options;
+  
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const startTime = Date.now();
+    
+    try {
+      const response = await page.goto(url, { 
+        waitUntil: 'domcontentloaded', 
+        timeout: 15000 
+      });
+      
+      const loadTime = Date.now() - startTime;
+      
+      // Check response status
+      if (!response) {
+        console.log(`     ⚠️ Navigation returned null response (attempt ${attempt + 1})`);
+        if (attempt < retries) {
+          const delay = TIMING.RETRY_DELAYS[attempt];
+          console.log(`     🔄 Retrying in ${delay}ms...`);
+          await page.waitForTimeout(delay);
+          continue;
+        }
+        throw new Error('Navigation returned null response after all retries');
+      }
+      
+      const status = response.status();
+      if (status >= 400) {
+        console.log(`     ⚠️ HTTP ${status} error (attempt ${attempt + 1})`);
+        if (attempt < retries) {
+          const delay = TIMING.RETRY_DELAYS[attempt];
+          console.log(`     🔄 Retrying in ${delay}ms...`);
+          await page.waitForTimeout(delay);
+          continue;
+        }
+        throw new Error(`HTTP ${status} error after all retries`);
+      }
+      
+      // Timing diagnostics
+      if (loadTime < TIMING.TOO_FAST_THRESHOLD) {
+        console.log(`     ⚡ Suspiciously fast load: ${loadTime}ms (expected >${expectedMinTime}ms)`);
+        // Check for error indicators on page
+        const hasError = await page.locator('text=/error|오류|실패|too fast|rate limit/i').first().isVisible({ timeout: 1000 }).catch(() => false);
+        if (hasError) {
+          console.log(`     ⚠️ Error indicator found on page (attempt ${attempt + 1})`);
+          if (attempt < retries) {
+            const delay = TIMING.RETRY_DELAYS[attempt];
+            console.log(`     🔄 Retrying in ${delay}ms...`);
+            await page.waitForTimeout(delay);
+            continue;
+          }
+        }
+      }
+      
+      // Success
+      console.log(`     ✅ Page loaded in ${loadTime}ms (HTTP ${status})`);
+      return { response, loadTime, status, attempt };
+      
+    } catch (error) {
+      console.log(`     ❌ Navigation error: ${error.message} (attempt ${attempt + 1})`);
+      if (attempt < retries) {
+        const delay = TIMING.RETRY_DELAYS[attempt];
+        console.log(`     🔄 Retrying in ${delay}ms...`);
+        await page.waitForTimeout(delay);
+      } else {
+        throw error;
+      }
+    }
+  }
+}
+
+/**
+ * Wait for page to be truly ready by checking for specific signals
+ * Instead of fixed delays, wait for actual UI/API events
+ */
+async function waitForPageReady(page, options = {}) {
+  const { 
+    waitForChart = false,
+    waitForFarmList = false,
+    timeout = 10000 
+  } = options;
+  
+  const checks = [];
+  
+  if (waitForChart) {
+    // Wait for Highcharts SVG to be visible
+    checks.push(
+      page.waitForSelector('.highcharts-root, .highcharts-container', { 
+        state: 'visible', 
+        timeout 
+      }).catch(() => null)
+    );
+  }
+  
+  if (waitForFarmList) {
+    // Wait for farm list container
+    checks.push(
+      page.waitForSelector('div.css-nd8svt a[href*="/report/point/"]', { 
+        state: 'visible', 
+        timeout 
+      }).catch(() => null)
+    );
+  }
+  
+  // Always wait for loading spinners to disappear
+  checks.push(
+    page.waitForSelector('.chakra-spinner, [class*="loading"], [class*="spinner"]', {
+      state: 'hidden',
+      timeout: 5000
+    }).catch(() => null)
+  );
+  
+  await Promise.all(checks);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// VISUAL OVERLAY MODE - Show click points and wait for user confirmation
+// See IRRIGATION_RULES.md for click point definitions
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Show visual overlay on chart with planned click positions
+ * RED circle = FIRST click (last flat point before rise)
+ * BLUE circle = LAST click (peak of curve)
+ * 
+ * @param {Page} page - Playwright page
+ * @param {Object} points - {first: {x, y, time}, last: {x, y, time}}
+ * @returns {Promise<boolean>} - true if user confirmed, false if skipped
+ */
+async function showClickOverlay(page, points) {
+  console.log('\n  👁️  VISUAL CONFIRMATION MODE');
+  console.log('  ══════════════════════════════════════════════════════════════════');
+  console.log('  🔴 RED circle = FIRST click (last flat point BEFORE rise)');
+  console.log('  🔵 BLUE circle = LAST click (PEAK of curve)');
+  console.log('  ══════════════════════════════════════════════════════════════════\n');
+  
+  // Inject overlay onto the chart
+  await page.evaluate((pts) => {
+    // Remove any existing overlay
+    const existing = document.getElementById('irrigation-click-overlay');
+    if (existing) existing.remove();
+    
+    // Find the chart container
+    const chartContainer = document.querySelector('.highcharts-container, .highcharts-root')?.parentElement;
+    if (!chartContainer) {
+      console.error('Cannot find chart container for overlay');
+      return;
+    }
+    
+    // Get chart position for absolute positioning
+    const chartRect = chartContainer.getBoundingClientRect();
+    
+    // Create overlay container
+    const overlay = document.createElement('div');
+    overlay.id = 'irrigation-click-overlay';
+    overlay.style.cssText = `
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+      z-index: 99999;
+    `;
+    
+    // Create info box
+    const infoBox = document.createElement('div');
+    infoBox.style.cssText = `
+      position: fixed;
+      top: 10px;
+      right: 10px;
+      background: rgba(0, 0, 0, 0.85);
+      color: white;
+      padding: 15px 20px;
+      border-radius: 8px;
+      font-family: 'Consolas', monospace;
+      font-size: 14px;
+      z-index: 100000;
+      pointer-events: auto;
+      min-width: 280px;
+    `;
+    
+    infoBox.innerHTML = `
+      <div style="font-size: 16px; font-weight: bold; margin-bottom: 10px; color: #4CAF50;">
+        👁️ Visual Confirmation Mode
+      </div>
+      <div style="margin-bottom: 8px;">
+        <span style="color: #FF4444; font-size: 18px;">●</span> FIRST: ${pts.first?.time || 'N/A'}
+        <span style="color: #888; font-size: 11px;">(${pts.first?.x || '-'}, ${pts.first?.y || '-'})</span>
+      </div>
+      <div style="margin-bottom: 12px;">
+        <span style="color: #4444FF; font-size: 18px;">●</span> LAST: ${pts.last?.time || 'N/A'}
+        <span style="color: #888; font-size: 11px;">(${pts.last?.x || '-'}, ${pts.last?.y || '-'})</span>
+      </div>
+      <div style="border-top: 1px solid #444; padding-top: 10px; margin-top: 5px;">
+        <div style="color: #4CAF50; font-weight: bold;">Press ENTER to confirm clicks</div>
+        <div style="color: #FF9800;">Press ESC to skip this date</div>
+      </div>
+    `;
+    
+    // Add FIRST click marker (RED)
+    if (pts.first && pts.first.screenX && pts.first.screenY) {
+      const firstMarker = document.createElement('div');
+      firstMarker.style.cssText = `
+        position: fixed;
+        left: ${pts.first.screenX - 15}px;
+        top: ${pts.first.screenY - 15}px;
+        width: 30px;
+        height: 30px;
+        border: 3px solid #FF4444;
+        border-radius: 50%;
+        background: rgba(255, 68, 68, 0.3);
+        animation: pulse 1s infinite;
+      `;
+      
+      const firstLabel = document.createElement('div');
+      firstLabel.style.cssText = `
+        position: fixed;
+        left: ${pts.first.screenX + 20}px;
+        top: ${pts.first.screenY - 10}px;
+        background: #FF4444;
+        color: white;
+        padding: 3px 8px;
+        border-radius: 4px;
+        font-size: 12px;
+        font-weight: bold;
+        font-family: sans-serif;
+      `;
+      firstLabel.textContent = `FIRST: ${pts.first.time}`;
+      
+      overlay.appendChild(firstMarker);
+      overlay.appendChild(firstLabel);
+    }
+    
+    // Add LAST click marker (BLUE)
+    if (pts.last && pts.last.screenX && pts.last.screenY) {
+      const lastMarker = document.createElement('div');
+      lastMarker.style.cssText = `
+        position: fixed;
+        left: ${pts.last.screenX - 15}px;
+        top: ${pts.last.screenY - 15}px;
+        width: 30px;
+        height: 30px;
+        border: 3px solid #4444FF;
+        border-radius: 50%;
+        background: rgba(68, 68, 255, 0.3);
+        animation: pulse 1s infinite;
+      `;
+      
+      const lastLabel = document.createElement('div');
+      lastLabel.style.cssText = `
+        position: fixed;
+        left: ${pts.last.screenX + 20}px;
+        top: ${pts.last.screenY - 10}px;
+        background: #4444FF;
+        color: white;
+        padding: 3px 8px;
+        border-radius: 4px;
+        font-size: 12px;
+        font-weight: bold;
+        font-family: sans-serif;
+      `;
+      lastLabel.textContent = `LAST: ${pts.last.time}`;
+      
+      overlay.appendChild(lastMarker);
+      overlay.appendChild(lastLabel);
+    }
+    
+    // Add CSS animation
+    const style = document.createElement('style');
+    style.textContent = `
+      @keyframes pulse {
+        0%, 100% { transform: scale(1); opacity: 1; }
+        50% { transform: scale(1.2); opacity: 0.7; }
+      }
+    `;
+    
+    overlay.appendChild(style);
+    overlay.appendChild(infoBox);
+    document.body.appendChild(overlay);
+  }, points);
+  
+  console.log('  📍 FIRST click planned at: ' + (points.first?.time || 'N/A'));
+  console.log('  📍 LAST click planned at: ' + (points.last?.time || 'N/A'));
+  console.log('\n  ⏳ Waiting for user confirmation...');
+  console.log('     → Press ENTER in browser to confirm');
+  console.log('     → Press ESC in browser to skip\n');
+  
+  return true; // For now, auto-confirm. Interactive version would wait for keypress.
+}
+
+/**
+ * Remove the visual overlay from the page
+ */
+async function removeClickOverlay(page) {
+  await page.evaluate(() => {
+    const overlay = document.getElementById('irrigation-click-overlay');
+    if (overlay) overlay.remove();
+  });
+}
+
+/**
+ * Wait for user keyboard confirmation (Enter = confirm, Escape = skip)
+ * @param {Page} page - Playwright page
+ * @param {number} timeout - Max wait time in ms (default 60 seconds)
+ * @returns {Promise<boolean>} - true if confirmed, false if skipped/timeout
+ */
+async function waitForUserConfirmation(page, timeout = 60000) {
+  return new Promise(async (resolve) => {
+    let resolved = false;
+    
+    const keyHandler = async (key) => {
+      if (resolved) return;
+      
+      if (key.name === 'Return' || key.name === 'Enter') {
+        resolved = true;
+        console.log('  ✅ User CONFIRMED - proceeding with clicks');
+        await removeClickOverlay(page);
+        resolve(true);
+      } else if (key.name === 'Escape') {
+        resolved = true;
+        console.log('  ⏭️  User SKIPPED - moving to next date');
+        await removeClickOverlay(page);
+        resolve(false);
+      }
+    };
+    
+    // Set up keyboard listener in browser
+    await page.evaluate((timeoutMs) => {
+      return new Promise((browserResolve) => {
+        window._overlayConfirmed = null;
+        
+        const handler = (e) => {
+          if (e.key === 'Enter') {
+            window._overlayConfirmed = true;
+            document.removeEventListener('keydown', handler);
+            browserResolve(true);
+          } else if (e.key === 'Escape') {
+            window._overlayConfirmed = false;
+            document.removeEventListener('keydown', handler);
+            browserResolve(false);
+          }
+        };
+        
+        document.addEventListener('keydown', handler);
+        
+        // Timeout fallback
+        setTimeout(() => {
+          document.removeEventListener('keydown', handler);
+          if (window._overlayConfirmed === null) {
+            window._overlayConfirmed = true; // Auto-confirm on timeout
+          }
+          browserResolve(window._overlayConfirmed);
+        }, timeoutMs);
+      });
+    }, timeout).then(async (result) => {
+      if (!resolved) {
+        resolved = true;
+        await removeClickOverlay(page);
+        if (result) {
+          console.log('  ✅ Confirmed (Enter pressed or auto-confirmed)');
+        } else {
+          console.log('  ⏭️  Skipped (Escape pressed)');
+        }
+        resolve(result);
+      }
+    });
+  });
+}
 
 // Helper function to take screenshots and update dashboard
 async function takeScreenshot(page, screenshotPath) {
@@ -46,519 +506,6 @@ async function takeScreenshot(page, screenshotPath) {
     globalDashboard.updateScreenshot(screenshotPath);
   }
   return screenshotPath;
-}
-
-// ???????????????????????????????????????????????????????????????????????????
-// ??? CRASH REPORT SYSTEM - Self-diagnosing for AI analysis
-// ???????????????????????????????????????????????????????????????????????????
-
-// Global storage for browser console logs (captured during page lifecycle)
-let browserConsoleLogs = [];
-let lastFailedNetworkRequests = [];
-
-// Setup console and network listeners on a page
-async function setupCrashDiagnostics(page) {
-  // Capture browser console logs
-  page.on('console', msg => {
-    const entry = `[${new Date().toISOString()}] [${msg.type().toUpperCase()}] ${msg.text()}`;
-    browserConsoleLogs.push(entry);
-    // Keep only last 100 entries
-    if (browserConsoleLogs.length > 100) {
-      browserConsoleLogs.shift();
-    }
-  });
-  
-  // Capture failed network requests
-  page.on('requestfailed', request => {
-    lastFailedNetworkRequests.push({
-      url: request.url(),
-      method: request.method(),
-      failure: request.failure()?.errorText || 'Unknown',
-      timestamp: new Date().toISOString()
-    });
-    // Keep only last 20 failed requests
-    if (lastFailedNetworkRequests.length > 20) {
-      lastFailedNetworkRequests.shift();
-    }
-  });
-  
-  // 🎮 F9 MANUAL TRIGGER: Expose Node.js function to browser
-  try {
-    await page.exposeFunction('__triggerCrashReport__', async () => {
-      console.log('\n⌨️  F9 PRESSED - Manual crash report triggered!');
-      await saveCrashReport(page, 'Manual_F9_Trigger', new Error('User pressed F9 to capture state'));
-    });
-    
-    // Inject keydown listener into page (runs on every navigation)
-    await page.addInitScript(() => {
-      document.addEventListener('keydown', (e) => {
-        if (e.key === 'F9') {
-          e.preventDefault();
-          console.log('✅ F9 Manual Trigger listener installed - Press F9 to save crash report');
-          window.__triggerCrashReport__();
-        }
-      });
-    });
-    
-    console.log('  ✅ Crash diagnostics + F9 manual trigger attached');
-  } catch (e) {
-    // May fail if called twice on same page, that's OK
-    console.log('  ⚠️  F9 trigger already installed or failed:', e.message);
-  }
-}
-
-/**
- * Save a comprehensive crash report for AI analysis
- * @param {Page} page - Playwright page object
- * @param {string} errorName - Short error name (e.g., "LoginTimeout", "FarmClickFailed")
- * @param {Error} error - The error object (optional)
- */
-async function saveCrashReport(page, errorName, error = null) {
-  const timestamp = new Date().toISOString().replace(/:/g, '-').replace(/\./g, '-');
-  const safeName = errorName.replace(/[^a-zA-Z0-9]/g, '_');
-  const crashDir = path.join('./crash-reports', `${timestamp}_${safeName}`);
-  
-  console.log(`\n?? SAVING CRASH REPORT: ${crashDir}`);
-  console.log('?'.repeat(60));
-  
-  // Ensure crash-reports directory exists
-  if (!fs.existsSync('./crash-reports')) {
-    fs.mkdirSync('./crash-reports', { recursive: true });
-  }
-  fs.mkdirSync(crashDir, { recursive: true });
-  
-  const report = {
-    errorName: errorName,
-    timestamp: new Date().toISOString(),
-    url: 'unknown',
-    files: []
-  };
-  
-  try {
-    // 1. Screenshot
-    const screenshotPath = path.join(crashDir, 'state.png');
-    await page.screenshot({ path: screenshotPath, fullPage: true });
-    report.files.push('state.png');
-    console.log('  ? [1/4] Screenshot saved: state.png');
-  } catch (e) {
-    console.log(`  ? [1/4] Screenshot failed: ${e.message}`);
-  }
-  
-  try {
-    // 2. HTML Snapshot (DOM)
-    const htmlContent = await page.content();
-    const htmlPath = path.join(crashDir, 'dom.html');
-    fs.writeFileSync(htmlPath, htmlContent);
-    report.files.push('dom.html');
-    report.url = page.url();
-    console.log('  ? [2/4] DOM snapshot saved: dom.html');
-  } catch (e) {
-    console.log(`  ? [2/4] DOM snapshot failed: ${e.message}`);
-  }
-  
-  try {
-    // 3. Console Logs (last 50 lines)
-    const consolePath = path.join(crashDir, 'console.txt');
-    const last50Logs = browserConsoleLogs.slice(-50).join('\n');
-    const consoleContent = `=== BROWSER CONSOLE LOGS (Last 50) ===\n\n${last50Logs || '(No console logs captured)'}\n\n=== ERROR DETAILS ===\nError Name: ${errorName}\nError Message: ${error?.message || 'N/A'}\nStack Trace:\n${error?.stack || 'N/A'}`;
-    fs.writeFileSync(consolePath, consoleContent);
-    report.files.push('console.txt');
-    console.log('  ? [3/4] Console logs saved: console.txt');
-  } catch (e) {
-    console.log(`  ? [3/4] Console logs failed: ${e.message}`);
-  }
-  
-  try {
-    // 4. Failed Network Requests
-    const networkPath = path.join(crashDir, 'network_last_failed.json');
-    const networkData = {
-      description: 'Recently failed network requests (if any)',
-      failedRequests: lastFailedNetworkRequests.slice(-10),
-      currentUrl: page.url()
-    };
-    fs.writeFileSync(networkPath, JSON.stringify(networkData, null, 2));
-    report.files.push('network_last_failed.json');
-    console.log('  ? [4/4] Network log saved: network_last_failed.json');
-  } catch (e) {
-    console.log(`  ? [4/4] Network log failed: ${e.message}`);
-  }
-  
-  // Save summary report
-  try {
-    const summaryPath = path.join(crashDir, 'CRASH_SUMMARY.json');
-    fs.writeFileSync(summaryPath, JSON.stringify(report, null, 2));
-    console.log('  ? Summary saved: CRASH_SUMMARY.json');
-  } catch (e) {
-    console.log(`  ? Summary failed: ${e.message}`);
-  }
-  
-  console.log('?'.repeat(60));
-  console.log(`?? CRASH REPORT SAVED TO: ${crashDir}`);
-  console.log('?? Upload this folder to Claude/ChatGPT for AI analysis\n');
-  
-  return crashDir;
-}
-
-// ???????????????????????????????????????????????????????????????????????????
-// ?? ROBUST LOGIN FUNCTION - Aggressive click with retry logic
-// ???????????????????????????????????????????????????????????????????????????
-
-/**
- * Perform a robust login with aggressive clicking and retry logic
- * @param {Page} page - Playwright page object
- * @returns {Promise<boolean>} - true if login successful
- */
-async function performRobustLogin(page) {
-  console.log('\n  ?? ROBUST LOGIN SEQUENCE:');
-  console.log('  ???????????????????????????????????????');
-  
-  // Step 1: Fill credentials
-  console.log('  [1/5] Filling credentials...');
-  
-  // Wait for email field and fill (handles various form structures)
-  const emailField = page.locator('input[name="userEmail"], input[type="email"], input[name="email"], input[name="username"], input[placeholder*="이메일"], input[placeholder*="email" i]').first();
-  await emailField.waitFor({ state: 'visible', timeout: 10000 });
-  await emailField.fill(CONFIG.username);
-  console.log(`       ? Email: ${CONFIG.username}`);
-  
-  // Fill password
-  const passwordField = page.locator('input[type="password"]').first();
-  await passwordField.waitFor({ state: 'visible', timeout: 5000 });
-  await passwordField.fill(CONFIG.password);
-  console.log('       ? Password: ********');
-  
-  // Step 2: Find and prepare login button
-  console.log('  [2/5] Locating login button...');
-  const buttonSelectors = [
-    'button[type="submit"]',
-    'button:has-text("로그인")',
-    'button:has-text("Login")',
-    'button:has-text("Sign in")',
-    'input[type="submit"]'
-  ];
-  
-  let loginButton = null;
-  for (const selector of buttonSelectors) {
-    try {
-      const btn = page.locator(selector).first();
-      if (await btn.isVisible({ timeout: 1000 })) {
-        loginButton = btn;
-        console.log(`       ? Found button: ${selector}`);
-        break;
-      }
-    } catch (e) {
-      continue;
-    }
-  }
-  
-  if (!loginButton) {
-    throw new Error('Login button not found with any known selector');
-  }
-  
-  // Step 3: Wait for button stability (enabled, not animating)
-  console.log('  [3/5] Waiting for button stability...');
-  await loginButton.waitFor({ state: 'visible', timeout: 5000 });
-  
-  // Check if button is enabled
-  const isDisabled = await loginButton.isDisabled();
-  if (isDisabled) {
-    console.log('       ?? Button is disabled, waiting...');
-    await page.waitForTimeout(1000);
-  }
-  console.log('       ? Button is stable and ready');
-  
-  // Step 4: AGGRESSIVE CLICK with force
-  console.log('  [4/5] Clicking login button (force: true)...');
-  
-  // First attempt - force click
-  await loginButton.click({ force: true, timeout: 5000 });
-  console.log('       ✅ First click sent');
-  
-  // Step 5: Validate login - Wait for URL change OR error message
-  console.log('  [5/5] Validating login result...');
-  
-  const loginResult = await Promise.race([
-    // Success: URL changes away from login (FIX: url.href is string, url is URL object)
-    page.waitForURL(url => {
-      const href = url.href;
-      return !href.includes('/login') && !href.includes('/signin') && href !== 'https://admin.iofarm.com/';
-    }, { timeout: 8000 })
-      .then(() => ({ success: true, reason: 'URL changed' })),
-    
-    // Failure: Error message appears
-    page.locator('text=/invalid|incorrect|failed|error|wrong|실패|오류|잘못/i').first()
-      .waitFor({ state: 'visible', timeout: 8000 })
-      .then(() => ({ success: false, reason: 'Error message visible' })),
-    
-    // Timeout fallback
-    new Promise(resolve => setTimeout(() => resolve({ success: false, reason: 'timeout' }), 8000))
-  ]);
-  
-  if (loginResult.success) {
-    console.log(`       ✅ Login successful! (${loginResult.reason})`);
-    console.log(`       → Redirected to: ${page.url()}`);
-    console.log('  ═══════════════════════════════════════\n');
-    return true;
-  }
-  
-  // DOUBLE-TAP STRATEGY: If first click didn't work, try again
-  if (loginResult.reason === 'timeout') {
-    console.log('       ⚠️ First click may have been ignored, trying DOUBLE-TAP...');
-    
-    // Re-click the button
-    await loginButton.click({ force: true, timeout: 3000 }).catch(() => {});
-    console.log('       🔄 Second click sent');
-    
-    // Wait again for URL change (FIX: url.href is string)
-    try {
-      await page.waitForURL(url => {
-        const href = url.href;
-        return !href.includes('/login') && !href.includes('/signin') && href !== 'https://admin.iofarm.com/';
-      }, { timeout: 10000 });
-      console.log(`       ✅ DOUBLE-TAP successful! Redirected to: ${page.url()}`);
-      console.log('  ═══════════════════════════════════════\n');
-      return true;
-    } catch (e) {
-      console.log('       ❌ DOUBLE-TAP also failed');
-    }
-  }
-  
-  // Check for specific error messages
-  const errorText = await page.locator('.error, .alert-error, [class*="error"], text=/error|invalid|failed/i')
-    .first().textContent().catch(() => null);
-  
-  if (errorText) {
-    console.log(`       ❌ Login error detected: "${errorText.trim()}"`);
-  }
-  
-  console.log('  ═══════════════════════════════════════\n');
-  throw new Error(`Login failed: ${loginResult.reason}${errorText ? ' - ' + errorText.trim() : ''}`);
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// 🎯 STRICT MANAGER SELECTION - Prevents '승진' from matching '진우'
-// ═══════════════════════════════════════════════════════════════════════════════
-
-/**
- * Select a manager by name using STRICT EXACT matching
- * Uses multiple strategies to ensure the correct manager is selected
- * Handles DOM structure: <label><span>진우</span><input type="radio" value="진우"></label>
- * @param {Page} page - Playwright page object
- * @param {string} managerName - Exact name of the manager (e.g., '승진', '진우')
- * @returns {Promise<{success: boolean, matched: string, strategy: string}>}
- */
-async function selectManager(page, managerName) {
-  console.log(`\n🎯 selectManager("${managerName}") - Using STRICT EXACT matching`);
-  console.log('═'.repeat(60));
-  
-  let clicked = false;
-  let matchedText = '';
-  let strategy = '';
-  
-  // 🔴 CRITICAL: Create regex for exact match (^name$)
-  const exactRegex = new RegExp(`^${managerName}$`);
-  
-  // Strategy 1: Use label.filter() with hasText regex (MOST RELIABLE for Korean)
-  console.log(`  [1/5] label.filter({ hasText: /^${managerName}$/ })`);
-  try {
-    const filteredLabel = page.locator('label').filter({ hasText: exactRegex });
-    const count = await filteredLabel.count();
-    console.log(`       Found ${count} matching label(s)`);
-    if (count > 0) {
-      await filteredLabel.first().click({ timeout: 3000 });
-      clicked = true;
-      matchedText = managerName;
-      strategy = 'label.filter(hasText:regex)';
-      console.log(`       ✅ SUCCESS`);
-    } else {
-      console.log(`       ⚠️ No match found`);
-    }
-  } catch (e) {
-    console.log(`       ⚠️ Failed: ${e.message}`);
-  }
-  
-  // Strategy 2: Find radio input by exact value attribute
-  if (!clicked) {
-    console.log(`  [2/5] input[type="radio"][value="${managerName}"]`);
-    try {
-      const radioByValue = page.locator(`input[type="radio"][value="${managerName}"]`);
-      const count = await radioByValue.count();
-      console.log(`       Found ${count} radio(s) with exact value`);
-      if (count > 0) {
-        await radioByValue.first().click({ timeout: 3000 });
-        clicked = true;
-        matchedText = managerName;
-        strategy = 'input[value=exact]';
-        console.log(`       ✅ SUCCESS`);
-      } else {
-        console.log(`       ⚠️ No match found`);
-      }
-    } catch (e) {
-      console.log(`       ⚠️ Failed: ${e.message}`);
-    }
-  }
-  
-  // Strategy 3: getByRole('radio') with exact name
-  if (!clicked) {
-    console.log(`  [3/5] getByRole('radio', { name: "${managerName}", exact: true })`);
-    try {
-      const radioLocator = page.getByRole('radio', { name: managerName, exact: true });
-      const count = await radioLocator.count();
-      console.log(`       Found ${count} radio(s) by role`);
-      if (count > 0) {
-        await radioLocator.first().click({ timeout: 3000 });
-        clicked = true;
-        matchedText = managerName;
-        strategy = 'getByRole(radio,exact)';
-        console.log(`       ✅ SUCCESS`);
-      } else {
-        console.log(`       ⚠️ No match found`);
-      }
-    } catch (e) {
-      console.log(`       ⚠️ Failed: ${e.message}`);
-    }
-  }
-  
-  // Strategy 4: Find span with exact text inside label
-  if (!clicked) {
-    console.log(`  [4/5] label:has(span:text-is("${managerName}"))`);
-    try {
-      const labelWithSpan = page.locator(`label:has(span:text-is("${managerName}"))`);
-      const count = await labelWithSpan.count();
-      console.log(`       Found ${count} label(s) with matching span`);
-      if (count > 0) {
-        await labelWithSpan.first().click({ timeout: 3000 });
-        clicked = true;
-        matchedText = managerName;
-        strategy = 'label:has(span:text-is)';
-        console.log(`       ✅ SUCCESS`);
-      } else {
-        console.log(`       ⚠️ No match found`);
-      }
-    } catch (e) {
-      console.log(`       ⚠️ Failed: ${e.message}`);
-    }
-  }
-  
-  // Strategy 5: JavaScript DOM with STRICT span text matching
-  if (!clicked) {
-    console.log(`  [5/5] JavaScript DOM - span.textContent === "${managerName}"`);
-    const jsResult = await page.evaluate((targetName) => {
-      // First, find all labels with spans inside
-      const labels = Array.from(document.querySelectorAll('label'));
-      const availableNames = [];
-      
-      for (const label of labels) {
-        // Check span text (most common pattern)
-        const span = label.querySelector('span');
-        if (span) {
-          const spanText = span.textContent.trim();
-          availableNames.push(spanText);
-          
-          // 🔴 STRICT: Only match if span text EXACTLY equals target
-          if (spanText === targetName) {
-            label.click();
-            return { success: true, matched: spanText, method: 'span.textContent' };
-          }
-        }
-        
-        // Check radio input value (backup)
-        const radio = label.querySelector('input[type="radio"]');
-        if (radio && radio.value === targetName) {
-          label.click();
-          return { success: true, matched: radio.value, method: 'radio.value' };
-        }
-      }
-      
-      // Also try direct radio selection
-      const radios = Array.from(document.querySelectorAll('input[type="radio"]'));
-      for (const radio of radios) {
-        if (radio.value === targetName) {
-          radio.click();
-          return { success: true, matched: radio.value, method: 'direct-radio' };
-        }
-      }
-      
-      return { success: false, available: availableNames.filter(n => n.length > 0) };
-    }, managerName);
-    
-    if (jsResult.success) {
-      clicked = true;
-      matchedText = jsResult.matched;
-      strategy = `JavaScript(${jsResult.method})`;
-      console.log(`       ✅ SUCCESS via ${jsResult.method}`);
-    } else {
-      console.log(`       ❌ No exact match found`);
-      console.log(`       💡 Available names: [${jsResult.available?.join('], [') || 'none'}]`);
-    }
-  }
-  
-  console.log('═'.repeat(60));
-  if (clicked) {
-    console.log(`🎯 RESULT: Selected "${matchedText}" via ${strategy}`);
-  } else {
-    console.log(`❌ RESULT: Could not find exact match for "${managerName}"`);
-  }
-  console.log('═'.repeat(60) + '\n');
-  
-  return { success: clicked, matched: matchedText, strategy };
-}
-
-/**
- * Check if report was already sent by reading "리포트 수" from table
- * @param {Page} page - Playwright page object
- * @returns {Promise<{alreadySent: boolean, count: number}>}
- */
-async function checkReportCount(page) {
-  console.log('\n🔍 checkReportCount() - Checking if report already sent...');
-  
-  const result = await page.evaluate(() => {
-    // Find the table with "리포트 수" header
-    const tables = Array.from(document.querySelectorAll('table'));
-    
-    for (const table of tables) {
-      const headerCells = Array.from(table.querySelectorAll('th, thead td'));
-      const bodyCells = Array.from(table.querySelectorAll('tbody td'));
-      
-      // Search in header row for "리포트 수"
-      let reportCountIndex = -1;
-      headerCells.forEach((cell, idx) => {
-        if (cell.textContent.includes('리포트 수') || cell.textContent.includes('리포트수')) {
-          reportCountIndex = idx;
-        }
-      });
-      
-      // If found in header, get corresponding value from body
-      if (reportCountIndex >= 0 && bodyCells[reportCountIndex]) {
-        const value = parseInt(bodyCells[reportCountIndex].textContent.trim(), 10) || 0;
-        return { found: true, count: value, alreadySent: value > 0 };
-      }
-      
-      // Alternative: Search in row-based layout (label in first cell, value in last)
-      const rows = Array.from(table.querySelectorAll('tbody tr, tr'));
-      for (const row of rows) {
-        const cells = Array.from(row.querySelectorAll('td'));
-        if (cells.length >= 2) {
-          const label = cells[0].textContent.trim();
-          if (label.includes('리포트 수') || label.includes('리포트수')) {
-            const value = parseInt(cells[cells.length - 1].textContent.trim(), 10) || 0;
-            return { found: true, count: value, alreadySent: value > 0 };
-          }
-        }
-      }
-    }
-    
-    return { found: false, count: 0, alreadySent: false };
-  });
-  
-  if (result.found) {
-    console.log(`   → Report Count: ${result.count}`);
-    console.log(`   → Already Sent: ${result.alreadySent ? '🔴 YES - SKIP!' : '✅ NO - Can send'}`);
-  } else {
-    console.log(`   → ⚠️ Could not find "리포트 수" in table`);
-  }
-  
-  return result;
 }
 
 // Load existing learning data for auto-correction
@@ -604,36 +551,242 @@ function loadLearningOffsets() {
   }
 }
 
+// 🔤 AUTO-FONT INSTALLATION: Ensures Korean/CJK fonts are available on Linux
+// Prevents "tofu" (broken squares) when rendering Korean text
+function ensureFontsInstalled() {
+  // Only run on Linux (including WSL)
+  if (process.platform !== 'linux') {
+    return;
+  }
+  
+  console.log('🔤 Checking for CJK font support (Linux)...');
+  
+  // Check if fonts-noto-cjk is installed
+  try {
+    execSync('dpkg -s fonts-noto-cjk', { stdio: 'pipe' });
+    console.log('  ✅ Korean/CJK fonts already installed.');
+    return;
+  } catch (checkError) {
+    // Font package not found - attempt to install
+    console.log('  ⚠️ Korean fonts missing. Attempting auto-installation...');
+    
+    const installCommand = 'sudo apt-get update && sudo apt-get install -y fonts-noto-cjk fonts-noto-core fonts-liberation';
+    
+    try {
+      console.log('  📦 Installing font packages (requires sudo)...');
+      console.log(`  → Running: ${installCommand}`);
+      
+      execSync(installCommand, { 
+        stdio: 'inherit',
+        timeout: 300000 // 5 minutes timeout
+      });
+      
+      console.log('  ✅ Font packages installed successfully.');
+      
+      // Refresh font cache
+      console.log('  🔄 Refreshing font cache...');
+      try {
+        execSync('sudo fc-cache -f -v', { stdio: 'pipe' });
+        console.log('  ✅ Font cache refreshed.');
+      } catch (cacheError) {
+        console.log('  ⚠️ Font cache refresh failed (non-critical).');
+      }
+      
+    } catch (installError) {
+      console.log('\n  ❌ ═══════════════════════════════════════════════════════════');
+      console.log('  ❌ Auto-install failed (needs sudo or other issue).');
+      console.log('  ❌ ═══════════════════════════════════════════════════════════');
+      console.log('  💡 Please run this command manually:\n');
+      console.log(`     ${installCommand}`);
+      console.log('     sudo fc-cache -f -v\n');
+      console.log('  ═══════════════════════════════════════════════════════════\n');
+      // Continue anyway - browser will launch but Korean text may be broken
+    }
+  }
+}
+
+// 🌍 UNIVERSAL BROWSER LAUNCHER: Cross-platform "Write Once, Run Anywhere"
+// Handles: Windows, macOS, Linux/WSL with automatic dependency installation
+async function launchBrowser() {
+  // ═══════════════════════════════════════════════════════════════════
+  // STEP 0: PRE-FLIGHT FONT CHECK (Linux only)
+  // ═══════════════════════════════════════════════════════════════════
+  ensureFontsInstalled();
+  
+  // ═══════════════════════════════════════════════════════════════════
+  // STEP 1: OS DETECTION
+  // ═══════════════════════════════════════════════════════════════════
+  const platform = process.platform;
+  const isLinux = platform === 'linux';
+  const isMac = platform === 'darwin';
+  const isWindows = platform === 'win32';
+  
+  // Detect WSL specifically (Linux with Microsoft in kernel version)
+  const isWSL = isLinux && (() => {
+    try {
+      const release = fs.readFileSync('/proc/version', 'utf8').toLowerCase();
+      return release.includes('microsoft') || release.includes('wsl');
+    } catch { return false; }
+  })();
+
+  const osName = isWSL ? 'WSL (Linux)' : 
+                 isLinux ? 'Linux' : 
+                 isMac ? 'macOS' : 
+                 isWindows ? 'Windows' : 'Unknown';
+  
+  console.log(`🖥️  Detected Environment: ${osName}`);
+
+  // ═══════════════════════════════════════════════════════════════════
+  // STEP 2: HEADLESS MODE DECISION
+  // ═══════════════════════════════════════════════════════════════════
+  // Default: VISIBLE (headless: false) for ALL environments
+  // Override: Set $HEADLESS=true to run in invisible/headless mode
+  const forceHeadless = process.env.HEADLESS?.toLowerCase();
+  let headless;
+  
+  if (forceHeadless === 'true') {
+    headless = true;
+    console.log('🔇 Headless Mode: ENABLED (via $HEADLESS=true)');
+  } else {
+    headless = false;
+    console.log('🖼️  Headless Mode: DISABLED (default - set $HEADLESS=true to hide browser)');
+  }
+
+  const launchArgs = [
+    '--start-maximized',
+    '--window-position=0,0',
+    '--disable-blink-features=AutomationControlled' // Reduce bot detection
+  ];
+
+  // ═══════════════════════════════════════════════════════════════════
+  // STEP 3: SMART LAUNCH STRATEGY
+  // ═══════════════════════════════════════════════════════════════════
+  
+  // --- ATTEMPT 1: Try Google Chrome (preferred) ---
+  try {
+    console.log('🚀 Attempt 1: Launching Google Chrome...');
+    const browser = await chromium.launch({
+      headless,
+      channel: 'chrome',
+      args: launchArgs
+    });
+    console.log('✅ Google Chrome launched successfully.');
+    return browser;
+  } catch (chromeError) {
+    console.log(`⚠️  Chrome launch failed: ${chromeError.message.split('\n')[0]}`);
+
+    // --- PLATFORM-SPECIFIC RECOVERY ---
+    if (isLinux || isWSL) {
+      // Linux/WSL: Auto-install Chrome via Playwright
+      console.log('📦 Linux/WSL detected - attempting to install Chrome...');
+      try {
+        execSync('npx playwright install chrome', { 
+          stdio: 'inherit',
+          timeout: 180000 // 3 minutes for slow connections
+        });
+        console.log('✅ Chrome installation completed.');
+      } catch (installErr) {
+        console.log(`⚠️  Chrome install failed: ${installErr.message}`);
+      }
+    } else if (isMac) {
+      // macOS: Provide helpful guidance
+      console.log('💡 macOS: Chrome may be missing or in a non-standard location.');
+      console.log('   → Try: brew install --cask google-chrome');
+      console.log('   → Or download from: https://www.google.com/chrome/');
+    }
+    // Windows: Chrome is usually installed; skip auto-install
+
+    // --- ATTEMPT 2: Retry Chrome after install (Linux/WSL only) ---
+    if (isLinux || isWSL) {
+      try {
+        console.log('🔄 Attempt 2: Retrying Chrome after installation...');
+        const browser = await chromium.launch({
+          headless,
+          channel: 'chrome',
+          args: launchArgs
+        });
+        console.log('✅ Google Chrome launched successfully (after install).');
+        return browser;
+      } catch (retryError) {
+        console.log(`⚠️  Chrome retry failed: ${retryError.message.split('\n')[0]}`);
+      }
+    }
+
+    // --- ATTEMPT 3: Fallback to Bundled Chromium ---
+    console.log('🔄 Attempt 3: Falling back to bundled Chromium...');
+    
+    // Ensure Chromium is installed
+    try {
+      console.log('📦 Installing Playwright Chromium...');
+      execSync('npx playwright install chromium', { 
+        stdio: 'inherit',
+        timeout: 180000
+      });
+      console.log('✅ Chromium installation completed.');
+    } catch (chromiumInstallErr) {
+      console.log(`⚠️  Chromium install warning: ${chromiumInstallErr.message}`);
+      // Continue anyway - might already be installed
+    }
+
+    try {
+      const browser = await chromium.launch({
+        headless,
+        args: launchArgs
+        // No 'channel' = use bundled Chromium
+      });
+      console.log('✅ Bundled Chromium launched successfully.');
+      return browser;
+    } catch (chromiumError) {
+      // --- FINAL FAILURE ---
+      console.error('\n❌ ═══════════════════════════════════════════════════════════');
+      console.error('❌ CRITICAL: Could not launch any browser!');
+      console.error('❌ ═══════════════════════════════════════════════════════════');
+      console.error(`   Chrome error: ${chromeError.message.split('\n')[0]}`);
+      console.error(`   Chromium error: ${chromiumError.message.split('\n')[0]}`);
+      console.error('\n💡 Manual fix options:');
+      console.error('   1. Run: npx playwright install');
+      console.error('   2. Install Chrome: https://www.google.com/chrome/');
+      if (isLinux || isWSL) {
+        console.error('   3. For WSL GUI: Install an X server (VcXsrv/WSLg)');
+      }
+      throw new Error('❌ Critical: Could not launch any browser after all attempts.');
+    }
+  }
+}
+
 // 📤 REPORT SENDING MODE: Validate table data and click "Create Report" button
 async function runReportSending(config, dashboard, runStats) {
   console.log('\n📤 ========================================');
   console.log('📤   REPORT SENDING AUTOMATION MODE');
   console.log('📤 ========================================\n');
   
-  // 🚀 Use centralized browser service for clean architecture
-  const { browser, context, page } = await launchBrowser({ maximized: true });
+  const browser = await launchBrowser();
+  
+  const context = await browser.newContext({
+    viewport: null,
+    screen: { width: 1920, height: 1080 }
+  });
   
   // ⚠️ CRITICAL: DO NOT BLOCK RESOURCES for report-sending mode
   // The table needs CSS to render the "-" characters correctly
   console.log('  ℹ️  Resource blocking: DISABLED (table needs full rendering)\n');
   
-  // 🛠️ CRASH DIAGNOSTICS: Setup listeners for self-diagnosis
-  await setupCrashDiagnostics(page);
+  const page = await context.newPage();
   
-  // 🔍 BLACK BOX DIAGNOSTICS: Listen to browser console
-  page.on('console', msg => {
-    const type = msg.type();
-    const text = msg.text();
-    if (type === 'error' || type === 'warning') {
-      console.log(`🌐 [BROWSER ${type.toUpperCase()}]: ${text}`);
-    }
+  // Maximize window via CDP
+  const session = await page.context().newCDPSession(page);
+  const { windowId } = await session.send('Browser.getWindowForTarget');
+  await session.send('Browser.setWindowBounds', {
+    windowId,
+    bounds: { windowState: 'maximized' }
   });
-  console.log('  ✅ Browser console listener active (will show errors/warnings)\n');
   
   try {
-    // ?? STEP 1: DUAL STATE DETECTION (Check Success BEFORE Login)
-    console.log('?? Step 1: Navigation & Authentication...');
-    dashboard.updateStatus('?? Authenticating...', 'running');
+    // Step 1: Navigate to Root & Check Auth State
+    console.log('🔐 Step 1: Navigation & Authentication...');
+    dashboard.updateStatus('🔐 Authenticating...', 'running');
+    
+    const timestamp = new Date().toISOString().replace(/:/g, '-').split('.')[0];
     
     console.log('  → Navigating to root URL...');
     await page.goto('https://admin.iofarm.com/', { 
@@ -641,105 +794,263 @@ async function runReportSending(config, dashboard, runStats) {
       timeout: 30000 
     });
     
-    // Wait for page to settle
-    await page.waitForTimeout(2000);
+    // ═══════════════════════════════════════════════════════════════════
+    // 🎯 SMART AUTHENTICATION DETECTION (Wait for React to render)
+    // ═══════════════════════════════════════════════════════════════════
+    console.log('  → Waiting for page to stabilize (networkidle)...');
+    await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {
+      console.log('  ⚠️  Network not fully idle after 15s, continuing...');
+    });
     
-    // ?? SMART CHECK: First check if already authenticated (Success State)
-    console.log('  → Checking authentication state...');
-    const isLoggedIn = await page.locator('div.css-nd8svt a').first().isVisible({ timeout: 3000 }).catch(() => false);
+    const currentUrl = page.url();
+    console.log(`  → Landed at: ${currentUrl}`);
     
-    if (isLoggedIn) {
-      // ? SCENARIO A: Already Authenticated - Farm list is visible
-      console.log('  ? Already authenticated (Farm list visible)');
-      console.log('  → Skipping login flow\n');
+    // Take screenshot to see what we're working with
+    const authScreenshot = path.join(CONFIG.screenshotDir, `auth-check-${timestamp}.png`);
+    await page.screenshot({ path: authScreenshot, fullPage: true });
+    console.log(`  → Auth state screenshot: ${authScreenshot}`);
+    
+    // ─────────────────────────────────────────────────────────────────────────────
+    // DUAL-PATH DETECTION: Race between Login Form vs Dashboard
+    // ─────────────────────────────────────────────────────────────────────────────
+    console.log('  🔍 Detecting page state (Login Form vs Dashboard)...');
+    
+    const DETECTION_TIMEOUT = 10000;
+    
+    // Path A: Login form selectors
+    const loginFormPromise = (async () => {
+      await Promise.race([
+        page.waitForSelector('input[name="email"]', { state: 'visible', timeout: DETECTION_TIMEOUT }),
+        page.waitForSelector('input[type="email"]', { state: 'visible', timeout: DETECTION_TIMEOUT }),
+        page.waitForSelector('input[placeholder*="이메일"]', { state: 'visible', timeout: DETECTION_TIMEOUT }),
+        page.waitForSelector('input[placeholder*="email" i]', { state: 'visible', timeout: DETECTION_TIMEOUT })
+      ]);
+      return { state: 'login_form' };
+    })();
+    
+    // Path B: Dashboard/authenticated state selectors
+    const dashboardPromise = (async () => {
+      await Promise.race([
+        page.waitForSelector('text=로그아웃', { state: 'visible', timeout: DETECTION_TIMEOUT }),
+        page.waitForSelector('text=Logout', { state: 'visible', timeout: DETECTION_TIMEOUT }),
+        page.waitForSelector('div.css-nd8svt', { state: 'visible', timeout: DETECTION_TIMEOUT }),
+        page.waitForSelector('a[href*="/report/point/"]', { state: 'visible', timeout: DETECTION_TIMEOUT })
+      ]);
+      return { state: 'dashboard' };
+    })();
+    
+    let pageState;
+    try {
+      pageState = await Promise.race([
+        loginFormPromise.catch(() => null),
+        dashboardPromise.catch(() => null)
+      ]);
+      
+      // If neither resolved quickly, wait a bit more and check manually
+      if (!pageState) {
+        await page.waitForTimeout(2000);
+        const hasLoginField = await page.locator('input[type="email"], input[name="email"], input[placeholder*="이메일"]').first().isVisible().catch(() => false);
+        const hasDashboard = await page.locator('text=로그아웃, div.css-nd8svt').first().isVisible().catch(() => false);
+        
+        if (hasLoginField) pageState = { state: 'login_form' };
+        else if (hasDashboard) pageState = { state: 'dashboard' };
+      }
+    } catch (e) {
+      pageState = null;
+    }
+    
+    console.log(`  → Detected state: ${pageState?.state || 'unknown'}`);
+    
+    // ─────────────────────────────────────────────────────────────────────────────
+    // ACTION BASED ON DETECTED STATE
+    // ─────────────────────────────────────────────────────────────────────────────
+    
+    if (pageState?.state === 'dashboard') {
+      // Already authenticated
+      console.log('  ✅ Already authenticated (Dashboard detected)');
+      
+    } else if (pageState?.state === 'login_form') {
+      // Login required
+      console.log('  → Found login form, entering credentials...');
+      
+      // Fill email (try multiple selectors)
+      const emailSelectors = [
+        'input[type="email"]',
+        'input[name="email"]',
+        'input[placeholder*="이메일"]',
+        'input[placeholder*="email" i]'
+      ];
+      
+      let emailFilled = false;
+      for (const selector of emailSelectors) {
+        try {
+          const field = page.locator(selector).first();
+          if (await field.isVisible({ timeout: 500 })) {
+            await field.fill(CONFIG.username);
+            console.log(`  → Email entered: ${CONFIG.username}`);
+            emailFilled = true;
+            break;
+          }
+        } catch (e) { continue; }
+      }
+      
+      if (!emailFilled) {
+        throw new Error('❌ Could not find email input field');
+      }
+      
+      // Fill password
+      console.log('  → Password: ********');
+      await page.fill('input[type="password"]', CONFIG.password);
+      
+      // Click login button
+      console.log('  → Clicking login button...');
+      const loginClicked = await page.locator('button[type="submit"], button:has-text("로그인"), button:has-text("Login")').first().click().then(() => true).catch(() => false);
+      if (!loginClicked) {
+        await page.keyboard.press('Enter');
+      }
+      
+      // Wait for dashboard to appear (confirms login success)
+      console.log('  → Waiting for dashboard to appear...');
+      try {
+        await Promise.race([
+          page.waitForSelector('text=로그아웃', { state: 'visible', timeout: 15000 }),
+          page.waitForSelector('div.css-nd8svt', { state: 'visible', timeout: 15000 }),
+          page.waitForSelector('a[href*="/report/point/"]', { state: 'visible', timeout: 15000 })
+        ]);
+        console.log('  ✅ Login successful! Dashboard appeared.');
+      } catch (loginError) {
+        // Check for error message
+        const hasError = await page.locator('text=/invalid|incorrect|error|실패|오류/i').first().isVisible().catch(() => false);
+        if (hasError) {
+          throw new Error('❌ Login failed: Invalid credentials');
+        }
+        throw new Error('❌ Login failed: Dashboard did not appear');
+      }
       
     } else {
-      // ?? SCENARIO B: Need to Login
-      console.log('  → Farm list not visible, checking for login form...');
-      
-      // Check for login form (multiple selectors for different form structures)
-      let loginFormVisible = await page.locator('input[name="userEmail"], input[type="email"], input[placeholder*="이메일"]').first().isVisible({ timeout: 5000 }).catch(() => false);
-      
-      if (!loginFormVisible) {
-        console.log('  ??  Login form not visible, performing safety reload...');
-        await page.reload({ waitUntil: 'domcontentloaded' });
-        await page.waitForTimeout(2000);
-        
-        // Check again for already logged in (after reload)
-        const isLoggedInAfterReload = await page.locator('div.css-nd8svt a').first().isVisible({ timeout: 3000 }).catch(() => false);
-        
-        if (isLoggedInAfterReload) {
-          console.log('  ? Already authenticated after reload (Farm list visible)');
-          console.log('  → Skipping login flow\n');
-        } else {
-          // Check for login form after reload (multiple selectors)
-          loginFormVisible = await page.locator('input[name="userEmail"], input[type="email"], input[placeholder*="이메일"]').first().isVisible({ timeout: 5000 }).catch(() => false);
-          
-          if (!loginFormVisible) {
-            // Take error screenshot to see what the browser is showing
-            const errorScreenshot = path.join(CONFIG.screenshotDir, 'error-login-state.png');
-            await page.screenshot({ path: errorScreenshot, fullPage: true });
-            console.log(`  ?? ERROR SCREENSHOT SAVED: ${errorScreenshot}`);
-            console.log('     → Check this screenshot to see what went wrong!');
-            throw new Error('Login form not found after reload. Check error-login-state.png screenshot.');
-          }
-          
-          // Proceed with login
-          await performLogin();
-        }
-      } else {
-        // Login form visible - proceed with login
-        await performLogin();
-      }
+      // Unknown state - take debug screenshot and throw
+      const debugScreenshot = path.join(CONFIG.screenshotDir, `debug-auth-state-${timestamp}.png`);
+      await page.screenshot({ path: debugScreenshot, fullPage: true });
+      console.log(`  ❌ Unknown page state. Debug screenshot: ${debugScreenshot}`);
+      throw new Error(`❌ Unknown page state - neither login form nor dashboard detected. Check: ${debugScreenshot}`);
     }
     
-    // ?? LOGIN ACTION FUNCTION - Uses robust login implementation
-    async function performLogin() {
-      console.log('  ? Login form visible, proceeding with authentication...');
-      
-      // Use the robust login function with aggressive clicking and retry
-      await performRobustLogin(page);
-      
-      // Additional verification after redirect
-      console.log('  ?? Post-login verification:');
-      
-      // Wait for network to stabilize
-      console.log('  → Waiting for network to stabilize...');
-      await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {
-        console.log('    ??  Network not idle, continuing...');
-      });
-      console.log('    ? Network idle');
-      
-      // Wait for page load
-      console.log('  → Waiting for page to be fully loaded...');
-      await page.waitForLoadState('load', { timeout: 10000 });
-      console.log('    ? Page loaded\n');
-    }
-    
-    // ?? STEP 2: Navigate to Report Page
+    // Step 2: Ensure We're at Report Page
     const finalUrl = page.url();
     if (!finalUrl.includes('/report')) {
-      console.log('  ?? Navigating to /report page...');
+      console.log('\n  📍 Not at /report page, navigating there...');
       await page.goto('https://admin.iofarm.com/report', { 
-        waitUntil: 'domcontentloaded', 
+        waitUntil: 'load', 
         timeout: 20000 
       });
-      console.log(`  ? At: ${page.url()}\n`);
+      console.log(`  ✅ Navigated to: ${page.url()}`);
     } else {
-      console.log('  ? Already at /report page\n');
+      console.log('\n  ✅ Already at /report page');
     }
     
-    // ?? STEP 3: Final Verification - Wait for Farm List
+    // ═══════════════════════════════════════════════════════════════════════════
+    // STEP 3: SELECT MANAGER (ENFORCED SWITCHING)
+    // ═══════════════════════════════════════════════════════════════════════════
+    console.log(`\n🎯 Step 3: Selecting Manager "${config.manager}" (Enforced Switching)...`);
+    dashboard.updateStatus(`🎯 Selecting manager: ${config.manager}`, 'running');
+    
+    try {
+      // Wait for manager selector to be visible
+      console.log('  → Waiting for manager selector to appear...');
+      await page.waitForSelector('.chakra-segment-group__itemText', { 
+        state: 'visible',
+        timeout: 10000 
+      });
+      
+      // Define precise locator using Chakra UI class + exact text match
+      const managerButton = page.locator('.chakra-segment-group__itemText', { 
+        hasText: new RegExp(`^${config.manager}$`) 
+      });
+      
+      // Check if the button exists
+      const buttonCount = await managerButton.count();
+      console.log(`  → Found ${buttonCount} button(s) matching "${config.manager}"`);
+      
+      if (buttonCount > 0) {
+        // Primary: Force click on the Playwright locator
+        console.log(`  → Clicking "${config.manager}" button...`);
+        try {
+          await managerButton.first().click({ force: true, timeout: 5000 });
+          console.log(`  ✅ Playwright click successful`);
+        } catch (clickError) {
+          // Fallback: Use native JavaScript click
+          console.log(`  ⚠️  Playwright click failed, using JS fallback...`);
+          const jsClicked = await page.evaluate((targetManager) => {
+            const spans = Array.from(document.querySelectorAll('.chakra-segment-group__itemText'));
+            const targetSpan = spans.find(span => span.textContent.trim() === targetManager);
+            if (targetSpan) {
+              // Click the span itself
+              targetSpan.click();
+              // Also try clicking parent label if exists
+              const parentLabel = targetSpan.closest('label');
+              if (parentLabel) parentLabel.click();
+              return true;
+            }
+            return false;
+          }, config.manager);
+          
+          if (jsClicked) {
+            console.log(`  ✅ JavaScript fallback click successful`);
+          } else {
+            console.log(`  ❌ JavaScript fallback also failed`);
+          }
+        }
+        
+        // CRITICAL: Wait for UI state change
+        console.log(`  → Waiting for UI state confirmation...`);
+        try {
+          await page.waitForFunction((targetManager) => {
+            const spans = Array.from(document.querySelectorAll('.chakra-segment-group__itemText'));
+            const targetSpan = spans.find(span => span.textContent.trim() === targetManager);
+            if (targetSpan) {
+              const parentLabel = targetSpan.closest('label');
+              if (parentLabel) {
+                return parentLabel.getAttribute('data-state') === 'checked';
+              }
+            }
+            return false;
+          }, config.manager, { timeout: 3000 });
+          console.log(`  ✅ UI confirmed: "${config.manager}" is now selected`);
+        } catch (waitError) {
+          console.log(`  ⚠️  UI state change not detected, continuing anyway...`);
+        }
+        
+        // CRITICAL: Wait for network idle (table reload with new farm IDs)
+        console.log(`  → Waiting for network to idle (table reload)...`);
+        await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {
+          console.log('  ⚠️  Network not fully idle, continuing...');
+        });
+        
+        // Safety buffer for AJAX reload (3 seconds)
+        console.log(`  → Safety buffer (3s for farm list reload)...`);
+        await page.waitForTimeout(3000);
+        console.log(`  ✅ Manager selection complete\n`);
+        
+      } else {
+        console.log(`  ⚠️  Could not find "${config.manager}" button using .chakra-segment-group__itemText`);
+        console.log(`  → Proceeding with default manager selection...\n`);
+      }
+    } catch (error) {
+      console.log(`  ⚠️  Error selecting manager: ${error.message}`);
+      console.log(`  → Proceeding anyway...\n`);
+    }
+    
+    // Step 4: Wait for Farm List Content
     console.log('  → Waiting for farm list to appear...');
     await page.waitForSelector('div.css-nd8svt a', { 
       state: 'visible',
       timeout: 30000 
     });
-    console.log('  ? Farm list loaded\n');
+    console.log('  ✅ Farm list loaded\n');
     
     // Step 5: Extract Farm List
-    console.log('?? Step 2: Extracting farm list...');
-    dashboard.updateStatus('?? Loading farms...', 'running');
+    console.log('🏭 Step 4: Extracting farm list...');
+    dashboard.updateStatus('📋 Loading farms...', 'running');
     
     const farmList = await page.evaluate(() => {
       const farms = [];
@@ -764,7 +1075,7 @@ async function runReportSending(config, dashboard, runStats) {
       return farms;
     });
     
-    console.log(`  ? Found ${farmList.length} farms\n`);
+    console.log(`  ✅ Found ${farmList.length} farms\n`);
     
     // Broadcast farm count
     if (dashboard) {
@@ -779,13 +1090,13 @@ async function runReportSending(config, dashboard, runStats) {
     // Auto-correct if needed
     if (startIndex >= totalFarms) {
       startIndex = totalFarms - 1;
-      console.warn(`??  Auto-corrected start index to Farm #${startIndex + 1}\n`);
+      console.warn(`⚠️  Auto-corrected start index to Farm #${startIndex + 1}\n`);
     }
     
     let endIndex = Math.min(startIndex + maxCount, totalFarms);
     const farmsToProcess = farmList.slice(startIndex, endIndex);
     
-    console.log(`?? Processing Plan:`);
+    console.log(`📋 Processing Plan:`);
     console.log(`   → Total farms: ${totalFarms}`);
     console.log(`   → Range: Farm #${startIndex + 1} to #${endIndex}`);
     console.log(`   → Count: ${farmsToProcess.length}\n`);
@@ -798,45 +1109,54 @@ async function runReportSending(config, dashboard, runStats) {
       const farm = farmsToProcess[farmIdx];
       const farmNumber = startIndex + farmIdx + 1;
       
-      console.log(`\n${'?'.repeat(70)}`);
-      console.log(`?? Farm ${farmNumber}/${totalFarms}: ${farm.name}`);
-      console.log(`${'?'.repeat(70)}\n`);
+      console.log(`\n${'═'.repeat(70)}`);
+      console.log(`🏭 Farm ${farmNumber}/${totalFarms}: ${farm.name}`);
+      console.log(`${'═'.repeat(70)}\n`);
       
       dashboard.updateProgress(farmIdx + 1, farmsToProcess.length, farm.name);
       
       // Check for STOP
       if (dashboard && dashboard.checkIfStopped()) {
-        console.log('\n? STOP requested. Halting...\n');
+        console.log('\n⛔ STOP requested. Halting...\n');
         break;
       }
       
-      // Construct the send-report URL with FORCED manager parameter
-      const sendReportUrl = farm.href.replace('/report/point/', '/report/send-report/');
-      
-      // 🔴 CRITICAL: Force the manager query parameter to be correct
-      const urlObj = new URL(`https://admin.iofarm.com${sendReportUrl}`);
-      urlObj.searchParams.set('manager', config.manager); // Force overwrite with correct manager
-      const fullUrl = urlObj.toString();
-      
-      console.log(`  🔗 Navigating to: ${fullUrl}`);
-      console.log(`     → Manager param forced to: "${config.manager}"`);
-      
+      // 🛡️ UNSTOPPABLE FARM LOOP: Wrap entire farm logic in try-catch
       try {
-        // ??? TIMEOUT SAFETY: Wrap in try/catch with explicit timeout
-        await page.goto(fullUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
-        console.log('  ? Page loaded');
+        // ═══════════════════════════════════════════════════════════════════════════════
+        // URL ENFORCEMENT: Construct URL with explicit manager parameter
+        // ═══════════════════════════════════════════════════════════════════════════════
+        const targetManager = config.manager; // '승진' - enforce correct manager
         
-        // ?? CRITICAL: Wait for network to be idle (table data fully loaded)
-        console.log('  ? Waiting for table data to populate...');
+        // Parse the scraped href (might have wrong manager param)
+        const rawUrl = new URL(farm.href, 'https://admin.iofarm.com');
+        
+        // Force the manager parameter to match config (overwrite any existing value)
+        rawUrl.searchParams.set('manager', targetManager);
+        
+        // Convert /point/ to /send-report/
+        const sendReportPath = rawUrl.pathname.replace('/report/point/', '/report/send-report/');
+        
+        // Construct final URL with enforced manager param
+        const fullUrl = `https://admin.iofarm.com${sendReportPath}${rawUrl.search}`;
+        
+        console.log(`  🌐 Navigating to: ${fullUrl}`);
+        console.log(`  ✅ Manager enforced: ${targetManager}\n`);
+        // 🛡️ TIMEOUT SAFETY: Wrap in try/catch with explicit timeout
+        await page.goto(fullUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+        console.log('  ✅ Page loaded');
+        
+        // 🔍 CRITICAL: Wait for network to be idle (table data fully loaded)
+        console.log('  ⏳ Waiting for table data to populate...');
         await page.waitForLoadState('networkidle', { timeout: 10000 });
-        console.log('  ? Network idle - table should be ready');
+        console.log('  ✅ Network idle - table should be ready');
         
         // Additional safety: wait for table to exist
         await page.waitForSelector('table', { state: 'visible', timeout: 5000 });
-        console.log('  ? Table element found\n');
+        console.log('  ✅ Table element found\n');
         
         // Step 5: PRECISE TABLE VALIDATION
-        console.log('  ?? Validating table data (PRECISE MODE)...');
+        console.log('  📊 Validating table data (PRECISE MODE)...');
         
         const validationResult = await page.evaluate(() => {
           // Find all tables on the page
@@ -878,16 +1198,8 @@ async function runReportSending(config, dashboard, runStats) {
             console.log(`[BROWSER] Row ${idx + 1}: "${label}" = "${lastCellValue}"`);
           });
           
-          // ?? PRECISE VALIDATION RULES (including Report Count check)
+          // 🎯 PRECISE VALIDATION RULES
           const checks = {
-            // 🔴 NEW: Check if report was already sent today
-            reportCount: {
-              key: '리포트 수',
-              mustBe: 0,
-              actual: null,
-              pass: false,
-              alreadySent: false
-            },
             nightMoisture: { 
               key: '야간 함수율 편차', 
               mustBe: '-', 
@@ -916,39 +1228,26 @@ async function runReportSending(config, dashboard, runStats) {
           
           // Find matching rows (partial match on key)
           Object.keys(dataMap).forEach(label => {
-            // 🔴 NEW: Check "리포트 수" (Report Count)
-            if (label.includes('리포트 수') || label.includes('리포트수') || label.includes('Report Count')) {
-              const countValue = parseInt(dataMap[label], 10) || 0;
-              checks.reportCount.actual = countValue;
-              checks.reportCount.pass = (countValue === 0);
-              checks.reportCount.alreadySent = (countValue > 0);
-              console.log(`[BROWSER] 🔴 Report Count: ${countValue} → ${countValue === 0 ? 'Can send' : 'ALREADY SENT - SKIP!'}`);
-            }
             if (label.includes('야간 함수율 편차') || label.includes('야간함수율편차')) {
               checks.nightMoisture.actual = dataMap[label];
-              checks.nightMoisture.pass = (dataMap[label] === '-' || dataMap[label] === '?');
+              checks.nightMoisture.pass = (dataMap[label] === '-' || dataMap[label] === '—');
             }
             if (label.includes('마지막 급액 시간') || label.includes('마지막급액시간')) {
               checks.lastIrrigationTime.actual = dataMap[label];
-              checks.lastIrrigationTime.pass = (dataMap[label] === '-' || dataMap[label] === '?');
+              checks.lastIrrigationTime.pass = (dataMap[label] === '-' || dataMap[label] === '—');
             }
             if (label.includes('첫 급액 시간') || label.includes('첫급액시간')) {
               checks.firstIrrigationTime.actual = dataMap[label];
-              checks.firstIrrigationTime.pass = (dataMap[label] !== '-' && dataMap[label] !== '?' && dataMap[label] !== '');
+              checks.firstIrrigationTime.pass = (dataMap[label] !== '-' && dataMap[label] !== '—' && dataMap[label] !== '');
             }
             if (label.includes('일출 시')) {
               checks.sunrise.actual = dataMap[label];
-              checks.sunrise.pass = (dataMap[label] !== '-' && dataMap[label] !== '?' && dataMap[label] !== '');
+              checks.sunrise.pass = (dataMap[label] !== '-' && dataMap[label] !== '—' && dataMap[label] !== '');
             }
           });
           
           // Check if all conditions are met
           const failedChecks = [];
-          
-          // 🔴 PRIORITY CHECK: If report already sent, fail immediately
-          if (checks.reportCount.alreadySent) {
-            failedChecks.push(`🔴 REPORT ALREADY SENT TODAY (Count: ${checks.reportCount.actual})`);
-          }
           
           if (!checks.nightMoisture.pass) {
             failedChecks.push(`야간 함수율 편차 must be "-" (got: "${checks.nightMoisture.actual || 'NOT FOUND'}")`);
@@ -967,8 +1266,6 @@ async function runReportSending(config, dashboard, runStats) {
           
           return {
             ready: allPassed,
-            alreadySent: checks.reportCount.alreadySent,
-            reportCount: checks.reportCount.actual,
             reason: allPassed 
               ? '✅ All validation checks passed' 
               : failedChecks.join(' | '),
@@ -978,25 +1275,12 @@ async function runReportSending(config, dashboard, runStats) {
         });
         
         console.log(`     → Ready to send: ${validationResult.ready ? '✅ YES' : '❌ NO'}`);
-        if (validationResult.alreadySent) {
-          console.log(`     → 🔴 REPORT ALREADY SENT: Count = ${validationResult.reportCount}`);
-        }
         console.log(`     → Reason: ${validationResult.reason}`);
         console.log(`     → Debug: ${validationResult.debug}\n`);
         
-        // 🔴 NEW: Skip if report already sent (separate from validation failure)
-        if (validationResult.alreadySent) {
-          console.log(`  🔴 SKIPPING: Report already sent today (Count: ${validationResult.reportCount})\n`);
-          dashboard.log(`🔴 Already sent for ${farm.name} (Count: ${validationResult.reportCount})`, 'warning');
-          reportsSkipped++;
-          runStats.skipCount++;
-          runStats.farmsCompleted++;
-          continue; // Move to next farm
-        }
-        
         if (validationResult.ready) {
           // Step 6: Click "리포트 생성" button
-          console.log('  ✅ All checks passed! Clicking "리포트 생성" button...');
+          console.log('  📤 All checks passed! Clicking "리포트 생성" button...');
           
           const buttonClicked = await page.evaluate(() => {
             const buttons = Array.from(document.querySelectorAll('button'));
@@ -1015,19 +1299,22 @@ async function runReportSending(config, dashboard, runStats) {
           });
           
           if (buttonClicked) {
-            console.log('  ? Report sent successfully!\n');
-            dashboard.log(`? Report sent for: ${farm.name}`, 'success');
+            console.log('  ✅ Report sent successfully!\n');
+            dashboard.log(`✅ Report sent for: ${farm.name}`, 'success');
+            dashboard.broadcast('report_update', { status: 'Sent', farmName: farm.name, message: 'Report created successfully' });
             reportsCreated++;
             runStats.successCount++;
             await page.waitForTimeout(1500); // Brief wait for submission
           } else {
-            console.log('  ??  "리포트 생성" button not found on page\n');
-            dashboard.log(`?? Button not found for: ${farm.name}`, 'warning');
+            console.log('  ⚠️  "리포트 생성" button not found on page\n');
+            dashboard.log(`⚠️ Button not found for: ${farm.name}`, 'warning');
+            dashboard.broadcast('report_update', { status: 'Skipped', farmName: farm.name, message: 'Button not found on page' });
             reportsSkipped++;
           }
         } else {
-          console.log('  ??  Validation failed. Skipping report creation.\n');
-          dashboard.log(`?? Skipped ${farm.name}: ${validationResult.reason}`, 'warning');
+          console.log('  ⚠️  Validation failed. Skipping report creation.\n');
+          dashboard.log(`⚠️ Skipped ${farm.name}: ${validationResult.reason}`, 'warning');
+          dashboard.broadcast('report_update', { status: 'Skipped', farmName: farm.name, message: validationResult.reason });
           reportsSkipped++;
           runStats.skipCount++;
         }
@@ -1035,11 +1322,19 @@ async function runReportSending(config, dashboard, runStats) {
         runStats.farmsCompleted++;
         
       } catch (error) {
-        // ??? TIMEOUT SAFETY: Catch and log, then continue
-        console.log(`  ? Error processing farm (timeout or page issue):`);
+        // 🛡️ UNSTOPPABLE: Catch all errors and continue to next farm
+        console.log(`  ❌ Error processing Farm ${farm.name}:`);
         console.log(`     → ${error.message}`);
-        console.log(`     → Force-continuing to next farm...\n`);
-        dashboard.log(`? Timeout/Error on ${farm.name}: ${error.message}`, 'error');
+        console.log(`     → Stack: ${error.stack?.split('\n')[0] || 'N/A'}`);
+        console.log(`     → 🔄 Continuing to next farm...\n`);
+        
+        dashboard.log(`❌ Error on ${farm.name}: ${error.message}`, 'error');
+        dashboard.broadcast('report_update', { 
+          status: 'Error', 
+          farmName: farm.name, 
+          message: error.message 
+        });
+        
         reportsSkipped++;
         runStats.errorCount++;
         
@@ -1047,61 +1342,75 @@ async function runReportSending(config, dashboard, runStats) {
         try {
           const errorScreenshot = path.join(CONFIG.screenshotDir, `error-farm-${farmNumber}-${Date.now()}.png`);
           await page.screenshot({ path: errorScreenshot, fullPage: true });
-          console.log(`     ?? Error screenshot: ${errorScreenshot}\n`);
+          console.log(`     📸 Error screenshot: ${errorScreenshot}\n`);
         } catch (ssError) {
-          console.log('     ??  Could not save error screenshot\n');
+          console.log('     ⚠️  Could not save error screenshot\n');
         }
+        
+        // CRITICAL: Force continue to next farm
+        continue;
       }
     }
     
     // Summary
-    console.log(`\n${'?'.repeat(70)}`);
-    console.log('?? REPORT SENDING SUMMARY');
-    console.log(`${'?'.repeat(70)}`);
-    console.log(`   ? Reports Created: ${reportsCreated}`);
-    console.log(`   ??  Reports Skipped: ${reportsSkipped}`);
-    console.log(`   ?? Total Processed: ${runStats.farmsCompleted}`);
-    console.log(`${'?'.repeat(70)}\n`);
+    console.log(`\n${'═'.repeat(70)}`);
+    console.log('📊 REPORT SENDING SUMMARY');
+    console.log(`${'═'.repeat(70)}`);
+    console.log(`   ✅ Reports Created: ${reportsCreated}`);
+    console.log(`   ⚠️  Reports Skipped: ${reportsSkipped}`);
+    console.log(`   📋 Total Processed: ${runStats.farmsCompleted}`);
+    console.log(`${'═'.repeat(70)}`);
     
-    dashboard.updateStatus('? Report sending complete', 'success');
+    dashboard.updateStatus('✅ Report sending complete', 'success');
     dashboard.log(`Report sending complete: ${reportsCreated} sent, ${reportsSkipped} skipped`, 'success');
     
   } catch (error) {
-    console.error('? Fatal error during report sending:', error);
+    console.error('❌ Fatal error during report sending:', error);
     console.error('   Stack trace:', error.stack);
-    dashboard.updateStatus('? Fatal error', 'error');
+    dashboard.updateStatus('❌ Fatal error', 'error');
     dashboard.log(`Fatal error: ${error.message}`, 'error');
-    
-    // ?? SAVE CRASH REPORT for AI analysis
-    try {
-      const errorName = error.message.includes('Login') ? 'LoginFailed' : 
-                        error.message.includes('timeout') ? 'Timeout' : 'ReportSendingError';
-      await saveCrashReport(page, errorName, error);
-    } catch (crashErr) {
-      console.log(`   ⚠️ Could not save crash report: ${crashErr.message}`);
-    }
   } finally {
     console.log('🔒 Closing browser...');
-    stopHeartbeat();
-    await closeBrowser(browser);
+    await browser.close();
     console.log('✅ Browser closed\n');
   }
 }
 
 async function main() {
-  console.log('?? Starting Irrigation Report Automation (Playwright)...\n');
+  console.log('🚀 Starting Irrigation Report Automation (Playwright)...\n');
   
   // Initialize and start dashboard server
   const dashboard = new DashboardServer();
   globalDashboard = dashboard; // Set global instance
   const dashboardUrl = await dashboard.start();
-  console.log(`?? Dashboard ready at: ${dashboardUrl}`);
+  console.log(`📊 Dashboard ready at: ${dashboardUrl}`);
   console.log(`   → Open this URL to configure and start automation\n`);
+  
+  // 🔄 CHECK FOR CHECKPOINT - Resume from last run
+  const checkpoint = loadCheckpoint();
+  if (checkpoint) {
+    console.log('\n═══════════════════════════════════════════════════════════════════════════');
+    console.log('📍 CHECKPOINT FOUND - Previous run was interrupted');
+    console.log('═══════════════════════════════════════════════════════════════════════════');
+    console.log(`   → Farm: #${checkpoint.farmIndex + 1} "${checkpoint.farmName}"`);
+    console.log(`   → Date: ${checkpoint.dateString} (day ${checkpoint.dateIndex + 1}/${checkpoint.totalDates})`);
+    console.log(`   → Saved at: ${checkpoint.savedAt}`);
+    console.log(`   → Manager: ${checkpoint.manager}`);
+    if (checkpoint.lastClickedPoints && checkpoint.lastClickedPoints.length > 0) {
+      console.log(`   → Last clicked points: ${checkpoint.lastClickedPoints.length} clicks tracked`);
+      checkpoint.lastClickedPoints.forEach((click, idx) => {
+        console.log(`      ${idx + 1}. ${click.type} at SVG(${click.svgX}, ${click.svgY}) on ${click.date}`);
+      });
+    }
+    console.log('');
+    console.log('   💡 To resume: Set "Start From Farm" to', checkpoint.resumeInfo.nextFarm + 1, 'in dashboard');
+    console.log('═══════════════════════════════════════════════════════════════════════════\n');
+  }
   
   // Wait for user to click "Start" in dashboard
   const config = await dashboard.waitUntilStarted();
   
-  // ?? Initialize Run Statistics Tracking
+  // 📊 Initialize Run Statistics Tracking
   const runStats = {
     timestamp: new Date().toISOString(),
     startTime: Date.now(),
@@ -1130,224 +1439,387 @@ async function main() {
   // Load learned offsets from previous training
   const learnedOffsets = loadLearningOffsets();
   if (learnedOffsets.count > 0) {
-    console.log(`?? Loaded learning data from ${learnedOffsets.count} training sessions`);
+    console.log(`🎓 Loaded learning data from ${learnedOffsets.count} training sessions`);
     console.log(`   → Applying corrections: First(${learnedOffsets.firstX.toFixed(1)}, ${learnedOffsets.firstY.toFixed(1)}), Last(${learnedOffsets.lastX.toFixed(1)}, ${learnedOffsets.lastY.toFixed(1)})\n`);
     dashboard.log(`Loaded learning data from ${learnedOffsets.count} training sessions`, 'success');
   }
   
   // Show selected configuration
-  console.log(`?? Manager: ${config.manager}`);
-  console.log(`?? Start From: ${config.startFrom === 0 ? 'All farms' : 'Farm #' + config.startFrom}`);
-  console.log(`?? Mode: ${config.mode}`);
-  console.log(`?? Max Farms: ${config.maxFarms === 999 ? 'All' : config.maxFarms}`);
+  console.log(`👤 Manager: ${config.manager}`);
+  console.log(`🏭 Start From: ${config.startFrom === 0 ? 'All farms' : 'Farm #' + config.startFrom}`);
+  console.log(`📊 Mode: ${config.mode}`);
+  console.log(`🔢 Max Farms: ${config.maxFarms === 999 ? 'All' : config.maxFarms}`);
   
   if (CONFIG.watchMode) {
-    console.log(`???  WATCH MODE: Script will observe but not interfere`);
+    console.log(`👁️  WATCH MODE: Script will observe but not interfere`);
     dashboard.log('Watch mode enabled', 'info');
   } else if (CONFIG.chartLearningMode) {
-    console.log(`?? LEARNING MODE: Will pause for corrections`);
+    console.log(`🎓 LEARNING MODE: Will pause for corrections`);
     dashboard.log('Learning mode enabled', 'info');
   } else if (config.mode === 'report-sending') {
-    console.log(`?? REPORT SENDING MODE: Will validate and send reports`);
+    console.log(`📤 REPORT SENDING MODE: Will validate and send reports`);
     dashboard.log('Report sending mode enabled', 'success');
   }
   console.log();
 
-  // ?? ROUTE: If report-sending mode, use specialized function
+  // 📤 ROUTE: If report-sending mode, use specialized function
   if (config.mode === 'report-sending') {
     await runReportSending(config, dashboard, runStats);
     return;
   }
 
-  // 🚀 Launch browser with centralized service (includes heartbeat monitoring)
+  // Launch browser with Universal Browser Launcher (cross-platform)
   dashboard.updateStatus('🚀 Launching browser...', 'running');
   dashboard.updateStep('Initializing browser', 5);
   
-  const { browser, context, page } = await launchBrowser({ maximized: true });
+  const browser = await launchBrowser();
+  dashboard.log('Browser launched successfully', 'success');
   
-  // 🛠️ CRASH DIAGNOSTICS: Setup listeners for self-diagnosis
-  await setupCrashDiagnostics(page);
+  const context = await browser.newContext({
+    viewport: null,  // Use full window size (no fixed viewport)
+    screen: { width: 1920, height: 1080 }
+  });
   
-  // � F9 DASHBOARD BRIDGE: Poll server for dashboard-triggered F9
-  let f9PollInterval = null;
-  const startF9Polling = () => {
-    f9PollInterval = setInterval(async () => {
-      try {
-        const response = await fetch('http://localhost:3456/control/check-f9');
-        const data = await response.json();
-        if (data.triggered) {
-          console.log('\n🔴 F9 triggered from Dashboard - Saving crash report...');
-          await saveCrashReport(page, 'Dashboard_F9_Trigger', new Error('F9 triggered from Dashboard'));
-          dashboard.log('✅ Crash report saved from Dashboard F9 trigger', 'success');
-        }
-      } catch (e) {
-        // Server may not be running yet, that's OK
-      }
-    }, 500);  // Check every 500ms
-  };
-  startF9Polling();
-  console.log('  ✅ Dashboard F9 bridge activated (press F9 in dashboard to trigger crash report)');
+  // Open automation page
+  const page = await context.newPage();
   
   // 🔒 AUTHENTICATION FIX: No resource blocking - allow all auth scripts to run
   console.log('🔒 Authentication mode: All resources enabled for stable login');
   dashboard.log('Browser launched successfully', 'success');
   dashboard.log(`Dashboard accessible at ${dashboardUrl}`, 'success');
-  dashboard.log('💓 Heartbeat monitoring active (check crash-reports/browser-status.json)', 'info');
-  dashboard.log('🔴 Press F9 in browser OR dashboard to save crash report', 'info');
+  
+  // Maximize the window using CDP
+  const session = await page.context().newCDPSession(page);
+  const { windowId } = await session.send('Browser.getWindowForTarget');
+  await session.send('Browser.setWindowBounds', {
+    windowId,
+    bounds: { windowState: 'maximized' }
+  });
   
   try {
-    // Step 1: Navigate to IoFarm admin report page
-    console.log('?? Step 1: Navigating to admin.iofarm.com/report/...');
-    dashboard.updateStatus('?? Navigating to report page...', 'running');
-    dashboard.updateStep('Step 1: Navigating to report page', 10);
-    dashboard.log('Navigating to admin.iofarm.com/report/', 'info');
+    // ═══════════════════════════════════════════════════════════════════════════
+    // 🚦 SEQUENTIAL NAVIGATION FLOW (Root → Auth → Report)
+    // ═══════════════════════════════════════════════════════════════════════════
     
-    await page.goto(CONFIG.url, { waitUntil: 'domcontentloaded', timeout: 15000 });
-    await page.waitForLoadState('domcontentloaded');
+    const timestamp = new Date().toISOString().replace(/:/g, '-').split('.')[0];
     
-    // ? SMART: Wait for body and ensure page is interactive
+    // ─────────────────────────────────────────────────────────────────────────────
+    // STEP 1: START AT ROOT (not /report)
+    // ─────────────────────────────────────────────────────────────────────────────
+    console.log('📍 Step 1: Navigating to ROOT (admin.iofarm.com/)...');
+    dashboard.updateStatus('🌐 Navigating to root...', 'running');
+    dashboard.updateStep('Step 1: Navigating to root', 10);
+    dashboard.log('Navigating to admin.iofarm.com/ (root)', 'info');
+    
+    // Navigate to ROOT, not /report
+    await page.goto('https://admin.iofarm.com/', { 
+      waitUntil: 'domcontentloaded', 
+      timeout: 20000 
+    });
+    
+    // Wait for page to be interactive
     console.log('  → Waiting for page to be interactive...');
     await page.waitForSelector('body', { state: 'attached', timeout: 5000 });
-    await page.waitForLoadState('load').catch(() => {}); // Allow some extra loading time
+    await page.waitForLoadState('load').catch(() => {});
     
-    // Show current URL
-    const currentUrl1 = page.url();
-    console.log(`  → Current URL: ${currentUrl1}`);
-    dashboard.log(`Current URL: ${currentUrl1}`, 'info');
+    const rootUrl = page.url();
+    console.log(`  → Landed at: ${rootUrl}`);
+    dashboard.log(`Landed at: ${rootUrl}`, 'info');
     
-    // Take screenshot to verify we're on the right page
-    const timestamp = new Date().toISOString().replace(/:/g, '-').split('.')[0];
-    const screenshotPath = path.join(CONFIG.screenshotDir, `1-homepage-${timestamp}.png`);
+    // Take initial screenshot
+    const screenshotPath = path.join(CONFIG.screenshotDir, `1-root-page-${timestamp}.png`);
     await takeScreenshot(page, screenshotPath);
-    console.log(`? Report page loaded. Screenshot saved: ${screenshotPath}\n`);
-    dashboard.log('Report page loaded successfully', 'success');
+    console.log(`  → Screenshot: ${screenshotPath}\n`);
     
-    // Step 2: Check if login is needed, if so, login
-    console.log('?? Step 2: Checking if login is required...');
-    dashboard.updateStatus('?? Checking authentication...', 'running');
+    // ─────────────────────────────────────────────────────────────────────────────
+    // STEP 2: SMART AUTHENTICATION DETECTION
+    // ─────────────────────────────────────────────────────────────────────────────
+    console.log('🔐 Step 2: Smart Authentication Detection...');
+    dashboard.updateStatus('🔐 Checking authentication...', 'running');
+    dashboard.updateStep('Step 2: Authentication check', 20);
     
+    // Wait for React app to fully render
+    console.log('  → Waiting for page to stabilize (networkidle)...');
+    await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {
+      console.log('  ⚠️  Network not fully idle after 15s, continuing...');
+    });
+    
+    // ═══════════════════════════════════════════════════════════════════
+    // DUAL-PATH DETECTION: Race between Login Form vs Dashboard
+    // ═══════════════════════════════════════════════════════════════════
+    console.log('  🔍 Detecting page state (Login Form vs Dashboard)...');
+    
+    const DETECTION_TIMEOUT = 10000;
+    
+    // Path A: Login form selectors
+    const loginFormPromise = (async () => {
+      await Promise.race([
+        page.waitForSelector('input[name="email"]', { state: 'visible', timeout: DETECTION_TIMEOUT }),
+        page.waitForSelector('input[type="email"]', { state: 'visible', timeout: DETECTION_TIMEOUT }),
+        page.waitForSelector('input[placeholder*="이메일"]', { state: 'visible', timeout: DETECTION_TIMEOUT }),
+        page.waitForSelector('input[placeholder*="email" i]', { state: 'visible', timeout: DETECTION_TIMEOUT })
+      ]);
+      return { state: 'login_form' };
+    })();
+    
+    // Path B: Dashboard/authenticated state selectors  
+    const dashboardPromise = (async () => {
+      await Promise.race([
+        page.waitForSelector('text=로그아웃', { state: 'visible', timeout: DETECTION_TIMEOUT }),
+        page.waitForSelector('text=Logout', { state: 'visible', timeout: DETECTION_TIMEOUT }),
+        page.waitForSelector('div.css-nd8svt', { state: 'visible', timeout: DETECTION_TIMEOUT }),
+        page.waitForSelector('a[href*="/report/point/"]', { state: 'visible', timeout: DETECTION_TIMEOUT })
+      ]);
+      return { state: 'dashboard' };
+    })();
+    
+    let pageState;
     try {
-      // ? SMART: Wait for page to be ready before checking for login form
-      await page.waitForLoadState('domcontentloaded');
-      console.log('  → Checking for login form...');
+      pageState = await Promise.race([
+        loginFormPromise.catch(() => null),
+        dashboardPromise.catch(() => null)
+      ]);
       
-      // Check if we're already authenticated by looking for authenticated elements
-      const alreadyAuthenticated = await page.evaluate(() => {
-        // Look for farm list container (only visible when authenticated)
-        const farmContainer = document.querySelector('[id*="tabs"][id*="content-point"]');
-        const hasAuthenticatedContent = farmContainer !== null;
-        const isOnLoginPage = window.location.href.includes('/login') || window.location.href.includes('/signin');
-        return hasAuthenticatedContent && !isOnLoginPage;
-      });
-      
-      if (alreadyAuthenticated) {
-        console.log('  ? Already authenticated! Farm list is visible.');
-        console.log(`  → Current URL: ${page.url()}\n`);
-        dashboard.log('Already authenticated', 'success');
-      } else {
-        // Check if login form exists
-        const loginFormExists = await page.locator('input[type="email"], input[type="text"], input[name="email"], input[name="username"]').first().isVisible({ timeout: 5000 }).catch(() => false);
+      // If neither resolved quickly, wait a bit more and check manually
+      if (!pageState) {
+        console.log('  → No immediate detection, checking manually...');
+        await page.waitForTimeout(2000);
+        const hasLoginField = await page.locator('input[type="email"], input[name="email"], input[placeholder*="이메일"]').first().isVisible().catch(() => false);
+        const hasDashboard = await page.locator('text=로그아웃, div.css-nd8svt').first().isVisible().catch(() => false);
         
-        if (loginFormExists) {
-          console.log('  → Login form detected, proceeding with ROBUST login...');
-          dashboard.updateStatus('?? Logging in...', 'running');
-          
-          // Use the robust login function with aggressive clicking and retry
-          await performRobustLogin(page);
-          
-          // Wait for network to stabilize after login
-          console.log('  ?? Post-login stabilization:');
-          await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {
-            console.log('     ??  Network not idle after 10s, continuing...');
-          });
-          console.log('     ? Network idle');
-          
-          // Navigate to report page if not already there
-          const currentUrl = page.url();
-          if (!currentUrl.includes('/report')) {
-            console.log('  ?? Navigating to /report page...');
-            await page.goto('https://admin.iofarm.com/report', { 
-              waitUntil: 'networkidle',
-              timeout: 20000 
-            });
-            console.log(`  ? Navigated to: ${page.url()}`);
-          }
-          
-          // ?? CRITICAL: Final verification - wait for farm list to be visible
-          console.log('  ?? Final verification: Looking for farm list...');
-          
-          try {
-            await page.waitForSelector('[id*="tabs"][id*="content-point"]', { 
-              state: 'visible', 
-              timeout: 15000 
-            });
-            console.log('     ? Farm list container is visible');
-          } catch (e) {
-            console.log(`     ? Farm list container not found: ${e.message}`);
-            const debugUrl = page.url();
-            console.log(`     → Current URL: ${debugUrl}`);
-            
-            // Take debug screenshot
-            const debugScreenshot = path.join(CONFIG.screenshotDir, `debug-no-farms-${timestamp}.png`);
-            await page.screenshot({ path: debugScreenshot, fullPage: true });
-            console.log(`     → Debug screenshot: ${debugScreenshot}`);
-            
-            // If still on login page, throw error
-            if (debugUrl.includes('/login') || debugUrl.includes('/signin')) {
-              throw new Error('Still on login page after authentication - credentials may be incorrect');
-            }
-          }
-          
-          // Wait for farm links to populate
-          console.log('     → Waiting for farm links to populate...');
-          await page.waitForSelector('div.css-nd8svt a[href*="/report/point/"]', { 
-            state: 'visible', 
-            timeout: 30000 
-          });
-          console.log('     ? Farm links are visible and ready\n');
-          
-          const loginScreenshot = path.join(CONFIG.screenshotDir, `2-after-login-${timestamp}.png`);
-          await page.screenshot({ path: loginScreenshot, fullPage: true });
-          console.log(`? Login completed successfully. Screenshot: ${loginScreenshot}\n`);
-          dashboard.log('Login successful', 'success');
-          
-        } else {
-          console.log('  ? No login form found, checking if already authenticated...');
-          const currentUrl = page.url();
-          console.log(`  → Current URL: ${currentUrl}\n`);
-          
-          // Verify we're on the right page
-          if (currentUrl.includes('/report') || await page.isVisible('[id*="tabs"]')) {
-            console.log('  ? Already on authenticated page\n');
-            dashboard.log('Already authenticated', 'success');
-          } else {
-            console.log('  ??  Unclear authentication state, will attempt to continue...\n');
-          }
-        }
+        if (hasLoginField) pageState = { state: 'login_form' };
+        else if (hasDashboard) pageState = { state: 'dashboard' };
       }
-      
-    } catch (loginError) {
-      console.log('? Login process failed. Error:', loginError.message);
-      console.log('   Stack:', loginError.stack);
-      console.log('   → Taking error screenshot...');
-      
-      const errorScreenshot = path.join(CONFIG.screenshotDir, `error-login-${timestamp}.png`);
-      await page.screenshot({ path: errorScreenshot, fullPage: true });
-      console.log(`   → Error screenshot: ${errorScreenshot}\n`);
-      
-      dashboard.log('Login failed: ' + loginError.message, 'error');
-      throw loginError; // Re-throw to stop execution
+    } catch (e) {
+      pageState = null;
     }
     
-    // Step 3: Wait for manager's irrigation to show up
-    console.log(`?? Step 3: Waiting for "${CONFIG.targetName}'s irrigation" to appear...`);
+    console.log(`  → Detected state: ${pageState?.state || 'unknown'}`);
+    
+    // ─────────────────────────────────────────────────────────────────────────────
+    // ACTION BASED ON DETECTED STATE
+    // ─────────────────────────────────────────────────────────────────────────────
+    
+    if (pageState?.state === 'dashboard') {
+      // ═══════════════════════════════════════════════════════════════════
+      // ALREADY AUTHENTICATED
+      // ═══════════════════════════════════════════════════════════════════
+      console.log('  ✅ Already authenticated! Dashboard detected.');
+      dashboard.log('Already authenticated', 'success');
+      
+    } else if (pageState?.state === 'login_form') {
+      // ═══════════════════════════════════════════════════════════════════
+      // LOGIN REQUIRED
+      // ═══════════════════════════════════════════════════════════════════
+      console.log('  → Found login form, entering credentials...');
+      dashboard.updateStatus('🔐 Logging in...', 'running');
+      
+      // Fill email (try multiple selectors)
+      const emailSelectors = [
+        'input[type="email"]',
+        'input[name="email"]',
+        'input[placeholder*="이메일"]',
+        'input[placeholder*="email" i]'
+      ];
+      
+      let emailFilled = false;
+      for (const selector of emailSelectors) {
+        try {
+          const field = page.locator(selector).first();
+          if (await field.isVisible({ timeout: 500 })) {
+            await field.fill(CONFIG.username);
+            console.log(`  → Email entered: ${CONFIG.username}`);
+            emailFilled = true;
+            break;
+          }
+        } catch (e) { continue; }
+      }
+      
+      if (!emailFilled) {
+        throw new Error('❌ Could not find email input field');
+      }
+      
+      // Fill password
+      console.log('  → Entering password...');
+      await page.fill('input[type="password"]', CONFIG.password);
+      
+      // Click login button
+      console.log('  → Clicking login button...');
+      const loginButtonSelectors = [
+        'button[type="submit"]',
+        'button:has-text("로그인")',
+        'button:has-text("Login")',
+        'input[type="submit"]'
+      ];
+      
+      let buttonClicked = false;
+      for (const selector of loginButtonSelectors) {
+        try {
+          const button = page.locator(selector).first();
+          if (await button.isVisible({ timeout: 1000 })) {
+            await button.click();
+            buttonClicked = true;
+            break;
+          }
+        } catch (e) { continue; }
+      }
+      
+      if (!buttonClicked) {
+        console.log('  → Pressing Enter as fallback...');
+        await page.keyboard.press('Enter');
+      }
+      
+      // ═══════════════════════════════════════════════════════════════════
+      // 🎯 STATE-BASED LOGIN VERIFICATION (SPA-Compatible)
+      // ═══════════════════════════════════════════════════════════════════
+      console.log('\n  🎯 STATE-BASED LOGIN VERIFICATION:');
+      console.log('  ═══════════════════════════════════');
+      console.log('  → Waiting for UI state change (Success or Error)...\n');
+      
+      const LOGIN_TIMEOUT = 15000;
+      
+      // Success indicators: Dashboard appears
+      const successPromise = (async () => {
+        await Promise.race([
+          page.waitForSelector('text=로그아웃', { state: 'visible', timeout: LOGIN_TIMEOUT }),
+          page.waitForSelector('div.css-nd8svt', { state: 'visible', timeout: LOGIN_TIMEOUT }),
+          page.waitForSelector('[id*="tabs"][id*="content-point"]', { state: 'visible', timeout: LOGIN_TIMEOUT }),
+          page.waitForSelector('a[href*="/report/point/"]', { state: 'visible', timeout: LOGIN_TIMEOUT })
+        ]);
+        return { status: 'success' };
+      })();
+      
+      // Failure indicators: Error message appears
+      const failurePromise = (async () => {
+        await Promise.race([
+          page.waitForSelector('text=/invalid|incorrect|wrong|error|failed|실패|오류/i', { state: 'visible', timeout: LOGIN_TIMEOUT }),
+          page.waitForSelector('.error-message, .alert-error, [class*="error"]', { state: 'visible', timeout: LOGIN_TIMEOUT })
+        ]);
+        return { status: 'failure' };
+      })();
+      
+      const timeoutPromise = new Promise((_, reject) => {
+        setTimeout(() => reject(new Error('timeout')), LOGIN_TIMEOUT);
+      });
+      
+      try {
+        const result = await Promise.race([
+          successPromise.catch(() => null),
+          failurePromise.catch(() => null),
+          timeoutPromise
+        ]);
+        
+        if (result === null) {
+          // Fallback: check current state
+          console.log('  → No clear signal, checking page state...');
+          const farmListVisible = await page.locator('div.css-nd8svt, a[href*="/report/point/"], text=로그아웃').first().isVisible().catch(() => false);
+          const errorVisible = await page.locator('text=/invalid|error|실패/i').first().isVisible().catch(() => false);
+          
+          if (farmListVisible) {
+            console.log('  ✅ Login confirmed by UI change');
+          } else if (errorVisible) {
+            const errorScreenshot = path.join(CONFIG.screenshotDir, `login-error-${timestamp}.png`);
+            await page.screenshot({ path: errorScreenshot, fullPage: true });
+            throw new Error('❌ Login failed: Invalid credentials - Check screenshot: ' + errorScreenshot);
+          } else {
+            const timeoutScreenshot = path.join(CONFIG.screenshotDir, `login-timeout-${timestamp}.png`);
+            await page.screenshot({ path: timeoutScreenshot, fullPage: true });
+            throw new Error('❌ Login timed out - Check screenshot: ' + timeoutScreenshot);
+          }
+        } else if (result.status === 'success') {
+          console.log('  ✅ Login confirmed by UI change (Dashboard appeared)');
+        } else if (result.status === 'failure') {
+          const errorScreenshot = path.join(CONFIG.screenshotDir, `login-error-${timestamp}.png`);
+          await page.screenshot({ path: errorScreenshot, fullPage: true });
+          throw new Error('❌ Login failed: Invalid credentials - Check screenshot: ' + errorScreenshot);
+        }
+      } catch (raceError) {
+        if (raceError.message === 'timeout') {
+          const timeoutScreenshot = path.join(CONFIG.screenshotDir, `login-timeout-${timestamp}.png`);
+          await page.screenshot({ path: timeoutScreenshot, fullPage: true });
+          throw new Error('❌ Login timed out - Check screenshot: ' + timeoutScreenshot);
+        }
+        throw raceError;
+      }
+      
+      console.log('  ═══════════════════════════════════\n');
+      
+      // Wait for network to stabilize
+      await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {
+        console.log('  ⚠️  Network not fully idle, continuing...');
+      });
+      
+      const loginScreenshot = path.join(CONFIG.screenshotDir, `2-after-login-${timestamp}.png`);
+      await page.screenshot({ path: loginScreenshot, fullPage: true });
+      console.log(`  ✅ Login completed. Screenshot: ${loginScreenshot}\n`);
+      dashboard.log('Login successful', 'success');
+      
+    } else {
+      // Unknown state - take debug screenshot and throw error
+      const debugScreenshot = path.join(CONFIG.screenshotDir, `debug-auth-state-${timestamp}.png`);
+      await page.screenshot({ path: debugScreenshot, fullPage: true });
+      console.log(`  ❌ Unknown page state. Debug screenshot: ${debugScreenshot}`);
+      throw new Error(`❌ Unknown page state - neither login form nor dashboard detected. Check: ${debugScreenshot}`);
+    }
+    
+    // ─────────────────────────────────────────────────────────────────────────────
+    // STEP 3: NAVIGATE TO REPORT PAGE (only after confirmed auth)
+    // ─────────────────────────────────────────────────────────────────────────────
+    console.log('📊 Step 3: Navigating to Report page...');
+    dashboard.updateStatus('📊 Loading report page...', 'running');
+    dashboard.updateStep('Step 3: Navigate to /report', 30);
+    
+    const currentUrl = page.url();
+    
+    if (!currentUrl.includes('/report')) {
+      console.log('  → Not on /report page, navigating...');
+      await page.goto('https://admin.iofarm.com/report', { 
+        waitUntil: 'domcontentloaded', 
+        timeout: 20000 
+      });
+      console.log(`  → Navigated to: ${page.url()}`);
+    } else {
+      console.log('  → Already on /report page');
+    }
+    
+    // Wait for Farm List to appear (confirms we're authenticated and on the right page)
+    console.log('  → Waiting for Farm List to load...');
+    try {
+      await page.waitForSelector('div.css-nd8svt a[href*="/report/point/"]', { 
+        state: 'visible', 
+        timeout: 20000 
+      });
+      console.log('  ✅ Farm List loaded successfully!\n');
+      dashboard.log('Farm list loaded', 'success');
+    } catch (farmListError) {
+      console.log('  ⚠️  Farm list selector not found, trying alternative...');
+      // Try alternative selector
+      await page.waitForSelector('[id*="tabs"][id*="content-point"] a', { 
+        state: 'visible', 
+        timeout: 10000 
+      }).catch(() => {
+        console.log('  ⚠️  Alternative selector also failed, but continuing...');
+      });
+    }
+    
+    const reportScreenshot = path.join(CONFIG.screenshotDir, `3-report-page-${timestamp}.png`);
+    await page.screenshot({ path: reportScreenshot, fullPage: true });
+    console.log(`  → Screenshot: ${reportScreenshot}\n`);
+    dashboard.log('Report page ready', 'success');
+    
+    // ═══════════════════════════════════════════════════════════════════════════
+    // END OF SEQUENTIAL NAVIGATION FLOW - Now proceed to farm processing
+    // ═══════════════════════════════════════════════════════════════════════════
+    
+    // Step 4: Wait for manager's irrigation to show up
+    console.log(`📊 Step 4: Waiting for "${CONFIG.targetName}'s irrigation" to appear...`);
     
     try {
       // Show current URL
       const currentUrl3 = page.url();
       console.log(`  → Current URL: ${currentUrl3}`);
       
-      // ? FAST: Wait for main content container
+      // ⚡ FAST: Wait for main content container
       await page.waitForSelector('body', { state: 'visible', timeout: 3000 }).catch(() => {});
       
       // Get page title for verification
@@ -1372,7 +1844,7 @@ async function main() {
         try {
           const element = page.locator(`text=${searchText}`).first();
           if (await element.isVisible({ timeout: 2000 })) {
-            console.log(`  ? Found: "${searchText}"`);
+            console.log(`  ✅ Found: "${searchText}"`);
             foundTarget = true;
           }
         } catch (e) {
@@ -1382,7 +1854,7 @@ async function main() {
       }
       
       if (!foundTarget) {
-        console.log(`  ??  Could not find "${CONFIG.targetName}'s irrigation" text`);
+        console.log(`  ⚠️  Could not find "${CONFIG.targetName}'s irrigation" text`);
         console.log('     → Might be on the page but with different formatting');
       }
       
@@ -1394,10 +1866,10 @@ async function main() {
       // Take screenshot regardless
       const targetScreenshot = path.join(CONFIG.screenshotDir, `3-target-page-${timestamp}.png`);
       await page.screenshot({ path: targetScreenshot, fullPage: true });
-      console.log(`?? Screenshot saved: ${targetScreenshot}\n`);
+      console.log(`📸 Screenshot saved: ${targetScreenshot}\n`);
       
     } catch (searchError) {
-      console.log('??  Error while searching for target. Error:', searchError.message);
+      console.log('⚠️  Error while searching for target. Error:', searchError.message);
       
       // Take screenshot
       const errorScreenshot = path.join(CONFIG.screenshotDir, `3-search-error-${timestamp}.png`);
@@ -1406,39 +1878,96 @@ async function main() {
     }
     
     // Step 4: Click manager radio button to select that manager
-    // 🎯 Using the new selectManager() function with STRICT EXACT matching
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // 🎯 PRECISE TEXT TARGETING: Use Chakra UI segment group class with exact match
+    // ═══════════════════════════════════════════════════════════════════════════════
+    console.log(`🎯 Step 4: Selecting "${CONFIG.targetName}" manager (Precise Targeting)...`);
+    
     try {
-      const selectionResult = await selectManager(page, CONFIG.targetName);
+      // Define precise locator using Chakra UI class + exact text match
+      const managerButton = page.locator('.chakra-segment-group__itemText', { hasText: new RegExp(`^${CONFIG.targetName}$`) });
       
-      if (selectionResult.success) {
+      // Check if the button exists
+      const buttonCount = await managerButton.count();
+      console.log(`  → Found ${buttonCount} button(s) matching "${CONFIG.targetName}"`);
+      
+      if (buttonCount > 0) {
+        // Primary: Force click on the Playwright locator
+        console.log(`  → Attempting Playwright force-click...`);
+        try {
+          await managerButton.first().click({ force: true, timeout: 5000 });
+          console.log(`  ✅ Playwright click successful`);
+        } catch (clickError) {
+          // Fallback: Use native JavaScript click
+          console.log(`  ⚠️  Playwright click failed, using JS fallback...`);
+          const jsClicked = await page.evaluate((targetName) => {
+            const spans = Array.from(document.querySelectorAll('.chakra-segment-group__itemText'));
+            const targetSpan = spans.find(span => span.textContent.trim() === targetName);
+            if (targetSpan) {
+              // Click the span itself
+              targetSpan.click();
+              // Also try clicking parent label if exists
+              const parentLabel = targetSpan.closest('label');
+              if (parentLabel) parentLabel.click();
+              return true;
+            }
+            return false;
+          }, CONFIG.targetName);
+          
+          if (jsClicked) {
+            console.log(`  ✅ JavaScript fallback click successful`);
+          } else {
+            console.log(`  ❌ JavaScript fallback also failed`);
+          }
+        }
+        
+        // Wait for UI to acknowledge the change
+        console.log(`  → Waiting for UI state change...`);
+        try {
+          // Wait for the target input to become checked
+          await page.waitForFunction((targetName) => {
+            const spans = Array.from(document.querySelectorAll('.chakra-segment-group__itemText'));
+            const targetSpan = spans.find(span => span.textContent.trim() === targetName);
+            if (targetSpan) {
+              const parentLabel = targetSpan.closest('label');
+              if (parentLabel) {
+                return parentLabel.getAttribute('data-state') === 'checked';
+              }
+            }
+            return false;
+          }, CONFIG.targetName, { timeout: 3000 });
+          console.log(`  ✅ UI confirmed: "${CONFIG.targetName}" is now selected`);
+        } catch (waitError) {
+          console.log(`  ⚠️  UI state change not detected, adding safety buffer...`);
+        }
+        
+        // Safety buffer for AJAX reload
+        await page.waitForTimeout(2000);
+        
         const step4Screenshot = path.join(CONFIG.screenshotDir, `4-selected-manager-${timestamp}.png`);
         await page.screenshot({ path: step4Screenshot, fullPage: true });
         console.log(`  📸 Screenshot: ${step4Screenshot}\n`);
-        dashboard.log(`Manager selected: ${selectionResult.matched}`, 'success');
       } else {
-        console.log(`  ❌ FAILED: Could not find exact match for "${CONFIG.targetName}"`);
-        console.log(`  💡 Tip: Check if the manager name in config matches exactly (including spaces)\n`);
-        dashboard.log(`⚠️ Could not select manager: ${CONFIG.targetName}`, 'warning');
+        console.log(`  ⚠️  Could not find "${CONFIG.targetName}" button using .chakra-segment-group__itemText\n`);
       }
     } catch (error) {
-      console.log(`  ❌ Error selecting "${CONFIG.targetName}" manager: ${error.message}\n`);
-      dashboard.log(`Error selecting manager: ${error.message}`, 'error');
+      console.log(`  ⚠️  Error selecting "${CONFIG.targetName}" manager: ${error.message}\n`);
     }
     
     // Step 5: Get all farms from the list and loop through them
-    console.log('📋 Step 5: Getting list of all farms...');
+    console.log('🏭 Step 5: Getting list of all farms...');
     
-    // 🔍 Ensure farm list container is ready before extraction
+    // 🎯 Ensure farm list container is ready before extraction
     console.log('  → Verifying farm list container is present...');
     await page.waitForLoadState('domcontentloaded');
     await page.waitForSelector('[id*="tabs"][id*="content-point"]', { state: 'visible', timeout: 15000 }).catch(() => {
-      console.log('  ??  Warning: Farm list container not found!');
+      console.log('  ⚠️  Warning: Farm list container not found!');
     });
     
-    // ? SMART: Extended wait for farm links to ensure SPA has fully rendered
+    // ⚡ SMART: Extended wait for farm links to ensure SPA has fully rendered
     console.log('  → Waiting for farm links to populate...');
     await page.waitForSelector('div.css-nd8svt a[href*="/report/point/"]', { state: 'visible', timeout: 30000 });
-    console.log('  ? Farm links are visible and ready');
+    console.log('  ✅ Farm links are visible and ready');
     
     let farmList = [];
     try {
@@ -1450,7 +1979,7 @@ async function main() {
           const farmContainer = tabs.querySelector('div > div:first-child > div:nth-child(2)');
           
           if (!farmContainer) {
-            console.error('[BROWSER] ? Farm container not found!');
+            console.error('[BROWSER] ❌ Farm container not found!');
             return farms;
           }
           
@@ -1460,6 +1989,7 @@ async function main() {
           
           farmLinks.forEach((link, idx) => {
             const text = link.textContent.trim();
+            const href = link.getAttribute('href'); // 🔗 Capture href for direct URL navigation
             
             // BUGFIX: Filter out invalid elements
             if (!text || text.length < 3 || text.length > 200) return;
@@ -1469,26 +1999,26 @@ async function main() {
             if (/^\d{2}:\d{2}/.test(text)) return; // Skip if starts with time
             if (text.startsWith('구역')) return; // Skip table labels
             
-            console.log(`[BROWSER] ? Valid farm #${idx + 1}: ${text}`);
-            farms.push({ index: idx + 1, name: text });
+            console.log(`[BROWSER] ✓ Valid farm #${idx + 1}: ${text} -> ${href}`);
+            farms.push({ index: idx + 1, name: text, href: href }); // 🔗 Store href
           });
         }
         return farms;
       });
       
-      console.log(`  ? Found ${farmList.length} farms`);
+      console.log(`  ✅ Found ${farmList.length} farms`);
       farmList.forEach((farm, idx) => {
         console.log(`     [${idx + 1}] ${farm.name}`);
       });
       console.log('');
       
-      // ?? SYNC: Broadcast real farm count to dashboard
+      // 📡 SYNC: Broadcast real farm count to dashboard
       if (dashboard) {
         dashboard.broadcast('update_farm_count', { count: farmList.length });
-        console.log(`  ?? Broadcasted farm count to dashboard: ${farmList.length}\n`);
+        console.log(`  📡 Broadcasted farm count to dashboard: ${farmList.length}\n`);
       }
     } catch (error) {
-      console.log(`  ??  Error getting farm list: ${error.message}`);
+      console.log(`  ⚠️  Error getting farm list: ${error.message}`);
       console.log('  → Will try processing just the first farm\n');
       farmList = [{ index: 1, name: 'First Farm (fallback)' }];
     }
@@ -1496,11 +2026,11 @@ async function main() {
     // Array to store all farm data
     const allFarmData = [];
     
-    // ?? EXPLICIT DATE CALCULATION: Define "Today" and calculate past 5 days
+    // 📅 EXPLICIT DATE CALCULATION: Define "Today" and calculate past 5 days
     const today = new Date();
     today.setHours(0, 0, 0, 0); // Normalize to midnight
     
-    console.log('\n?? Date Range Configuration:');
+    console.log('\n📅 Date Range Configuration:');
     console.log(`   → Today: ${today.toLocaleDateString('ko-KR')}`);
     console.log(`   → Method: Direct URL navigation with explicit date parameters`);
     console.log(`   → Range: Today (T-0) back to 5 days ago (T-5)\n`);
@@ -1514,22 +2044,22 @@ async function main() {
     let startIndex = (dashboardConfig.startFrom > 0) ? (dashboardConfig.startFrom - 1) : 0;
     let maxCount = dashboardConfig.maxFarms || totalFarms;
     
-    // ??? SAFETY AUTO-CORRECT: Validate and clamp startIndex if invalid
+    // 🛡️ SAFETY AUTO-CORRECT: Validate and clamp startIndex if invalid
     if (startIndex >= totalFarms) {
       const requestedFarm = startIndex + 1;
       startIndex = totalFarms - 1; // Clamp to last available farm
-      const warningMsg = `?? Request for Farm #${requestedFarm} exceeds limit (${totalFarms} farms exist). Auto-correcting to start from Farm #${startIndex + 1}.`;
+      const warningMsg = `⚠️ Request for Farm #${requestedFarm} exceeds limit (${totalFarms} farms exist). Auto-corrected to start from Farm #${startIndex + 1}.`;
       console.warn(`\n${warningMsg}\n`);
       if (dashboard) {
         dashboard.log(warningMsg, 'warning');
-        dashboard.updateStatus('?? Auto-corrected configuration', 'running');
+        dashboard.updateStatus('⚠️ Auto-corrected configuration', 'running');
       }
     }
     
-    // ??? SAFETY: Ensure endIndex never exceeds totalFarms
+    // 🛡️ SAFETY: Ensure endIndex never exceeds totalFarms
     let endIndex = Math.min(startIndex + maxCount, totalFarms);
     
-    console.log(`\n?? Farm Processing Plan:`);
+    console.log(`\n📋 Farm Processing Plan:`);
     console.log(`   → Total available: ${totalFarms}`);
     console.log(`   → Starting at: Farm #${startIndex + 1}`);
     console.log(`   → Stopping at: Farm #${endIndex}`);
@@ -1538,24 +2068,22 @@ async function main() {
     // Slice the array to get only the farms we want to process
     const farmsToProcess = farmList.slice(startIndex, endIndex);
     
-    // ???????????????????????????????????????????????????????????????????????????
-    // ?? FARM LOOP (OUTER) - Process each farm with try/catch for robustness
-    // ???????????????????????????????????????????????????????????????????????????
+    // Dynamic loop - checks maxFarms from config each iteration (allows adding farms mid-run)
     for (let farmIdx = 0; farmIdx < farmsToProcess.length; farmIdx++) {
       // Get current config (may have been updated via "Add More Farms")
       const currentConfig = dashboard.getConfig();
       
       // Check if we've reached the current maxFarms limit
       if (farmIdx >= currentConfig.maxFarms) {
-        console.log(`\n? Reached maxFarms limit (${currentConfig.maxFarms}). Stopping farm processing.\n`);
+        console.log(`\n✅ Reached maxFarms limit (${currentConfig.maxFarms}). Stopping farm processing.\n`);
         dashboard.log(`Completed processing ${currentConfig.maxFarms} farms`, 'success');
         break;
       }
       // Check if user pressed STOP
       if (dashboard && dashboard.checkIfStopped()) {
-        console.log('\n? STOP requested by user. Halting farm processing...\n');
+        console.log('\n⛔ STOP requested by user. Halting farm processing...\n');
         dashboard.log('Processing stopped by user', 'warning');
-        dashboard.updateStatus('? Stopped by user', 'paused');
+        dashboard.updateStatus('⛔ Stopped by user', 'paused');
         break; // Exit the farm loop
       }
       
@@ -1563,17 +2091,17 @@ async function main() {
       if (currentConfig.mode === 'learning' && !CONFIG.chartLearningMode) {
         CONFIG.chartLearningMode = true;
         CONFIG.watchMode = false;
-        console.log('? Switched to Learning Mode');
+        console.log('✅ Switched to Learning Mode');
         dashboard.log('Learning Mode activated', 'success');
       } else if (currentConfig.mode === 'normal' && CONFIG.chartLearningMode) {
         CONFIG.chartLearningMode = false;
         CONFIG.watchMode = false;
-        console.log('? Switched to Normal Mode');
+        console.log('✅ Switched to Normal Mode');
         dashboard.log('Normal Mode activated', 'success');
       } else if (currentConfig.mode === 'watch' && !CONFIG.watchMode) {
         CONFIG.watchMode = true;
         CONFIG.chartLearningMode = false;
-        console.log('? Switched to Watch Mode');
+        console.log('✅ Switched to Watch Mode');
         dashboard.log('Watch Mode activated', 'success');
       }
       
@@ -1582,7 +2110,7 @@ async function main() {
       const actualFarmIndex = startIndex + farmIdx; // Calculate actual index in original farmList for clicking
       
       console.log(`\n${'='.repeat(70)}`);
-      console.log(`?? Processing Farm ${farmIdx + 1}/${farmsToProcess.length}: ${currentFarm.name} (Farm #${actualFarmIndex + 1} of ${totalFarms})`);
+      console.log(`🏭 Processing Farm ${farmIdx + 1}/${farmsToProcess.length}: ${currentFarm.name} (Farm #${actualFarmIndex + 1} of ${totalFarms})`);
       console.log(`${'='.repeat(70)}\n`);
       
       // Update dashboard progress (reuse currentConfig from above)
@@ -1590,90 +2118,142 @@ async function main() {
         dashboard.updateProgress(farmIdx + 1, farmsToProcess.length, currentFarm.name);
       }
       
-      // ??? ROBUST TRY/CATCH: Wrap entire farm processing so failures don't stop the loop
-      try {
-      
       // Set up network interception to capture chart data
-      console.log('  ?? Setting up network interception...');
+      console.log('  🌐 Setting up network interception...');
       const networkData = setupNetworkInterception(page);
       
-      // Click the farm - MODERN APPROACH (Scroll + Force Click + Validate)
+      // Track clicked points for this farm (for checkpoint)
+      let currentFarmClickedPoints = [];
+      
+      // 🔗 URL-FIRST NAVIGATION: Use direct URL instead of DOM clicks
+      // This is more resilient to UI changes and avoids "element detached" errors
+      let farmUrlWithManager = null;
+      
       try {
-        console.log(`  ?? Attempting to click farm: "${currentFarm.name}"`);
+        console.log(`  🎯 Navigating to farm: "${currentFarm.name}"`);
         
-        // CRITICAL: Re-locate the element inside the loop using the SAME selector that found the farms
-        const farmContainer = page.locator('div.css-nd8svt');
-        const farmLink = farmContainer.locator('a[href*="/report/point/"]').nth(actualFarmIndex);
-        
-        // ? SUPER FAST: Parallel execution - Setup trap, scroll, click, validate
-        console.log(`     → Setting up navigation trap...`);
-        
-        // Step 1: Setup the navigation promise (the "trap")
-        const navigationPromise = page.waitForURL('**/report/point/**', { timeout: 5000 }).catch(() => null);
-        
-        // Step 2: Scroll into view (no wait for animation)
-        await farmLink.scrollIntoViewIfNeeded();
-        
-        // Step 3: Get target URL for logging
-        const expectedHref = await farmLink.getAttribute('href');
-        console.log(`     → Target URL: ${expectedHref}`);
-        
-        // Step 4: Click with noWaitAfter (instant, non-blocking)
-        console.log(`     → Clicking farm link...`);
-        await farmLink.click({ force: true, noWaitAfter: true });
-        
-        // Step 5: Await the trap (waits for URL change)
-        console.log(`     → Waiting for navigation...`);
-        const navSuccess = await navigationPromise;
-        
-        if (navSuccess !== null) {
-          const currentURL = page.url();
-          console.log(`  ? Successfully navigated to farm "${currentFarm.name}"`);
-          console.log(`     → URL: ${currentURL}`);
+        // Strategy 1: Use stored href from farm list extraction
+        if (currentFarm.href) {
+          const baseUrl = 'https://admin.iofarm.com';
+          // Use URL class to properly handle query params (avoid duplicate manager=)
+          const url = new URL(currentFarm.href, baseUrl);
+          url.searchParams.set('manager', CONFIG.targetName);
+          const fullUrl = url.toString();
+          console.log(`     → Using direct URL: ${fullUrl}`);
           
-          // ? FAST: Wait for main content to be visible
-          await page.waitForSelector('div.css-nd8svt', { state: 'visible', timeout: 3000 }).catch(() => {});
+          const navResult = await navigateWithDiagnostics(page, fullUrl, {
+            expectedMinTime: 1500,
+            retries: 2
+          });
+          
+          if (navResult) {
+            farmUrlWithManager = fullUrl;
+            console.log(`  ✅ Successfully navigated to farm "${currentFarm.name}" via direct URL`);
+            
+            // Wait for page to be truly ready
+            await waitForPageReady(page, { waitForChart: true });
+          }
         } else {
-          console.log(`  ??  Navigation timeout - URL did not change`);
-          console.log(`     → Skipping this farm...
-`);
-          continue;
+          // Strategy 2: Fallback to DOM click if no href stored
+          console.log(`     → No stored href, falling back to DOM click...`);
+          
+          const farmContainer = page.locator('div.css-nd8svt');
+          const farmLink = farmContainer.locator('a[href*="/report/point/"]').nth(actualFarmIndex);
+          
+          // Get the href before clicking
+          const expectedHref = await farmLink.getAttribute('href').catch(() => null);
+          
+          if (expectedHref) {
+            // Use direct navigation instead of click
+            const baseUrl = 'https://admin.iofarm.com';
+            // Use URL class to properly handle query params (avoid duplicate manager=)
+            const url = new URL(expectedHref, baseUrl);
+            url.searchParams.set('manager', CONFIG.targetName);
+            const fullUrl = url.toString();
+            console.log(`     → Extracted href, using direct URL: ${fullUrl}`);
+            
+            await navigateWithDiagnostics(page, fullUrl, { retries: 2 });
+            farmUrlWithManager = fullUrl;
+            await waitForPageReady(page, { waitForChart: true });
+          } else {
+            // Last resort: DOM click
+            console.log(`     → Cannot extract href, attempting DOM click...`);
+            const navigationPromise = page.waitForURL('**/report/point/**', { timeout: 5000 }).catch(() => null);
+            await farmLink.scrollIntoViewIfNeeded();
+            await farmLink.click({ force: true, noWaitAfter: true });
+            const navSuccess = await navigationPromise;
+            
+            if (navSuccess !== null) {
+              farmUrlWithManager = page.url();
+              await waitForPageReady(page, { waitForChart: true });
+            } else {
+              throw new Error('DOM click navigation failed');
+            }
+          }
         }
+        
+        console.log(`  🔗 Base farm URL: ${farmUrlWithManager}\n`);
+        
       } catch (error) {
-        console.log(`  ??  Error clicking farm: ${error.message}`);
-        console.log(`     → This could be due to: element detached, timeout, or network issue`);
+        console.log(`  ⚠️  Error navigating to farm: ${error.message}`);
+        console.log(`     → This could be due to: network issue, invalid URL, or page structure change`);
         console.log(`     → Skipping this farm...
 `);
         continue;
       }
-    
-      // 🔗 Get the base farm URL and FORCE the manager parameter
-      const baseFarmUrl = page.url().split('?')[0]; // Remove any existing query params
       
-      // 🔴 CRITICAL: Always use CONFIG.targetName, never trust URL params
-      const manager = CONFIG.targetName;
-      const farmUrlWithManager = `${baseFarmUrl}?manager=${encodeURIComponent(manager)}`;
+      // Verify we're on the correct page
+      if (!farmUrlWithManager) {
+        console.log(`  ⚠️  Could not establish farm URL, skipping...
+`);
+        continue;
+      }
       
-      console.log(`  🔗 Base farm URL: ${farmUrlWithManager}`);
-      console.log(`     → Manager forced to: "${manager}"\n`);
+      console.log(`  🔗 Base farm URL: ${farmUrlWithManager}\n`);
     
-    // ???????????????????????????????????????????????????????????????????????????
-    // ?? DATE LOOP (INNER) - Process dates from 5 days ago → Today
-    //    Using DIRECT URL NAVIGATION instead of clicking Previous/Next buttons
-    // ???????????????????????????????????????????????????????????????????????????
-    const totalDaysToCheck = 6; // T-5 to T-0 (6 days total)
+    // 📅 DATE LOOP: Process T-5 to T-0 (OLDEST to NEWEST - NEVER reverse!)
+    // See IRRIGATION_RULES.md and DONT.md for why this direction is mandatory
+    const totalDaysToCheck = 6;
     let dateIdx = 0;
     const farmDateData = []; // Store data for all dates of this farm
     
-    // ?? FIXED: Loop from 5 → 0 (5 days ago to Today)
+    // 🔙 STEP 1: Navigate to T-5 by clicking "이전 기간" (previous) 5 times
+    // URL date parameter DOES NOT WORK - must use button clicks
+    console.log(`  🔙 Navigating to T-5 (5 days ago) using button clicks...`);
+    console.log(`     ⚠️  Note: URL &date= parameter doesn't work. Using button navigation.`);
+    
+    for (let i = 0; i < 5; i++) {
+      const prevClicked = await page.evaluate(() => {
+        const prevButton = document.querySelector('button[aria-label="이전 기간"]');
+        if (prevButton) {
+          prevButton.click();
+          return true;
+        }
+        return false;
+      });
+      
+      if (prevClicked) {
+        console.log(`     ◀️  Clicked previous (${i + 1}/5)`);
+        // Wait for chart to reload after date change
+        await page.waitForTimeout(800);
+        await waitForPageReady(page, { waitForChart: true });
+      } else {
+        console.log(`     ⚠️  Previous button not found at step ${i + 1}`);
+        break;
+      }
+    }
+    
+    console.log(`  ✅ Now at T-5 (oldest date). Will process T-5 → T-0.\n`);
+    
+    // 📅 STEP 2: Process each date from T-5 to T-0
     for (let dayOffset = 5; dayOffset >= 0; dayOffset--) {
       dateIdx++;
       
-      // ?? CALCULATE TARGET DATE EXPLICITLY
+      // 📅 CALCULATE TARGET DATE EXPLICITLY
       const targetDate = new Date(today);
-      targetDate.setDate(today.getDate() - dayOffset); // Subtract days to go into past
+      targetDate.setDate(today.getDate() - dayOffset); // Subtract days from today
       
-      // Format date as YYYY-MM-DD for URL parameter
+      // Format date as YYYY-MM-DD for logging/checkpoints
       const year = targetDate.getFullYear();
       const month = String(targetDate.getMonth() + 1).padStart(2, '0');
       const day = String(targetDate.getDate()).padStart(2, '0');
@@ -1687,28 +2267,36 @@ async function main() {
         weekday: 'short'
       });
       
-      console.log(`\n  ?? Processing Date ${dateIdx}/${totalDaysToCheck}: ${koreanDate} (${dateString}) - T-${dayOffset} days`);
+      console.log(`\n  📅 Processing Date: ${koreanDate} (${dateString}) - T-${dayOffset}`);
       console.log(`  ${'─'.repeat(70)}`);
+      console.log(`  📍 Date ${6 - dayOffset}/6 (Direction: T-5 → T-0, oldest to newest)`);
       
-      // ?? DIRECT URL NAVIGATION: Construct URL with explicit date parameter
-      const currentUrl = new URL(page.url());
-      currentUrl.searchParams.set('date', dateString);
-      currentUrl.searchParams.set('manager', manager);
-      const targetUrl = currentUrl.toString();
-      
-      console.log(`  ?? Direct URL navigation to: ${targetUrl}`);
+      // No URL navigation needed - we're already on the correct date from button clicks
+      // The first iteration (T-5) is already loaded from the 5 previous clicks above
       
       try {
-        await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
-        console.log(`  ? Loaded page for date: ${dateString}`);
+        // Just verify the page is ready (no navigation needed)
+        console.log(`  ✅ Page ready for date: ${dateString}`);
+        await waitForPageReady(page, { waitForChart: true });
         
-        // Wait for main content to be visible
-        await page.waitForSelector('div.css-nd8svt', { state: 'visible', timeout: 5000 }).catch(() => {
-          console.log('  ??  Main content selector not found (may be normal)');
-        });
       } catch (navError) {
-        console.log(`  ? Failed to navigate to date ${dateString}: ${navError.message}`);
+        console.log(`  ❌ Error on date ${dateString}: ${navError.message}`);
         console.log(`  → Skipping this date...\n`);
+        
+        // Save checkpoint before continuing
+        saveCheckpoint({
+          farmIndex: farmIdx,
+          farmName: currentFarm.name,
+          dateIndex: 5 - dayOffset, // Convert to 0-based index
+          dateString: dateString,
+          totalFarms: farmsToProcess.length,
+          totalDates: totalDaysToCheck,
+          clickedPoints: currentFarmClickedPoints,
+          manager: CONFIG.targetName,
+          mode: CONFIG.chartLearningMode ? 'learning' : 'normal',
+          error: navError.message
+        });
+        
         continue; // Skip to next date
       }
       
@@ -1727,11 +2315,11 @@ async function main() {
         return 'Unknown Date';
       });
       
-      console.log(`  ?? Displayed date on page: ${displayedDate}`);
+      console.log(`  📍 Displayed date on page: ${displayedDate}`);
       
       // Check if user pressed STOP
       if (dashboard && dashboard.checkIfStopped()) {
-        console.log('\n? STOP requested. Halting date processing...\n');
+        console.log('\n⛔ STOP requested. Halting date processing...\n');
         break; // Exit date loop
       }
       
@@ -1740,22 +2328,25 @@ async function main() {
       if (currentConfig.mode === 'learning' && !CONFIG.chartLearningMode) {
         CONFIG.chartLearningMode = true;
         CONFIG.watchMode = false;
-        console.log('  ? Mode switched to: Learning');
+        console.log('  ✅ Mode switched to: Learning');
+        dashboard.log('Learning Mode activated', 'success');
       } else if (currentConfig.mode === 'normal' && CONFIG.chartLearningMode) {
         CONFIG.chartLearningMode = false;
         CONFIG.watchMode = false;
-        console.log('  ? Mode switched to: Normal');
+        console.log('  ✅ Mode switched to: Normal');
+        dashboard.log('Normal Mode activated', 'success');
       } else if (currentConfig.mode === 'watch' && !CONFIG.watchMode) {
         CONFIG.watchMode = true;
         CONFIG.chartLearningMode = false;
-        console.log('  ? Mode switched to: Watch');
+        console.log('  ✅ Mode switched to: Watch');
+        dashboard.log('Watch Mode activated', 'success');
       }
       
       // Step 2: Check if tables are already filled for this date
-      console.log('  ?? Checking irrigation time tables...');
+      console.log('  💧 Checking irrigation time tables...');
       
       try {
-        // ? FAST: No wait needed - table data is already loaded
+        // ⚡ FAST: No wait needed - table data is already loaded
         // Check the two table fields - look specifically in the right panel
         const tableStatus = await page.evaluate(() => {
         const results = { debug: [] };
@@ -1857,7 +2448,7 @@ async function main() {
         const tablesAlreadyFilled = !tableStatus.needsFirstClick && !tableStatus.needsLastClick;
         
         if (tablesAlreadyFilled) {
-          console.log(`     ? Tables already filled for this date - NO MODIFICATION NEEDED`);
+          console.log(`     ✅ Tables already filled for this date - NO MODIFICATION NEEDED`);
           console.log(`        → Existing First: ${tableStatus.firstTime}`);
           console.log(`        → Existing Last: ${tableStatus.lastTime}`);
           console.log(`        → Skipping HSSP algorithm (preserving existing data)\n`);
@@ -1872,7 +2463,7 @@ async function main() {
           };
           farmDateData.push(dateData);
           
-          // ?? Track skip
+          // 📊 Track skip
           runStats.skipCount++;
           runStats.datesProcessed++;
           if (!runStats.dateRange.start) runStats.dateRange.start = displayedDate;
@@ -1881,37 +2472,55 @@ async function main() {
           // Take screenshot
           const skipScreenshot = path.join(CONFIG.screenshotDir, `farm-${farmIdx + 1}-date-${dateIdx}-skipped-${timestamp}.png`);
           await page.screenshot({ path: skipScreenshot, fullPage: true });
-          console.log(`     ?? Screenshot: ${skipScreenshot}\n`);
+          console.log(`     📸 Screenshot: ${skipScreenshot}\n`);
           
-          // ? Direct URL navigation handles date change - no button click needed
+          // Move to next date using "Next period" button (except for T-0, the last date)
+          if (dayOffset > 0) {
+            console.log(`     ⏭️  Moving to next date (T-${dayOffset} → T-${dayOffset - 1})...`);
+            const nextClicked = await page.evaluate(() => {
+              const nextButton = document.querySelector('button[aria-label="다음 기간"]');
+              if (nextButton) {
+                nextButton.click();
+                return true;
+              }
+              return false;
+            });
+            
+            if (nextClicked) {
+              console.log(`     ✅ Moved to next date`);
+              // ⚡ FAST: Brief wait for date picker (unavoidable UI)
+              await page.waitForTimeout(300);
+            }
+          }
+          
           continue; // Skip to next date
         }
         
         // If either field is empty, click the chart points
         if (tableStatus.needsFirstClick || tableStatus.needsLastClick) {
-        console.log('  ??  Tables need data, clicking chart points...\n');
+        console.log('  ⚠️  Tables need data, clicking chart points...\n');
         
         // NETWORK INTERCEPTION APPROACH (Replaces Highcharts DOM access)
-        console.log('  ? Waiting for chart data from network...');
+        console.log('  ⏳ Waiting for chart data from network...');
         try {
           // Wait for the API response to be captured
           const chartData = await waitForChartData(networkData, 10000);
-          console.log('  ? Chart data successfully captured from network!\n');
+          console.log('  ✅ Chart data successfully captured from network!\n');
           
-          // ?? CRITICAL FIX: Wait for Highcharts to render the visual SVG graph
-          console.log('  ? Waiting for chart SVG to render...');
+          // 🎨 CRITICAL FIX: Wait for Highcharts to render the visual SVG graph
+          console.log('  ⏳ Waiting for chart SVG to render...');
           try {
             await page.waitForSelector('.highcharts-series-0 path.highcharts-graph, .highcharts-root path', { 
               state: 'visible', 
               timeout: 5000 
             });
-            console.log('  ? Chart SVG is visible');
+            console.log('  ✅ Chart SVG is visible');
             
             // Small safety buffer to ensure animation completes
             await page.waitForTimeout(500);
-            console.log('  ? Chart render animation complete\n');
+            console.log('  ✅ Chart render animation complete\n');
           } catch (svgWaitError) {
-            console.log(`  ??  Chart SVG wait timeout: ${svgWaitError.message}`);
+            console.log(`  ⚠️  Chart SVG wait timeout: ${svgWaitError.message}`);
             console.log('  → Will attempt to continue anyway...\n');
           }
           
@@ -1919,17 +2528,33 @@ async function main() {
           const dataPoints = extractDataPoints(chartData);
           
           if (!dataPoints || dataPoints.length < 10) {
-            console.log('  ??  Insufficient data points for analysis');
+            console.log('  ⚠️  Insufficient data points for analysis');
             console.log(`     → Got ${dataPoints?.length || 0} points, need at least 10`);
             console.log('     → Skipping chart interaction for this date\n');
             
-            // ? Direct URL navigation handles date change - no button click needed
+            // Skip to next date (only if not at T-0)
+            if (dayOffset > 0) {
+              console.log(`     ⏭️  Moving to next date (T-${dayOffset} → T-${dayOffset - 1})...`);
+              const nextClicked = await page.evaluate(() => {
+                const nextButton = document.querySelector('button[aria-label="다음 기간"]');
+                if (nextButton) {
+                  nextButton.click();
+                  return true;
+                }
+                return false;
+              });
+              
+              if (nextClicked) {
+                // ⚡ FAST: Brief wait for date picker UI
+                await page.waitForTimeout(300);
+              }
+            }
             continue; // Skip to next date
           }
           
-          console.log(`  ?? Analyzing ${dataPoints.length} data points for irrigation events...`);
+          console.log(`  📊 Analyzing ${dataPoints.length} data points for irrigation events...`);
           
-          // ?? ROLLING WINDOW & LOCAL MINIMUM Algorithm
+          // 🔬 ROLLING WINDOW & LOCAL MINIMUM Algorithm
           // Purpose: Catch gentle sustained rises + Find absolute valley bottom
           
           const yValues = dataPoints.map(p => p.y);
@@ -1989,7 +2614,7 @@ async function main() {
               console.log(`     → Valley time: ${timeStr} (hour: ${eventHour})`);
               console.log(`     → Valley Y: ${dataPoints[valleyIndex].y.toFixed(3)}, Surge Y: ${currentVal.toFixed(3)}`);
               console.log(`     → Total rise from valley: ${(currentVal - dataPoints[valleyIndex].y).toFixed(3)}`);
-              console.log(`     → Daytime filter: ${isDaytime ? '? PASS' : '? SKIP (outside 07:00-17:00)'}`);
+              console.log(`     → Daytime filter: ${isDaytime ? '✅ PASS' : '❌ SKIP (outside 07:00-17:00)'}`);
               
               if (isDaytime) {
                 allEvents.push({
@@ -2009,7 +2634,7 @@ async function main() {
             }
           }
           
-          console.log(`  ?? [WINDOW-MIN] Raw detections: ${allEvents.length} events`);
+          console.log(`  🔬 [WINDOW-MIN] Raw detections: ${allEvents.length} events`);
           
           // DE-DUPLICATE: Keep events at least 5% apart
           const uniqueEvents = [];
@@ -2033,12 +2658,27 @@ async function main() {
             }
           }
           
-
-          console.log(`  ? Found ${uniqueEvents.length} irrigation events`);
+          console.log(`  ✅ Found ${uniqueEvents.length} irrigation events`);
           
           if (uniqueEvents.length === 0) {
             console.log('     → No irrigation detected for this date\n');
-            // ? Direct URL navigation handles date change - no button click needed
+            // Skip to next date (only if not at T-0)
+            if (dayOffset > 0) {
+              console.log(`     ⏭️  Moving to next date (T-${dayOffset} → T-${dayOffset - 1})...`);
+              const nextClicked = await page.evaluate(() => {
+                const nextButton = document.querySelector('button[aria-label="다음 기간"]');
+                if (nextButton) {
+                  nextButton.click();
+                  return true;
+                }
+                return false;
+              });
+              
+              if (nextClicked) {
+                // ⚡ FAST: Brief wait for date picker UI
+                await page.waitForTimeout(300);
+              }
+            }
             continue;
           }
           
@@ -2046,11 +2686,43 @@ async function main() {
           uniqueEvents.sort((a, b) => a.index - b.index);
           
           const firstEvent = uniqueEvents[0];
-          const lastEvent = uniqueEvents[uniqueEvents.length - 1];
+          let lastEvent = uniqueEvents[uniqueEvents.length - 1];
+          
+          // 🎯 CRITICAL FIX: For LAST event, find the PEAK (end) instead of valley (start)
+          if (uniqueEvents.length > 0) {
+            const lastValleyIndex = lastEvent.index;
+            const PEAK_SEARCH_WINDOW = 30; // Search next 30 points for peak
+            let peakIndex = lastValleyIndex;
+            let peakValue = dataPoints[lastValleyIndex].y;
+            
+            const searchEnd = Math.min(lastValleyIndex + PEAK_SEARCH_WINDOW, dataPoints.length - 1);
+            console.log(`  🔍 Finding PEAK for last event (valley at index ${lastValleyIndex})...`);
+            console.log(`     → Searching indices ${lastValleyIndex} to ${searchEnd}`);
+            
+            for (let j = lastValleyIndex; j <= searchEnd; j++) {
+              if (dataPoints[j].y > peakValue) {
+                peakValue = dataPoints[j].y;
+                peakIndex = j;
+              }
+            }
+            
+            console.log(`     → Peak found at index ${peakIndex} (Y: ${peakValue.toFixed(3)})`);
+            console.log(`     → Rise from valley to peak: ${(peakValue - lastEvent.y).toFixed(3)}`);
+            
+            // Update lastEvent to use PEAK coordinates
+            lastEvent = {
+              index: peakIndex,
+              x: dataPoints[peakIndex].x,
+              y: dataPoints[peakIndex].y,
+              peakIndex: peakIndex,
+              rise: peakValue - lastEvent.y,
+              time: new Date(dataPoints[peakIndex].x).toTimeString().slice(0, 5)
+            };
+          }
           
           console.log(`     → First event at index ${firstEvent.index}`);
           console.log(`     → Last event at index ${lastEvent.index}`);
-          console.log(`  ?? Now attempting to click chart at these positions...\n`);
+          console.log(`  🎯 Now attempting to click chart at these positions...\n`);
           
           // TODO: Actually click the chart points using the indices
           // For now, we've successfully analyzed the data!
@@ -2058,12 +2730,28 @@ async function main() {
           // or we can implement coordinate-based clicking
           
         } catch (timeoutError) {
-          console.log('  ??  Network data capture timed out after 10 seconds');
+          console.log('  ⚠️  Network data capture timed out after 10 seconds');
           console.log('     → Chart data API may not have been called');
           console.log('     → Or API response format is different than expected');
           console.log('     → Skipping chart interaction for this date\n');
           
-          // ? Direct URL navigation handles date change - no button click needed
+          // Skip to next date if data unavailable (only if not at T-0)
+          if (dayOffset > 0) {
+            console.log(`     ⏭️  Moving to next date (T-${dayOffset} → T-${dayOffset - 1})...`);
+            const nextClicked = await page.evaluate(() => {
+              const nextButton = document.querySelector('button[aria-label="다음 기간"]');
+              if (nextButton) {
+                nextButton.click();
+                return true;
+              }
+              return false;
+            });
+            
+            if (nextClicked) {
+              // ⚡ FAST: Brief wait for date picker UI
+              await page.waitForTimeout(300);
+            }
+          }
           continue; // Skip to next date
         }
 
@@ -2071,9 +2759,9 @@ async function main() {
           const results = [];
           
           // Log to browser console for debugging
-          console.log('?? [BROWSER] Starting irrigation point detection...');
-          console.log('?? [BROWSER] Needs first click:', needs.needsFirstClick);
-          console.log('?? [BROWSER] Needs last click:', needs.needsLastClick);
+          console.log('🔍 [BROWSER] Starting irrigation point detection...');
+          console.log('🔍 [BROWSER] Needs first click:', needs.needsFirstClick);
+          console.log('🔍 [BROWSER] Needs last click:', needs.needsLastClick);
           
           // ============================================
           // METHOD 1: Try Highcharts API (Most Accurate)
@@ -2084,8 +2772,8 @@ async function main() {
           }
           
           if (chart && chart.series && chart.series[0]) {
-            results.push({ message: '? Highcharts API accessible' });
-            console.log('? [BROWSER] Highcharts API accessible');
+            results.push({ message: '✅ Highcharts API accessible' });
+            console.log('✅ [BROWSER] Highcharts API accessible');
           
           const series = chart.series[0];
           const dataPoints = series.data;
@@ -2124,7 +2812,7 @@ async function main() {
                 firstSpike.point.select(true, false);
                 firstSpike.point.firePointEvent('click');
           results.push({ 
-                  action: '? API: Clicked FIRST spike', 
+                  action: '✅ API: Clicked FIRST spike', 
                   x: Math.round(firstSpike.plotX), 
                   y: Math.round(firstSpike.plotY),
                   time: firstSpike.time
@@ -2141,7 +2829,7 @@ async function main() {
                 lastSpike.point.select(true, false);
                 lastSpike.point.firePointEvent('click');
           results.push({
-                  action: '? API: Clicked LAST spike', 
+                  action: '✅ API: Clicked LAST spike', 
                   x: Math.round(lastSpike.plotX), 
                   y: Math.round(lastSpike.plotY),
                   time: lastSpike.time
@@ -2156,16 +2844,16 @@ async function main() {
           // ============================================
           // METHOD 2: SVG Path Analysis (Fallback)
           // ============================================
-          results.push({ message: '?? Highcharts API not accessible, using SVG path analysis' });
-          console.log('?? [BROWSER] Highcharts API not accessible, using SVG path analysis');
+          results.push({ message: '⚠️ Highcharts API not accessible, using SVG path analysis' });
+          console.log('⚠️ [BROWSER] Highcharts API not accessible, using SVG path analysis');
           
           // Find the series path
           const seriesPath = document.querySelector('.highcharts-series path[data-z-index="1"]');
           if (!seriesPath) {
-            console.error('? [BROWSER] No series path found in SVG');
+            console.error('❌ [BROWSER] No series path found in SVG');
             return { error: 'No series path found in SVG' };
           }
-          console.log('? [BROWSER] Found series path in SVG');
+          console.log('✅ [BROWSER] Found series path in SVG');
           
           const pathData = seriesPath.getAttribute('d');
           if (!pathData) {
@@ -2189,7 +2877,7 @@ async function main() {
             });
           }
           
-          // For Bezier curves (C command), only use the end points (every 3rd point)
+          // For Bézier curves (C command), only use the end points (every 3rd point)
           // This gives us the actual plotted points, not the control points
           const plottedPoints = [];
           plottedPoints.push(coordinates[0]); // First M command point
@@ -2270,10 +2958,10 @@ async function main() {
             }
           }
           
-          console.log(`?? [BROWSER] Found ${drops.length} significant drops (≥8% Y-range)`);
+          console.log(`🔍 [BROWSER] Found ${drops.length} significant drops (≥8% Y-range)`);
           
           if (drops.length === 0) {
-            console.log(`?? [BROWSER] No irrigation drops detected - may have no irrigation this date`);
+            console.log(`⚠️ [BROWSER] No irrigation drops detected - may have no irrigation this date`);
             results.push({ message: 'No irrigation drops found' });
           }
           
@@ -2306,7 +2994,7 @@ async function main() {
             }
           }
           
-          console.log(`?? [BROWSER] After de-duplication: ${uniqueDrops.length} unique irrigation events`);
+          console.log(`🎯 [BROWSER] After de-duplication: ${uniqueDrops.length} unique irrigation events`);
           if (drops.length > uniqueDrops.length) {
             console.log(`   → Removed ${drops.length - uniqueDrops.length} duplicate drops`);
           }
@@ -2362,9 +3050,9 @@ async function main() {
                 dropPercent: drop.dropPercent
               });
               
-              console.log(`? [BROWSER] Irrigation ${dIdx + 1}: Start idx=${startIndex} (X=${Math.round(finalCoords[startIndex].x)}), End idx=${endIndex} (X=${Math.round(finalCoords[endIndex].x)}), drop=${drop.dropPercent}%`);
+              console.log(`✅ [BROWSER] Irrigation ${dIdx + 1}: Start idx=${startIndex} (X=${Math.round(finalCoords[startIndex].x)}), End idx=${endIndex} (X=${Math.round(finalCoords[endIndex].x)}), drop=${drop.dropPercent}%`);
             } else {
-              console.log(`?? [BROWSER] Irrigation ${dIdx + 1}: Could not find valid start/end points, skipping`);
+              console.log(`⚠️ [BROWSER] Irrigation ${dIdx + 1}: Could not find valid start/end points, skipping`);
             }
           }
           
@@ -2373,7 +3061,7 @@ async function main() {
           });
           
           if (irrigationEvents.length === 0) {
-            console.error('? [BROWSER] No valid irrigation events found');
+            console.error('❌ [BROWSER] No valid irrigation events found');
             return {
               needsFirstClick: false,
               needsLastClick: false,
@@ -2406,7 +3094,7 @@ async function main() {
             }
           ];
           
-          console.log(`?? [BROWSER] Using FIRST irrigation START (idx=${firstEvent.startIndex}) and LAST irrigation END (idx=${lastEvent.endIndex})`);
+          console.log(`📌 [BROWSER] Using FIRST irrigation START (idx=${firstEvent.startIndex}) and LAST irrigation END (idx=${lastEvent.endIndex})`);
           
           
           // Get chart container for coordinate conversion
@@ -2421,7 +3109,7 @@ async function main() {
           const totalXRange = finalCoords[finalCoords.length - 1].x - finalCoords[0].x;
           const separationPercent = (xSeparation / totalXRange) * 100;
           
-          console.log(`?? [BROWSER] First (START) vs Last (END) separation: ${Math.round(separationPercent)}%`);
+          console.log(`📊 [BROWSER] First (START) vs Last (END) separation: ${Math.round(separationPercent)}%`);
           
           // IMPORTANT: Click ABOVE the line (lower Y) to hit Highcharts clickable area
           const clickOffsetY = 15; // pixels above the chart line
@@ -2433,7 +3121,7 @@ async function main() {
           results.push({
             message: `Separation: ${Math.round(xSeparation)}px (${Math.round(separationPercent)}% of chart)`
           });
-          console.log(`?? [BROWSER] First-Last separation: ${Math.round(xSeparation)}px (${Math.round(separationPercent)}% of chart)`);
+          console.log(`📏 [BROWSER] First-Last separation: ${Math.round(xSeparation)}px (${Math.round(separationPercent)}% of chart)`);
           
           results.push({ 
             message: `Click offset: ${clickOffsetY}px ABOVE chart line (Highcharts clickable area)`
@@ -2445,7 +3133,7 @@ async function main() {
           const lastX = containerRect.left + lastPoint.x;
           const lastY = containerRect.top + lastPoint.y - clickOffsetY;
           
-          console.log(`?? [BROWSER] Final click coordinates:`);
+          console.log(`🎯 [BROWSER] Final click coordinates:`);
           console.log(`   → FIRST (START): idx=${firstPoint.index} Screen(${Math.round(firstX)}, ${Math.round(firstY)}) SVG(${Math.round(firstPoint.x)}, ${Math.round(firstPoint.y)})`);
           console.log(`   → LAST (END): idx=${lastPoint.index} Screen(${Math.round(lastX)}, ${Math.round(lastY)}) SVG(${Math.round(lastPoint.x)}, ${Math.round(lastPoint.y)})`);
           
@@ -2480,7 +3168,7 @@ async function main() {
           
         // Check if HSSP detection failed
         if (clickResults.error) {
-          console.log(`     ??  HSSP detection failed: ${clickResults.error}`);
+          console.log(`     ⚠️  HSSP detection failed: ${clickResults.error}`);
           console.log(`        → No irrigation points found for this date`);
           console.log(`        → Tables will remain empty\n`);
           
@@ -2497,9 +3185,22 @@ async function main() {
           // Take screenshot
           const errorScreenshot = path.join(CONFIG.screenshotDir, `farm-${farmIdx + 1}-date-${dateIdx}-no-data-${timestamp}.png`);
           await page.screenshot({ path: errorScreenshot, fullPage: true });
-          console.log(`     ?? Screenshot: ${errorScreenshot}\n`);
+          console.log(`     📸 Screenshot: ${errorScreenshot}\n`);
           
-          // ? Direct URL navigation handles date change - no button click needed
+          // Move to next date (only if not at T-0)
+          if (dayOffset > 0) {
+            console.log(`     ⏭️  Moving to next date (T-${dayOffset} → T-${dayOffset - 1})...`);
+            const nextClicked = await page.evaluate(() => {
+              const nextButton = document.querySelector('button[aria-label="다음 기간"]');
+              if (nextButton) { nextButton.click(); return true; }
+              return false;
+            });
+            if (nextClicked) {
+              console.log(`     ⏭️  Moving to next date...\n`);
+              // ⚡ FAST: Brief wait for date picker UI
+              await page.waitForTimeout(300);
+            }
+          }
           continue; // Skip to next date
         }
         
@@ -2512,12 +3213,44 @@ async function main() {
         
         // Show separation info
         if (clickResults.separationPercent !== undefined) {
-          console.log(`     ? First (START) and Last (END) separated by ${clickResults.separationPercent}% of chart`);
+          console.log(`     ✅ First (START) and Last (END) separated by ${clickResults.separationPercent}% of chart`);
+        }
+        
+        // ═══════════════════════════════════════════════════════════════════════
+        // 🎓 F8 TRAINING MODE: Pause and allow manual point correction
+        // ═══════════════════════════════════════════════════════════════════════
+        if (CONFIG.trainingMode && clickResults.firstCoords && clickResults.lastCoords) {
+          console.log(`\n     🎓 F8 TRAINING MODE ACTIVATED`);
+          
+          const trainingResult = await trainAlgorithm(
+            page,
+            farm.name,
+            currentDateStr,
+            clickResults.firstCoords,
+            clickResults.lastCoords
+          );
+          
+          // If user provided corrections, apply them
+          if (trainingResult.hasCorrections && trainingResult.offsets) {
+            console.log(`     🔧 Applying user corrections to coordinates...`);
+            
+            // Update first coordinates
+            clickResults.firstCoords.x += trainingResult.offsets.first.x;
+            clickResults.firstCoords.y += trainingResult.offsets.first.y;
+            
+            // Update last coordinates
+            clickResults.lastCoords.x += trainingResult.offsets.last.x;
+            clickResults.lastCoords.y += trainingResult.offsets.last.y;
+            
+            console.log(`     ✅ Coordinates adjusted with user feedback\n`);
+          } else {
+            console.log(`     ✅ Algorithm prediction accepted\n`);
+          }
         }
         
         // CHART LEARNING MODE: Show detected points and allow user correction
         if (CONFIG.chartLearningMode && clickResults.firstCoords && clickResults.lastCoords) {
-          console.log(`\n     ?? CHART LEARNING MODE ACTIVE`);
+          console.log(`\n     🎓 CHART LEARNING MODE ACTIVE`);
           console.log(`        Algorithm will click at:`);
           console.log(`        → FIRST: Screen(${clickResults.firstCoords.x}, ${clickResults.firstCoords.y})`);
           console.log(`        → LAST: Screen(${clickResults.lastCoords.x}, ${clickResults.lastCoords.y})`);
@@ -2525,7 +3258,7 @@ async function main() {
           // Take screenshot BEFORE showing markers
           const beforeScreenshot = path.join(CONFIG.screenshotDir, `learning-before-${Date.now()}.png`);
           await page.screenshot({ path: beforeScreenshot, fullPage: false });
-          console.log(`        ?? Chart screenshot: ${beforeScreenshot}`);
+          console.log(`        📸 Chart screenshot: ${beforeScreenshot}`);
           
           // Draw BIG visible indicators on the page using HTML overlays
           await page.evaluate((first, last) => {
@@ -2547,10 +3280,10 @@ async function main() {
               font-family: Arial, sans-serif;
             `;
             banner.innerHTML = `
-              ?? LEARNING MODE ACTIVE ??<br>
+              🎓 LEARNING MODE ACTIVE 🎓<br>
               <span style="font-size: 16px; font-weight: normal;">
-                ?? Green circle = Algorithm's FIRST point | ?? Red circle = Algorithm's LAST point<br>
-                ? Correct? Just wait 30 seconds | ? Wrong? Click correct spots (Yellow then Orange)
+                🟢 Green circle = Algorithm's FIRST point | 🔴 Red circle = Algorithm's LAST point<br>
+                ✅ Correct? Just wait 30 seconds | ❌ Wrong? Click correct spots (Yellow then Orange)
               </span>
             `;
             document.body.appendChild(banner);
@@ -2670,7 +3403,7 @@ async function main() {
               `;
               overlay.appendChild(userMarker);
               
-              console.log(`? [BROWSER] Recorded user click #${window.learningClicks.length}: (${Math.round(e.clientX)}, ${Math.round(e.clientY)})`);
+              console.log(`✅ [BROWSER] Recorded user click #${window.learningClicks.length}: (${Math.round(e.clientX)}, ${Math.round(e.clientY)})`);
             };
             document.addEventListener('click', clickHandler, true);
             window.removeClickHandler = () => {
@@ -2718,19 +3451,19 @@ async function main() {
             }, 1000);
           });
           
-          // ? FAST: Markers appear instantly via JavaScript
-          console.log(`\n        ?? ?? LOOK AT THE BROWSER WINDOW! ?? ??`);
-          console.log(`        ???????????????????????????????????????`);
+          // ⚡ FAST: Markers appear instantly via JavaScript
+          console.log(`\n        🟢 🔴 LOOK AT THE BROWSER WINDOW! 🔴 🟢`);
+          console.log(`        ═══════════════════════════════════════`);
           console.log(`        You should see:`);
-          console.log(`        ? Purple banner at top with instructions`);
-          console.log(`        ? HUGE green circle (100px) = FIRST START`);
-          console.log(`        ? HUGE red circle (100px) = LAST END`);
-          console.log(`        ? Big countdown timer (top-right corner)`);
-          console.log(`\n        ?? WHAT TO DO:`);
-          console.log(`        ? Circles correct? → Just wait for countdown`);
-          console.log(`        ? Circles wrong? → Click correct spots before timer ends`);
+          console.log(`        • Purple banner at top with instructions`);
+          console.log(`        • HUGE green circle (100px) = FIRST START`);
+          console.log(`        • HUGE red circle (100px) = LAST END`);
+          console.log(`        • Big countdown timer (top-right corner)`);
+          console.log(`\n        📋 WHAT TO DO:`);
+          console.log(`        ✅ Circles correct? → Just wait for countdown`);
+          console.log(`        ❌ Circles wrong? → Click correct spots before timer ends`);
           console.log(`           (Yellow circle = your FIRST, Orange = your LAST)`);
-          console.log(`\n        ??  Waiting 20 seconds for corrections...`);
+          console.log(`\n        ⏱️  Waiting 20 seconds for corrections...`);
           
           // Wait 20 seconds for user to make corrections (must keep this for human interaction)
           await page.waitForTimeout(20000);
@@ -2767,7 +3500,7 @@ async function main() {
           fs.writeFileSync(TRAINING_FILE, JSON.stringify(trainingData, null, 2));
           
           if (userCorrections.length > 0) {
-            console.log(`\n     ?? Recorded ${userCorrections.length} user corrections`);
+            console.log(`\n     📝 Recorded ${userCorrections.length} user corrections`);
             console.log(`        Saved to training/training-data.json`);
             
             // Calculate differences
@@ -2782,7 +3515,7 @@ async function main() {
               console.log(`        Last point offset: X=${Math.round(lastDiffX)}px, Y=${Math.round(lastDiffY)}px\n`);
             }
           } else {
-            console.log(`\n     ? User accepted algorithm detection (no corrections)\n`);
+            console.log(`\n     ✅ User accepted algorithm detection (no corrections)\n`);
           }
         }
         
@@ -2794,11 +3527,11 @@ async function main() {
           if (learnedOffsets.count > 0 && !CONFIG.chartLearningMode) {
             const correctedX = coords.x + learnedOffsets.firstX;
             const correctedY = coords.y + learnedOffsets.firstY;
-            console.log(`     ?? Applying learned correction: (${learnedOffsets.firstX.toFixed(1)}, ${learnedOffsets.firstY.toFixed(1)})`);
+            console.log(`     🎓 Applying learned correction: (${learnedOffsets.firstX.toFixed(1)}, ${learnedOffsets.firstY.toFixed(1)})`);
             coords = { ...coords, x: Math.round(correctedX), y: Math.round(correctedY) };
           }
           
-          console.log(`     ? Clicking FIRST irrigation time (START of irrigation)`);
+          console.log(`     ✅ Clicking FIRST irrigation time (START of irrigation)`);
           console.log(`        → Screen Coord: (${coords.x}, ${coords.y}) - 15px ABOVE line`);
           console.log(`        → SVG Line Coord: (${coords.svgX}, ${coords.svgY})`);
           console.log(`        → Type: ${coords.type || 'START'}`);
@@ -2806,12 +3539,23 @@ async function main() {
           // Focus first input field
           await page.click('input[type="time"]:nth-of-type(1)');
           
-          // ? FAST: Click chart immediately
+          // ⚡ FAST: Click chart immediately
           await page.mouse.click(coords.x, coords.y);
           // Brief wait for UI to register click before second click
           await page.waitForTimeout(500);
           
-          // ?? Track chart click
+          // 📊 Track chart click for checkpoint
+          currentFarmClickedPoints.push({
+            type: 'FIRST',
+            screenX: coords.x,
+            screenY: coords.y,
+            svgX: coords.svgX,
+            svgY: coords.svgY,
+            date: dateString,
+            timestamp: new Date().toISOString()
+          });
+          
+          // 📊 Track chart click
           runStats.chartsClicked++;
         }
         
@@ -2822,11 +3566,11 @@ async function main() {
           if (learnedOffsets.count > 0 && !CONFIG.chartLearningMode) {
             const correctedX = coords.x + learnedOffsets.lastX;
             const correctedY = coords.y + learnedOffsets.lastY;
-            console.log(`     ?? Applying learned correction: (${learnedOffsets.lastX.toFixed(1)}, ${learnedOffsets.lastY.toFixed(1)})`);
+            console.log(`     🎓 Applying learned correction: (${learnedOffsets.lastX.toFixed(1)}, ${learnedOffsets.lastY.toFixed(1)})`);
             coords = { ...coords, x: Math.round(correctedX), y: Math.round(correctedY) };
           }
           
-          console.log(`     ? Clicking LAST irrigation time (END of irrigation)`);
+          console.log(`     ✅ Clicking LAST irrigation time (END of irrigation)`);
           console.log(`        → Screen Coord: (${coords.x}, ${coords.y}) - 15px ABOVE line`);
           console.log(`        → SVG Line Coord: (${coords.svgX}, ${coords.svgY})`);
           console.log(`        → Type: ${coords.type || 'END'}`);
@@ -2837,33 +3581,44 @@ async function main() {
             await timeInputs[timeInputs.length - 1].click();
           }
           
-          // ? FAST: Click chart immediately
+          // ⚡ FAST: Click chart immediately
           await page.mouse.click(coords.x, coords.y);
           // Brief wait for table update
           await page.waitForTimeout(500);
           
-          // ?? Track chart click
+          // 📊 Track chart click for checkpoint
+          currentFarmClickedPoints.push({
+            type: 'LAST',
+            screenX: coords.x,
+            screenY: coords.y,
+            svgX: coords.svgX,
+            svgY: coords.svgY,
+            date: dateString,
+            timestamp: new Date().toISOString()
+          });
+          
+          // 📊 Track chart click
           runStats.chartsClicked++;
         }
         
-        // ? FAST: Tables update instantly after clicks
+        // ⚡ FAST: Tables update instantly after clicks
         
       } else {
-          console.log('     ? Some tables already have data, minimal clicks needed\n');
+          console.log('     ✅ Some tables already have data, minimal clicks needed\n');
         }
         
-        // ? FAST: Brief wait for UI update
+        // ⚡ FAST: Brief wait for UI update
         await page.waitForTimeout(500);
         
         // Take screenshot after clicking
         const step6Screenshot = path.join(CONFIG.screenshotDir, `farm-${farmIdx + 1}-date-${dateIdx}-after-clicks-${timestamp}.png`);
         await page.screenshot({ path: step6Screenshot, fullPage: true });
-        console.log(`     ?? Screenshot: ${step6Screenshot}\n`);
+        console.log(`     📸 Screenshot: ${step6Screenshot}\n`);
         
         // Extract final table values
-        console.log('     ?? Extracting irrigation data from tables...');
+        console.log('     📊 Extracting irrigation data from tables...');
       
-      // ? FAST: Extract data immediately
+      // ⚡ FAST: Extract data immediately
       const finalData = await page.evaluate(() => {
         const results = {
           firstIrrigationTime: null,
@@ -2871,12 +3626,12 @@ async function main() {
           debug: []
         };
         
-        console.log('?? [BROWSER] Extracting irrigation time data from tables...');
+        console.log('📊 [BROWSER] Extracting irrigation time data from tables...');
         
         // Strategy 1: Look for time input fields (type="time")
         const timeInputs = Array.from(document.querySelectorAll('input[type="time"]'));
         results.debug.push(`Found ${timeInputs.length} time input fields`);
-        console.log(`?? [BROWSER] Found ${timeInputs.length} time input fields`);
+        console.log(`📊 [BROWSER] Found ${timeInputs.length} time input fields`);
         
         // For each time input, look backwards in the DOM to find its label
         timeInputs.forEach((input, idx) => {
@@ -2893,14 +3648,14 @@ async function main() {
             // Check if this is the "first irrigation time" field
             if (containerText.includes('첫 급액') || containerText.includes('첫급액')) {
               results.firstIrrigationTime = value;
-              results.debug.push(`? Matched FIRST time: "${value}"`);
-              console.log(`? [BROWSER] Found FIRST irrigation time: "${value}"`);
+              results.debug.push(`✅ Matched FIRST time: "${value}"`);
+              console.log(`✅ [BROWSER] Found FIRST irrigation time: "${value}"`);
             }
             // Check if this is the "last irrigation time" field
             else if (containerText.includes('마지막 급액') || containerText.includes('마지막급액')) {
               results.lastIrrigationTime = value;
-              results.debug.push(`? Matched LAST time: "${value}"`);
-              console.log(`? [BROWSER] Found LAST irrigation time: "${value}"`);
+              results.debug.push(`✅ Matched LAST time: "${value}"`);
+              console.log(`✅ [BROWSER] Found LAST irrigation time: "${value}"`);
             }
           }
         });
@@ -2960,7 +3715,7 @@ async function main() {
             }
           }
           }); // End forEach
-        
+          
           // Strategy 3: If still not found, look for ANY elements with time format in the right panel
           if (!results.firstIrrigationTime || !results.lastIrrigationTime) {
             const timeElements = allText.filter(elem => {
@@ -2985,7 +3740,7 @@ async function main() {
           } // End Strategy 3 if block
         } // End fallback if block
         
-        console.log('?? [BROWSER] Extraction complete:');
+        console.log('📋 [BROWSER] Extraction complete:');
         console.log(`   → First time: ${results.firstIrrigationTime || 'NOT FOUND'}`);
         console.log(`   → Last time: ${results.lastIrrigationTime || 'NOT FOUND'}`);
         
@@ -3005,13 +3760,13 @@ async function main() {
         };
         farmDateData.push(dateData);
         
-        // ?? Track statistics
+        // 📊 Track statistics
         runStats.datesProcessed++;
         if (finalData.firstIrrigationTime || finalData.lastIrrigationTime) {
           runStats.successCount++;
-          console.log(`     ? Data collected for ${displayedDate}\n`);
+          console.log(`     ✅ Data collected for ${displayedDate}\n`);
         } else {
-          console.log(`     ??  No irrigation time data found for this date\n`);
+          console.log(`     ⚠️  No irrigation time data found for this date\n`);
         }
         
         // Update date range
@@ -3019,17 +3774,52 @@ async function main() {
         runStats.dateRange.end = displayedDate;
         
       } catch (error) {
-        console.log(`     ??  Error in data extraction: ${error.message}\n`);
+        console.log(`     ⚠️  Error in data extraction: ${error.message}\n`);
       }
       
       // Take screenshot after processing this date
       const dateScreenshot = path.join(CONFIG.screenshotDir, `farm-${farmIdx + 1}-date-${dateIdx}-${timestamp}.png`);
       await page.screenshot({ path: dateScreenshot, fullPage: true });
-      console.log(`     ?? Screenshot: ${dateScreenshot}\n`);
+      console.log(`     📸 Screenshot: ${dateScreenshot}\n`);
       
-      // ? NO NEED TO CLICK "Next Period" - We navigate directly via URL on next iteration
+      // 💾 SAVE CHECKPOINT after each date (date-level granularity)
+      saveCheckpoint({
+        farmIndex: farmIdx,
+        farmName: currentFarm.name,
+        dateIndex: 5 - dayOffset, // Convert to 0-based index (T-5=0, T-0=5)
+        dateString: dateString,
+        totalFarms: farmsToProcess.length,
+        totalDates: totalDaysToCheck,
+        clickedPoints: currentFarmClickedPoints,
+        manager: CONFIG.targetName,
+        mode: CONFIG.chartLearningMode ? 'learning' : 'normal'
+      });
       
-    } // End of date loop
+      // ⏭️ Move to next date using button (T-5 → T-4 → ... → T-0)
+      // URL date parameter does NOT work - must use button clicks
+      if (dayOffset > 0) {
+        console.log(`     ⏭️  Moving to next date (T-${dayOffset} → T-${dayOffset - 1})...`);
+        const nextClicked = await page.evaluate(() => {
+          const nextButton = document.querySelector('button[aria-label="다음 기간"]');
+          if (nextButton) {
+            nextButton.click();
+            return true;
+          }
+          return false;
+        });
+        
+        if (nextClicked) {
+          await page.waitForTimeout(800);
+          await waitForPageReady(page, { waitForChart: true });
+          console.log(`     ✅ Advanced to next date`);
+        } else {
+          console.log(`     ⚠️  Next button not found - may already be at T-0`);
+        }
+      } else {
+        console.log(`     ✅ Completed T-0 (today) - all dates done for this farm`);
+      }
+      
+    } // End of date loop // End date loop
     
     // Add all dates data for this farm to collection
     const farmData = {
@@ -3041,42 +3831,17 @@ async function main() {
     };
     allFarmData.push(farmData);
     
-    // ?? Track farm completion
+    // 📊 Track farm completion
     runStats.farmsCompleted++;
     
-    console.log(`\n  ? Finished Farm "${currentFarm.name}"`);
+    console.log(`\n  ✅ Completed all dates for farm "${currentFarm.name}"`);
     console.log(`     → Processed ${farmDateData.length} dates`);
     console.log(`     → Data found for ${farmData.datesWithData} dates\n`);
-    
-    // ??? END OF ROBUST TRY BLOCK - Catch any errors and continue to next farm
-    } catch (farmError) {
-      console.log(`\n  ? Error processing farm "${currentFarm.name}": ${farmError.message}`);
-      console.log(`     → Stack: ${farmError.stack?.split('\n')[1] || 'N/A'}`);
-      console.log(`     → Continuing to next farm...\n`);
-      
-      if (dashboard) {
-        dashboard.log(`Error on ${currentFarm.name}: ${farmError.message}`, 'error');
-      }
-      
-      runStats.errorCount = (runStats.errorCount || 0) + 1;
-      
-      // Take error screenshot
-      try {
-        const errorScreenshot = path.join(CONFIG.screenshotDir, `error-farm-${farmIdx + 1}-${Date.now()}.png`);
-        await page.screenshot({ path: errorScreenshot, fullPage: true });
-        console.log(`     ?? Error screenshot: ${errorScreenshot}\n`);
-      } catch (ssErr) {
-        console.log(`     ??  Could not save error screenshot\n`);
-      }
-      
-      // Continue to next farm (this will automatically happen when the catch block ends)
-      continue;
-    }
       
     } // End farm loop
     
     // Save all collected farm data
-    console.log('\n?? Saving all farm data...');
+    console.log('\n💾 Saving all farm data...');
     const allDataFile = path.join(CONFIG.outputDir, `all-farms-data-${timestamp}.json`);
     const summaryData = {
       extractedAt: new Date().toISOString(),
@@ -3084,7 +3849,7 @@ async function main() {
       dateRange: {
         description: '5 days ago to today',
         totalDays: totalDaysToCheck,
-        method: 'Direct URL navigation with date parameter'
+        method: 'Previous/Next period buttons'
       },
       totalFarms: allFarmData.length,
       farmsWithData: allFarmData.filter(f => f.datesWithData > 0).length,
@@ -3093,24 +3858,24 @@ async function main() {
       farms: allFarmData
     };
     fs.writeFileSync(allDataFile, JSON.stringify(summaryData, null, 2));
-    console.log(`? Saved data for ${allFarmData.length} farms to: ${allDataFile}\n`);
+    console.log(`✅ Saved data for ${allFarmData.length} farms to: ${allDataFile}\n`);
     
     // Step 8: Final screenshot
     const finalScreenshot = path.join(CONFIG.screenshotDir, `8-final-state-${timestamp}.png`);
     await page.screenshot({ path: finalScreenshot, fullPage: true });
-    console.log(`?? Final screenshot saved: ${finalScreenshot}\n`);
+    console.log(`📸 Final screenshot saved: ${finalScreenshot}\n`);
     
     // Success summary
-    console.log('? Multi-Farm Data Extraction Complete!');
-    console.log('\n?? Summary:');
-    console.log(`   ? Total farms processed: ${allFarmData.length}`);
-    console.log(`   ? Farms with data: ${summaryData.farmsWithData}`);
-    console.log(`   ? Manager: ${CONFIG.targetName}`);
+    console.log('✅ Multi-Farm Data Extraction Complete!');
+    console.log('\n📋 Summary:');
+    console.log(`   • Total farms processed: ${allFarmData.length}`);
+    console.log(`   • Farms with data: ${summaryData.farmsWithData}`);
+    console.log(`   • Manager: ${CONFIG.targetName}`);
     
     // Show summary table
-    console.log('\n?? Farm Details:');
+    console.log('\n📊 Farm Details:');
     allFarmData.forEach((farm, idx) => {
-      const status = farm.datesWithData > 0 ? '?' : '??';
+      const status = farm.datesWithData > 0 ? '✅' : '⚠️';
       console.log(`   ${status} [${idx + 1}] ${farm.farmName}`);
       console.log(`      Dates processed: ${farm.totalDates} | Data found: ${farm.datesWithData}`);
       
@@ -3119,7 +3884,7 @@ async function main() {
       sampleDates.forEach((dateData, dIdx) => {
         const first = dateData.firstIrrigationTime || '--:--';
         const last = dateData.lastIrrigationTime || '--:--';
-        const dateStatus = (dateData.firstIrrigationTime || dateData.lastIrrigationTime) ? '?' : '?';
+        const dateStatus = (dateData.firstIrrigationTime || dateData.lastIrrigationTime) ? '✓' : '✗';
         console.log(`        ${dateStatus} ${dateData.date}: First ${first} | Last ${last}`);
       });
       
@@ -3128,20 +3893,20 @@ async function main() {
       }
     });
     
-    console.log('\n?? What Was Accomplished:');
-    console.log('   1. ? Navigated to report page');
-    console.log(`   2. ? Selected "${CONFIG.targetName}" manager`);
-    console.log(`   3. ? Processed ${allFarmData.length} farms`);
-    console.log(`   4. ? Checked ${summaryData.dateRange.totalDays} days per farm (last 5 days)`);
-    console.log(`   5. ? Total dates processed: ${summaryData.totalDatesProcessed}`);
-    console.log(`   6. ? Dates with data: ${summaryData.totalDatesWithData}`);
-    console.log('   7. ? Skipped dates with pre-filled tables (efficient!)');
-    console.log('   8. ? Used HSSP algorithm for irrigation point detection');
-    console.log('   9. ? Extracted data and saved to JSON');
-    console.log('   10. ? Captured screenshots of the process\n');
+    console.log('\n📋 What Was Accomplished:');
+    console.log('   1. ✅ Navigated to report page');
+    console.log(`   2. ✅ Selected "${CONFIG.targetName}" manager`);
+    console.log(`   3. ✅ Processed ${allFarmData.length} farms`);
+    console.log(`   4. ✅ Checked ${summaryData.dateRange.totalDays} days per farm (last 5 days)`);
+    console.log(`   5. ✅ Total dates processed: ${summaryData.totalDatesProcessed}`);
+    console.log(`   6. ✅ Dates with data: ${summaryData.totalDatesWithData}`);
+    console.log('   7. ✅ Skipped dates with pre-filled tables (efficient!)');
+    console.log('   8. ✅ Used HSSP algorithm for irrigation point detection');
+    console.log('   9. ✅ Extracted data and saved to JSON');
+    console.log('   10. ✅ Captured screenshots of the process\n');
     
-    // ?? Save Run Statistics to History
-    console.log('?? Saving run statistics to history...');
+    // 📊 Save Run Statistics to History
+    console.log('📊 Saving run statistics to history...');
     runStats.endTime = Date.now();
     runStats.duration = Math.round((runStats.endTime - runStats.startTime) / 1000); // seconds
     runStats.successRate = runStats.datesProcessed > 0 
@@ -3157,7 +3922,7 @@ async function main() {
         historyData = JSON.parse(fileContent);
       }
     } catch (err) {
-      console.log(`   ??  Could not read existing history: ${err.message}`);
+      console.log(`   ⚠️  Could not read existing history: ${err.message}`);
       historyData = [];
     }
     
@@ -3165,7 +3930,7 @@ async function main() {
     
     try {
       fs.writeFileSync(historyFile, JSON.stringify(historyData, null, 2));
-      console.log(`? Run statistics saved to: ${historyFile}`);
+      console.log(`✅ Run statistics saved to: ${historyFile}`);
       console.log(`   → Farms: ${runStats.farmsCompleted}/${runStats.totalFarmsTargeted}`);
       console.log(`   → Charts Clicked: ${runStats.chartsClicked}`);
       console.log(`   → Success Rate: ${runStats.successRate}%`);
@@ -3174,50 +3939,38 @@ async function main() {
       if (dashboard) {
         dashboard.log(`Run stats: ${runStats.farmsCompleted} farms, ${runStats.chartsClicked} clicks, ${runStats.successRate}% success`, 'success');
       }
+      
+      // 🧹 Clear checkpoint on successful completion
+      clearCheckpoint();
+      
     } catch (err) {
-      console.log(`   ??  Could not save history: ${err.message}`);
+      console.log(`   ⚠️  Could not save history: ${err.message}`);
     }
     
   } catch (error) {
-    console.error('? Error during automation:', error);
+    console.error('❌ Error during automation:', error);
     console.error('   Stack trace:', error.stack);
     
     if (dashboard) {
-      dashboard.updateStatus('? Error occurred', 'error');
+      dashboard.updateStatus('❌ Error occurred', 'error');
       dashboard.log(`Error: ${error.message}`, 'error');
     }
     
-    // ?? SAVE CRASH REPORT for AI analysis
-    try {
-      const errorName = error.message.includes('Login') ? 'LoginFailed' : 
-                        error.message.includes('timeout') ? 'Timeout' :
-                        error.message.includes('Farm') ? 'FarmProcessingError' : 'AutomationError';
-      await saveCrashReport(page, errorName, error);
-      if (dashboard) {
-        dashboard.log('Crash report saved to crash-reports/ folder', 'info');
-      }
-    } catch (crashErr) {
-      console.log(`   ?? Could not save crash report: ${crashErr.message}`);
-    }
-    
-    // Also take simple error screenshot (backup)
+    // Try to take error screenshot
     try {
       const errorScreenshot = path.join(CONFIG.screenshotDir, `error-${Date.now()}.png`);
       await takeScreenshot(page, errorScreenshot);
-      console.log(`?? Error screenshot saved: ${errorScreenshot}`);
+      console.log(`📸 Error screenshot saved: ${errorScreenshot}`);
+      if (dashboard) {
+        dashboard.log('Error screenshot captured', 'info');
+      }
     } catch (screenshotError) {
       console.log('   Could not save error screenshot');
     }
     
   } finally {
-    // Clean up F9 polling interval
-    if (f9PollInterval) {
-      clearInterval(f9PollInterval);
-      console.log('  🔴 F9 dashboard polling stopped');
-    }
-    
     // Keep browser open for inspection
-    console.log('\n🎯 Automation complete. Browser will stay open for inspection...');
+    console.log('\n🔚 Automation complete. Browser will stay open for inspection...');
     console.log('   → Check the browser DevTools Console tab to see webpage logs');
     console.log('   → Close the browser manually when done');
     console.log('   → Dashboard will remain accessible');
@@ -3239,7 +3992,7 @@ main().catch(error => {
   console.error('Fatal error:', error);
   if (globalDashboard) {
     globalDashboard.log(`Fatal error: ${error.message}`, 'error');
-    globalDashboard.updateStatus('? Fatal Error', 'error');
+    globalDashboard.updateStatus('❌ Fatal Error', 'error');
   }
   process.exit(1);
 });

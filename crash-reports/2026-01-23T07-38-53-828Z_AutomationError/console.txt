@@ -1,0 +1,59 @@
+=== BROWSER CONSOLE LOGS (Last 50) ===
+
+[2026-01-23T07:38:40.358Z] [WARNING] Highcharts warning: Consider including the "accessibility.js" module to make your chart more usable for people with disabilities. Set the "accessibility.enabled" option to false to remove this warning. See https://www.highcharts.com/docs/accessibility/accessibility-module.
+[2026-01-23T07:38:41.270Z] [LOG] ?? [BROWSER] Starting irrigation point detection...
+[2026-01-23T07:38:41.270Z] [LOG] ?? [BROWSER] Needs first click: true
+[2026-01-23T07:38:41.270Z] [LOG] ?? [BROWSER] Needs last click: true
+[2026-01-23T07:38:41.270Z] [LOG] ?? [BROWSER] Highcharts API not accessible, using SVG path analysis
+[2026-01-23T07:38:41.270Z] [LOG] ? [BROWSER] Found series path in SVG
+[2026-01-23T07:38:41.270Z] [LOG] ?? [BROWSER] Found 7 significant drops (≥8% Y-range)
+[2026-01-23T07:38:41.270Z] [LOG] ?? [BROWSER] After de-duplication: 1 unique irrigation events
+[2026-01-23T07:38:41.270Z] [LOG]    → Removed 6 duplicate drops
+[2026-01-23T07:38:41.270Z] [LOG] ?? [BROWSER] Irrigation 1: Could not find valid start/end points, skipping
+[2026-01-23T07:38:41.270Z] [ERROR] ? [BROWSER] No valid irrigation events found
+[2026-01-23T07:38:42.883Z] [WARNING] Highcharts warning: Consider including the "accessibility.js" module to make your chart more usable for people with disabilities. Set the "accessibility.enabled" option to false to remove this warning. See https://www.highcharts.com/docs/accessibility/accessibility-module.
+[2026-01-23T07:38:43.547Z] [LOG] ✅ F9 Manual Trigger listener installed - Press F9 to save crash report
+[2026-01-23T07:38:43.850Z] [LOG] ?? [BROWSER] Starting irrigation point detection...
+[2026-01-23T07:38:43.851Z] [LOG] ?? [BROWSER] Needs first click: true
+[2026-01-23T07:38:43.851Z] [LOG] ?? [BROWSER] Needs last click: true
+[2026-01-23T07:38:43.851Z] [LOG] ?? [BROWSER] Highcharts API not accessible, using SVG path analysis
+[2026-01-23T07:38:43.852Z] [LOG] ? [BROWSER] Found series path in SVG
+[2026-01-23T07:38:43.852Z] [LOG] ?? [BROWSER] Found 7 significant drops (≥8% Y-range)
+[2026-01-23T07:38:43.853Z] [LOG] ?? [BROWSER] After de-duplication: 1 unique irrigation events
+[2026-01-23T07:38:43.853Z] [LOG]    → Removed 6 duplicate drops
+[2026-01-23T07:38:43.853Z] [LOG] ?? [BROWSER] Irrigation 1: Could not find valid start/end points, skipping
+[2026-01-23T07:38:43.853Z] [ERROR] ? [BROWSER] No valid irrigation events found
+[2026-01-23T07:38:45.038Z] [LOG] ✅ F9 Manual Trigger listener installed - Press F9 to save crash report
+[2026-01-23T07:38:45.636Z] [WARNING] Highcharts warning: Consider including the "accessibility.js" module to make your chart more usable for people with disabilities. Set the "accessibility.enabled" option to false to remove this warning. See https://www.highcharts.com/docs/accessibility/accessibility-module.
+[2026-01-23T07:38:46.315Z] [LOG] ?? [BROWSER] Starting irrigation point detection...
+[2026-01-23T07:38:46.315Z] [LOG] ?? [BROWSER] Needs first click: true
+[2026-01-23T07:38:46.315Z] [LOG] ?? [BROWSER] Needs last click: true
+[2026-01-23T07:38:46.316Z] [LOG] ?? [BROWSER] Highcharts API not accessible, using SVG path analysis
+[2026-01-23T07:38:46.316Z] [LOG] ? [BROWSER] Found series path in SVG
+[2026-01-23T07:38:46.316Z] [LOG] ?? [BROWSER] Found 7 significant drops (≥8% Y-range)
+[2026-01-23T07:38:46.316Z] [LOG] ?? [BROWSER] After de-duplication: 1 unique irrigation events
+[2026-01-23T07:38:46.316Z] [LOG]    → Removed 6 duplicate drops
+[2026-01-23T07:38:46.316Z] [LOG] ?? [BROWSER] Irrigation 1: Could not find valid start/end points, skipping
+[2026-01-23T07:38:46.316Z] [ERROR] ? [BROWSER] No valid irrigation events found
+[2026-01-23T07:38:48.105Z] [WARNING] Highcharts warning: Consider including the "accessibility.js" module to make your chart more usable for people with disabilities. Set the "accessibility.enabled" option to false to remove this warning. See https://www.highcharts.com/docs/accessibility/accessibility-module.
+[2026-01-23T07:38:48.447Z] [LOG] ✅ F9 Manual Trigger listener installed - Press F9 to save crash report
+[2026-01-23T07:38:48.706Z] [LOG] ✅ F9 Manual Trigger listener installed - Press F9 to save crash report
+[2026-01-23T07:38:48.914Z] [LOG] ✅ F9 Manual Trigger listener installed - Press F9 to save crash report
+[2026-01-23T07:38:48.981Z] [LOG] ?? [BROWSER] Starting irrigation point detection...
+[2026-01-23T07:38:48.981Z] [LOG] ?? [BROWSER] Needs first click: true
+[2026-01-23T07:38:48.981Z] [LOG] ?? [BROWSER] Needs last click: true
+[2026-01-23T07:38:48.981Z] [LOG] ?? [BROWSER] Highcharts API not accessible, using SVG path analysis
+[2026-01-23T07:38:48.981Z] [LOG] ? [BROWSER] Found series path in SVG
+[2026-01-23T07:38:48.981Z] [LOG] ?? [BROWSER] Found 7 significant drops (≥8% Y-range)
+[2026-01-23T07:38:48.982Z] [LOG] ?? [BROWSER] After de-duplication: 1 unique irrigation events
+[2026-01-23T07:38:48.982Z] [LOG]    → Removed 6 duplicate drops
+[2026-01-23T07:38:48.982Z] [LOG] ?? [BROWSER] Irrigation 1: Could not find valid start/end points, skipping
+[2026-01-23T07:38:48.982Z] [ERROR] ? [BROWSER] No valid irrigation events found
+[2026-01-23T07:38:53.310Z] [WARNING] Highcharts warning: Consider including the "accessibility.js" module to make your chart more usable for people with disabilities. Set the "accessibility.enabled" option to false to remove this warning. See https://www.highcharts.com/docs/accessibility/accessibility-module.
+
+=== ERROR DETAILS ===
+Error Name: AutomationError
+Error Message: totalDaysToCheck is not defined
+Stack Trace:
+ReferenceError: totalDaysToCheck is not defined
+    at main (file:///C:/Users/iocrops%20admin/Coding/IrrigationReportAutomation/irrigation-playwright.js:3086:20)

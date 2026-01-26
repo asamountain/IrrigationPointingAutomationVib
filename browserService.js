@@ -162,6 +162,50 @@ export async function launchBrowser(options = {}) {
     page = await context.newPage();
     currentPage = page;
     
+    // ═══════════════════════════════════════════════════════════════════════════
+    // REQUEST FAILURE LISTENER - Detect silent network failures
+    // ═══════════════════════════════════════════════════════════════════════════
+    
+    // Track failed requests for diagnostics
+    const failedRequests = [];
+    
+    page.on('requestfailed', request => {
+      const failure = request.failure();
+      const url = request.url();
+      
+      // Only log important failures (ignore analytics, ads, etc.)
+      const isImportant = url.includes('iofarm.com') || url.includes('newapis');
+      
+      if (isImportant) {
+        const failureInfo = {
+          url: url.substring(0, 100),
+          method: request.method(),
+          errorText: failure?.errorText || 'Unknown',
+          timestamp: new Date().toISOString()
+        };
+        failedRequests.push(failureInfo);
+        
+        // Keep only last 50 failures
+        if (failedRequests.length > 50) {
+          failedRequests.shift();
+        }
+        
+        console.log(`⚠️ [BrowserService] Request failed: ${request.method()} ${url.substring(0, 60)}...`);
+        console.log(`   → Error: ${failure?.errorText || 'Unknown'}`);
+      }
+    });
+    
+    // Expose failed requests for crash reports
+    page.getFailedRequests = () => failedRequests;
+    
+    // ═══════════════════════════════════════════════════════════════════════════
+    // PAGE ERROR LISTENER - Detect JavaScript errors
+    // ═══════════════════════════════════════════════════════════════════════════
+    
+    page.on('pageerror', error => {
+      console.log(`⚠️ [BrowserService] Page error: ${error.message}`);
+    });
+    
     // Maximize window via CDP
     if (maximized) {
       try {

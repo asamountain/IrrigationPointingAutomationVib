@@ -1,0 +1,9 @@
+{
+  "errorName": "AutomationError",
+  "timestamp": "2026-01-23T07:38:53.831Z",
+  "url": "unknown",
+  "files": [
+    "console.txt",
+    "network_last_failed.json"
+  ]
+}

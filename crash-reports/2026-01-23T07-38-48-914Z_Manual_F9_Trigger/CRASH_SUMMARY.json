@@ -1,0 +1,11 @@
+{
+  "errorName": "Manual_F9_Trigger",
+  "timestamp": "2026-01-23T07:38:48.915Z",
+  "url": "https://admin.iofarm.com/report/point/957/958?manager=%EC%A7%84%EC%9A%B0&date=2026-01-22",
+  "files": [
+    "state.png",
+    "dom.html",
+    "console.txt",
+    "network_last_failed.json"
+  ]
+}

@@ -1,0 +1,68 @@
+=== BROWSER CONSOLE LOGS (Last 50) ===
+
+[2026-01-23T07:38:38.742Z] [ERROR] ? [BROWSER] No valid irrigation events found
+[2026-01-23T07:38:40.358Z] [WARNING] Highcharts warning: Consider including the "accessibility.js" module to make your chart more usable for people with disabilities. Set the "accessibility.enabled" option to false to remove this warning. See https://www.highcharts.com/docs/accessibility/accessibility-module.
+[2026-01-23T07:38:41.270Z] [LOG] ?? [BROWSER] Starting irrigation point detection...
+[2026-01-23T07:38:41.270Z] [LOG] ?? [BROWSER] Needs first click: true
+[2026-01-23T07:38:41.270Z] [LOG] ?? [BROWSER] Needs last click: true
+[2026-01-23T07:38:41.270Z] [LOG] ?? [BROWSER] Highcharts API not accessible, using SVG path analysis
+[2026-01-23T07:38:41.270Z] [LOG] ? [BROWSER] Found series path in SVG
+[2026-01-23T07:38:41.270Z] [LOG] ?? [BROWSER] Found 7 significant drops (≥8% Y-range)
+[2026-01-23T07:38:41.270Z] [LOG] ?? [BROWSER] After de-duplication: 1 unique irrigation events
+[2026-01-23T07:38:41.270Z] [LOG]    → Removed 6 duplicate drops
+[2026-01-23T07:38:41.270Z] [LOG] ?? [BROWSER] Irrigation 1: Could not find valid start/end points, skipping
+[2026-01-23T07:38:41.270Z] [ERROR] ? [BROWSER] No valid irrigation events found
+[2026-01-23T07:38:42.883Z] [WARNING] Highcharts warning: Consider including the "accessibility.js" module to make your chart more usable for people with disabilities. Set the "accessibility.enabled" option to false to remove this warning. See https://www.highcharts.com/docs/accessibility/accessibility-module.
+[2026-01-23T07:38:43.547Z] [LOG] ✅ F9 Manual Trigger listener installed - Press F9 to save crash report
+[2026-01-23T07:38:43.850Z] [LOG] ?? [BROWSER] Starting irrigation point detection...
+[2026-01-23T07:38:43.851Z] [LOG] ?? [BROWSER] Needs first click: true
+[2026-01-23T07:38:43.851Z] [LOG] ?? [BROWSER] Needs last click: true
+[2026-01-23T07:38:43.851Z] [LOG] ?? [BROWSER] Highcharts API not accessible, using SVG path analysis
+[2026-01-23T07:38:43.852Z] [LOG] ? [BROWSER] Found series path in SVG
+[2026-01-23T07:38:43.852Z] [LOG] ?? [BROWSER] Found 7 significant drops (≥8% Y-range)
+[2026-01-23T07:38:43.853Z] [LOG] ?? [BROWSER] After de-duplication: 1 unique irrigation events
+[2026-01-23T07:38:43.853Z] [LOG]    → Removed 6 duplicate drops
+[2026-01-23T07:38:43.853Z] [LOG] ?? [BROWSER] Irrigation 1: Could not find valid start/end points, skipping
+[2026-01-23T07:38:43.853Z] [ERROR] ? [BROWSER] No valid irrigation events found
+[2026-01-23T07:38:45.038Z] [LOG] ✅ F9 Manual Trigger listener installed - Press F9 to save crash report
+[2026-01-23T07:38:45.636Z] [WARNING] Highcharts warning: Consider including the "accessibility.js" module to make your chart more usable for people with disabilities. Set the "accessibility.enabled" option to false to remove this warning. See https://www.highcharts.com/docs/accessibility/accessibility-module.
+[2026-01-23T07:38:46.315Z] [LOG] ?? [BROWSER] Starting irrigation point detection...
+[2026-01-23T07:38:46.315Z] [LOG] ?? [BROWSER] Needs first click: true
+[2026-01-23T07:38:46.315Z] [LOG] ?? [BROWSER] Needs last click: true
+[2026-01-23T07:38:46.316Z] [LOG] ?? [BROWSER] Highcharts API not accessible, using SVG path analysis
+[2026-01-23T07:38:46.316Z] [LOG] ? [BROWSER] Found series path in SVG
+[2026-01-23T07:38:46.316Z] [LOG] ?? [BROWSER] Found 7 significant drops (≥8% Y-range)
+[2026-01-23T07:38:46.316Z] [LOG] ?? [BROWSER] After de-duplication: 1 unique irrigation events
+[2026-01-23T07:38:46.316Z] [LOG]    → Removed 6 duplicate drops
+[2026-01-23T07:38:46.316Z] [LOG] ?? [BROWSER] Irrigation 1: Could not find valid start/end points, skipping
+[2026-01-23T07:38:46.316Z] [ERROR] ? [BROWSER] No valid irrigation events found
+[2026-01-23T07:38:48.105Z] [WARNING] Highcharts warning: Consider including the "accessibility.js" module to make your chart more usable for people with disabilities. Set the "accessibility.enabled" option to false to remove this warning. See https://www.highcharts.com/docs/accessibility/accessibility-module.
+[2026-01-23T07:38:48.447Z] [LOG] ✅ F9 Manual Trigger listener installed - Press F9 to save crash report
+[2026-01-23T07:38:48.706Z] [LOG] ✅ F9 Manual Trigger listener installed - Press F9 to save crash report
+[2026-01-23T07:38:48.914Z] [LOG] ✅ F9 Manual Trigger listener installed - Press F9 to save crash report
+[2026-01-23T07:38:48.981Z] [LOG] ?? [BROWSER] Starting irrigation point detection...
+[2026-01-23T07:38:48.981Z] [LOG] ?? [BROWSER] Needs first click: true
+[2026-01-23T07:38:48.981Z] [LOG] ?? [BROWSER] Needs last click: true
+[2026-01-23T07:38:48.981Z] [LOG] ?? [BROWSER] Highcharts API not accessible, using SVG path analysis
+[2026-01-23T07:38:48.981Z] [LOG] ? [BROWSER] Found series path in SVG
+[2026-01-23T07:38:48.981Z] [LOG] ?? [BROWSER] Found 7 significant drops (≥8% Y-range)
+[2026-01-23T07:38:48.982Z] [LOG] ?? [BROWSER] After de-duplication: 1 unique irrigation events
+[2026-01-23T07:38:48.982Z] [LOG]    → Removed 6 duplicate drops
+[2026-01-23T07:38:48.982Z] [LOG] ?? [BROWSER] Irrigation 1: Could not find valid start/end points, skipping
+[2026-01-23T07:38:48.982Z] [ERROR] ? [BROWSER] No valid irrigation events found
+
+=== ERROR DETAILS ===
+Error Name: Manual_F9_Trigger
+Error Message: User pressed F9 to capture state
+Stack Trace:
+Error: User pressed F9 to capture state
+    at file:///C:/Users/iocrops%20admin/Coding/IrrigationReportAutomation/irrigation-playwright.js:89:56
+    at binding (C:\Users\iocrops admin\Coding\IrrigationReportAutomation\node_modules\playwright-core\lib\client\page.js:254:42)
+    at BindingCall.call (C:\Users\iocrops admin\Coding\IrrigationReportAutomation\node_modules\playwright-core\lib\client\page.js:699:24)
+    at Page._onBinding (C:\Users\iocrops admin\Coding\IrrigationReportAutomation\node_modules\playwright-core\lib\client\page.js:163:25)
+    at Proxy.<anonymous> (C:\Users\iocrops admin\Coding\IrrigationReportAutomation\node_modules\playwright-core\lib\client\page.js:78:59)
+    at Proxy._callHandler (C:\Users\iocrops admin\Coding\IrrigationReportAutomation\node_modules\playwright-core\lib\client\eventEmitter.js:66:29)
+    at Proxy.emit (C:\Users\iocrops admin\Coding\IrrigationReportAutomation\node_modules\playwright-core\lib\client\eventEmitter.js:56:12)
+    at Connection.dispatch (C:\Users\iocrops admin\Coding\IrrigationReportAutomation\node_modules\playwright-core\lib\client\connection.js:175:21)
+    at Immediate.<anonymous> (C:\Users\iocrops admin\Coding\IrrigationReportAutomation\node_modules\playwright-core\lib\inProcessFactory.js:46:85)
+    at process.processImmediate (node:internal/timers:485:21)
