@@ -1,0 +1,35 @@
+{
+  "savedAt": "2026-01-28T07:14:08.735Z",
+  "farmIndex": 2,
+  "farmName": "베리원딸기0102(2구역)",
+  "dateIndex": 2,
+  "dateString": "2026-01-25",
+  "totalFarms": 10,
+  "totalDates": 6,
+  "lastClickedPoints": [
+    {
+      "type": "FIRST",
+      "screenX": 514,
+      "screenY": 306,
+      "svgX": 92,
+      "svgY": 153,
+      "date": "2026-01-25",
+      "timestamp": "2026-01-28T07:14:07.459Z"
+    },
+    {
+      "type": "LAST",
+      "screenX": 561,
+      "screenY": 348,
+      "svgX": 139,
+      "svgY": 195,
+      "date": "2026-01-25",
+      "timestamp": "2026-01-28T07:14:08.038Z"
+    }
+  ],
+  "resumeInfo": {
+    "nextFarm": 2,
+    "nextDate": 3
+  },
+  "manager": "승진",
+  "mode": "normal"
+}
