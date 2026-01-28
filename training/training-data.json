@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "corrections": [],
+  "statistics": {
+    "totalCorrections": 0,
+    "avgFirstOffset": 0,
+    "avgLastOffset": 0,
+    "avgOffset": 0,
+    "lastUpdated": null
+  },
+  "learnedAdjustments": {
+    "firstIndexBias": 0,
+    "lastIndexBias": 0
+  }
+}

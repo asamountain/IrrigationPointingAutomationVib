@@ -122,6 +122,195 @@ function clearCheckpoint() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// TRAINING DATA MANAGER - Learn from user corrections
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Load training data from JSON file
+ * @returns {Object} Training data with corrections, statistics, and adjustments
+ */
+function loadTrainingData() {
+  try {
+    if (fs.existsSync(TRAINING_FILE)) {
+      const data = JSON.parse(fs.readFileSync(TRAINING_FILE, 'utf8'));
+      return data;
+    }
+  } catch (err) {
+    console.log(`⚠️ Could not load training data: ${err.message}`);
+  }
+  
+  // Return default structure
+  return {
+    version: 1,
+    corrections: [],
+    statistics: {
+      totalCorrections: 0,
+      avgFirstOffset: 0,
+      avgLastOffset: 0,
+      lastUpdated: null
+    },
+    learnedAdjustments: {
+      firstIndexBias: 0,
+      lastIndexBias: 0
+    }
+  };
+}
+
+/**
+ * Save training data to JSON file
+ * @param {Object} data - Training data to save
+ */
+function saveTrainingData(data) {
+  try {
+    fs.writeFileSync(TRAINING_FILE, JSON.stringify(data, null, 2), 'utf8');
+    console.log(`  💾 Training data saved (${data.statistics.totalCorrections} corrections)`);
+  } catch (err) {
+    console.log(`  ❌ Could not save training data: ${err.message}`);
+  }
+}
+
+/**
+ * Save a correction to the training data
+ * @param {Object} predicted - Original predicted positions {firstIndex, lastIndex, firstScreenX, lastScreenX}
+ * @param {Object} corrected - User-corrected positions {firstScreenX, lastScreenX}
+ * @param {Object} metadata - Chart metadata {yRange, dataPoints, totalDataPoints}
+ */
+function saveCorrection(predicted, corrected, metadata = {}) {
+  const training = loadTrainingData();
+  
+  // Calculate pixel offsets
+  const firstOffsetX = (corrected.firstScreenX || 0) - (predicted.firstScreenX || 0);
+  const lastOffsetX = (corrected.lastScreenX || 0) - (predicted.lastScreenX || 0);
+  
+  // Only save if there was a meaningful correction (> 5px difference)
+  if (Math.abs(firstOffsetX) < 5 && Math.abs(lastOffsetX) < 5) {
+    console.log('  ℹ️ No significant correction detected, skipping save');
+    return;
+  }
+  
+  const correction = {
+    timestamp: new Date().toISOString(),
+    predicted: {
+      firstScreenX: predicted.firstScreenX,
+      lastScreenX: predicted.lastScreenX,
+      firstIndex: predicted.firstIndex,
+      lastIndex: predicted.lastIndex
+    },
+    corrected: {
+      firstScreenX: corrected.firstScreenX,
+      lastScreenX: corrected.lastScreenX
+    },
+    delta: {
+      firstOffsetX: Math.round(firstOffsetX),
+      lastOffsetX: Math.round(lastOffsetX)
+    },
+    metadata: {
+      totalDataPoints: metadata.totalDataPoints || 0,
+      chartWidth: metadata.chartWidth || 0
+    }
+  };
+  
+  training.corrections.push(correction);
+  
+  // Update statistics
+  updateTrainingStatistics(training);
+  
+  // Save to file
+  saveTrainingData(training);
+  
+  console.log(`  🧠 Correction saved: first=${firstOffsetX > 0 ? '+' : ''}${Math.round(firstOffsetX)}px, last=${lastOffsetX > 0 ? '+' : ''}${Math.round(lastOffsetX)}px`);
+}
+
+/**
+ * Update training statistics based on all corrections
+ * @param {Object} training - Training data object (modified in place)
+ */
+function updateTrainingStatistics(training) {
+  const corrections = training.corrections;
+  
+  if (corrections.length === 0) {
+    training.statistics = {
+      totalCorrections: 0,
+      avgFirstOffset: 0,
+      avgLastOffset: 0,
+      lastUpdated: new Date().toISOString()
+    };
+    training.learnedAdjustments = { firstIndexBias: 0, lastIndexBias: 0 };
+    return;
+  }
+  
+  // Calculate weighted average (recent corrections count more)
+  let totalFirstOffset = 0;
+  let totalLastOffset = 0;
+  let totalWeight = 0;
+  
+  corrections.forEach((c, i) => {
+    // More recent corrections have higher weight
+    const weight = 1 + (i / corrections.length); // Weight increases for newer entries
+    totalFirstOffset += (c.delta.firstOffsetX || 0) * weight;
+    totalLastOffset += (c.delta.lastOffsetX || 0) * weight;
+    totalWeight += weight;
+  });
+  
+  const avgFirstOffset = totalWeight > 0 ? totalFirstOffset / totalWeight : 0;
+  const avgLastOffset = totalWeight > 0 ? totalLastOffset / totalWeight : 0;
+  
+  training.statistics = {
+    totalCorrections: corrections.length,
+    avgFirstOffset: Math.round(avgFirstOffset * 10) / 10,
+    avgLastOffset: Math.round(avgLastOffset * 10) / 10,
+    avgOffset: Math.round((Math.abs(avgFirstOffset) + Math.abs(avgLastOffset)) / 2),
+    lastUpdated: new Date().toISOString()
+  };
+  
+  // Apply learned adjustments only after collecting enough data
+  if (corrections.length >= 5) {
+    training.learnedAdjustments = {
+      firstIndexBias: Math.round(avgFirstOffset),
+      lastIndexBias: Math.round(avgLastOffset)
+    };
+  } else {
+    training.learnedAdjustments = { firstIndexBias: 0, lastIndexBias: 0 };
+  }
+}
+
+/**
+ * Apply learned adjustments to predicted screen coordinates
+ * @param {number} firstScreenX - Original first point X
+ * @param {number} lastScreenX - Original last point X
+ * @returns {Object} Adjusted coordinates {firstScreenX, lastScreenX, adjustmentsApplied}
+ */
+function applyLearnedAdjustments(firstScreenX, lastScreenX) {
+  const training = loadTrainingData();
+  
+  if (training.statistics.totalCorrections < 5) {
+    // Not enough data yet
+    return { firstScreenX, lastScreenX, adjustmentsApplied: false };
+  }
+  
+  const adjustedFirst = firstScreenX + training.learnedAdjustments.firstIndexBias;
+  const adjustedLast = lastScreenX + training.learnedAdjustments.lastIndexBias;
+  
+  console.log(`  🧠 Applied learned adjustments: first${training.learnedAdjustments.firstIndexBias >= 0 ? '+' : ''}${training.learnedAdjustments.firstIndexBias}px, last${training.learnedAdjustments.lastIndexBias >= 0 ? '+' : ''}${training.learnedAdjustments.lastIndexBias}px`);
+  
+  return {
+    firstScreenX: adjustedFirst,
+    lastScreenX: adjustedLast,
+    adjustmentsApplied: true,
+    bias: training.learnedAdjustments
+  };
+}
+
+/**
+ * Get training statistics for display in overlay
+ * @returns {Object} Statistics {totalCorrections, avgOffset}
+ */
+function getTrainingStats() {
+  const training = loadTrainingData();
+  return training.statistics;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // F9 CRASH REPORT - Manual trigger from dashboard
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -343,18 +532,28 @@ async function waitForPageReady(page, options = {}) {
  * @param {Object} points - {first: {x, y, time}, last: {x, y, time}}
  * @returns {Promise<boolean>} - true if user confirmed, false if skipped
  */
-async function showClickOverlay(page, points) {
-  console.log('\n  👁️  VISUAL CONFIRMATION MODE');
+async function showClickOverlay(page, points, trainingStats = null) {
+  console.log('\n  👁️  VISUAL CONFIRMATION MODE (TRAINABLE)');
   console.log('  ══════════════════════════════════════════════════════════════════');
-  console.log('  🔴 RED circle = FIRST click (last flat point BEFORE rise)');
-  console.log('  🔵 BLUE circle = LAST click (PEAK of curve)');
+  console.log('  🔴 RED circle = FIRST click (drag to correct position)');
+  console.log('  🔵 BLUE circle = LAST click (drag to correct position)');
   console.log('  ══════════════════════════════════════════════════════════════════\n');
   
-  // Inject overlay onto the chart
-  await page.evaluate((pts) => {
+  // Inject overlay onto the chart with draggable markers
+  await page.evaluate(({ pts, stats }) => {
     // Remove any existing overlay
     const existing = document.getElementById('irrigation-click-overlay');
     if (existing) existing.remove();
+    
+    // Initialize corrected positions storage (will be read after confirmation)
+    window.__irrigationCorrected = {
+      first: { screenX: pts.first?.screenX, screenY: pts.first?.screenY, wasDragged: false },
+      last: { screenX: pts.last?.screenX, screenY: pts.last?.screenY, wasDragged: false }
+    };
+    window.__irrigationOriginal = {
+      first: { screenX: pts.first?.screenX, screenY: pts.first?.screenY },
+      last: { screenX: pts.last?.screenX, screenY: pts.last?.screenY }
+    };
     
     // Find the chart container
     const chartContainer = document.querySelector('.highcharts-container, .highcharts-root')?.parentElement;
@@ -379,13 +578,14 @@ async function showClickOverlay(page, points) {
       z-index: 99999;
     `;
     
-    // Create info box
+    // Create info box with learning stats
     const infoBox = document.createElement('div');
+    infoBox.id = 'irrigation-info-box';
     infoBox.style.cssText = `
       position: fixed;
       top: 10px;
       right: 10px;
-      background: rgba(0, 0, 0, 0.85);
+      background: rgba(0, 0, 0, 0.9);
       color: white;
       padding: 15px 20px;
       border-radius: 8px;
@@ -393,30 +593,105 @@ async function showClickOverlay(page, points) {
       font-size: 14px;
       z-index: 100000;
       pointer-events: auto;
-      min-width: 280px;
+      min-width: 300px;
+      border: 2px solid #4CAF50;
     `;
+    
+    const learningInfo = stats ? `
+      <div style="margin-bottom: 10px; padding: 8px; background: rgba(76, 175, 80, 0.2); border-radius: 4px;">
+        <div style="color: #4CAF50; font-size: 11px;">🧠 LEARNING MODE ACTIVE</div>
+        <div style="color: #888; font-size: 11px;">Corrections: ${stats.totalCorrections || 0} | Bias: ±${Math.round(stats.avgOffset || 0)}px</div>
+      </div>
+    ` : '';
     
     infoBox.innerHTML = `
       <div style="font-size: 16px; font-weight: bold; margin-bottom: 10px; color: #4CAF50;">
         👁️ Visual Confirmation Mode
       </div>
-      <div style="margin-bottom: 8px;">
-        <span style="color: #FF4444; font-size: 18px;">●</span> FIRST: ${pts.first?.time || 'N/A'}
-        <span style="color: #888; font-size: 11px;">(${pts.first?.x || '-'}, ${pts.first?.y || '-'})</span>
+      ${learningInfo}
+      <div id="first-marker-info" style="margin-bottom: 8px;">
+        <span style="color: #FF4444; font-size: 18px;">●</span> FIRST: <span id="first-time">${pts.first?.time || 'N/A'}</span>
+        <span style="color: #888; font-size: 11px;" id="first-coords">(${Math.round(pts.first?.screenX || 0)}, ${Math.round(pts.first?.screenY || 0)})</span>
       </div>
-      <div style="margin-bottom: 12px;">
-        <span style="color: #4444FF; font-size: 18px;">●</span> LAST: ${pts.last?.time || 'N/A'}
-        <span style="color: #888; font-size: 11px;">(${pts.last?.x || '-'}, ${pts.last?.y || '-'})</span>
+      <div id="last-marker-info" style="margin-bottom: 12px;">
+        <span style="color: #4444FF; font-size: 18px;">●</span> LAST: <span id="last-time">${pts.last?.time || 'N/A'}</span>
+        <span style="color: #888; font-size: 11px;" id="last-coords">(${Math.round(pts.last?.screenX || 0)}, ${Math.round(pts.last?.screenY || 0)})</span>
       </div>
       <div style="border-top: 1px solid #444; padding-top: 10px; margin-top: 5px;">
-        <div style="color: #4CAF50; font-weight: bold;">Press ENTER to confirm clicks</div>
+        <div style="color: #FFD700; font-size: 12px; margin-bottom: 5px;">🖱️ Drag markers to correct positions</div>
+        <div style="color: #4CAF50; font-weight: bold;">Press ENTER to confirm</div>
         <div style="color: #FF9800;">Press ESC to skip this date</div>
       </div>
     `;
     
-    // Add FIRST click marker (RED)
+    // Helper to make an element draggable
+    function makeDraggable(marker, label, markerType) {
+      marker.style.cursor = 'grab';
+      marker.style.pointerEvents = 'auto';
+      
+      marker.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        marker.style.cursor = 'grabbing';
+        marker.style.animation = 'none'; // Stop pulsing while dragging
+        
+        const startX = e.clientX;
+        const startY = e.clientY;
+        const origLeft = parseFloat(marker.style.left);
+        const origTop = parseFloat(marker.style.top);
+        const labelOrigLeft = parseFloat(label.style.left);
+        const labelOrigTop = parseFloat(label.style.top);
+        
+        function onMove(e) {
+          const dx = e.clientX - startX;
+          const dy = e.clientY - startY;
+          
+          // Move marker
+          marker.style.left = (origLeft + dx) + 'px';
+          marker.style.top = (origTop + dy) + 'px';
+          
+          // Move label (maintain relative offset)
+          label.style.left = (labelOrigLeft + dx) + 'px';
+          label.style.top = (labelOrigTop + dy) + 'px';
+          
+          // Update stored position
+          const newX = origLeft + dx + 15; // +15 to get center
+          const newY = origTop + dy + 15;
+          
+          if (markerType === 'first') {
+            window.__irrigationCorrected.first = { screenX: newX, screenY: newY, wasDragged: true };
+            document.getElementById('first-coords').textContent = `(${Math.round(newX)}, ${Math.round(newY)}) ✏️`;
+          } else {
+            window.__irrigationCorrected.last = { screenX: newX, screenY: newY, wasDragged: true };
+            document.getElementById('last-coords').textContent = `(${Math.round(newX)}, ${Math.round(newY)}) ✏️`;
+          }
+        }
+        
+        function onUp() {
+          marker.style.cursor = 'grab';
+          marker.style.animation = 'pulse 1s infinite';
+          document.removeEventListener('mousemove', onMove);
+          document.removeEventListener('mouseup', onUp);
+          
+          // Mark that a correction was made
+          if (markerType === 'first') {
+            label.textContent = `FIRST: (corrected)`;
+            label.style.background = '#FF8800';
+          } else {
+            label.textContent = `LAST: (corrected)`;
+            label.style.background = '#8888FF';
+          }
+        }
+        
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+      });
+    }
+    
+    // Add FIRST click marker (RED) - DRAGGABLE
     if (pts.first && pts.first.screenX && pts.first.screenY) {
       const firstMarker = document.createElement('div');
+      firstMarker.id = 'first-marker';
       firstMarker.style.cssText = `
         position: fixed;
         left: ${pts.first.screenX - 15}px;
@@ -427,9 +702,12 @@ async function showClickOverlay(page, points) {
         border-radius: 50%;
         background: rgba(255, 68, 68, 0.3);
         animation: pulse 1s infinite;
+        cursor: grab;
+        pointer-events: auto;
       `;
       
       const firstLabel = document.createElement('div');
+      firstLabel.id = 'first-label';
       firstLabel.style.cssText = `
         position: fixed;
         left: ${pts.first.screenX + 20}px;
@@ -441,16 +719,20 @@ async function showClickOverlay(page, points) {
         font-size: 12px;
         font-weight: bold;
         font-family: sans-serif;
+        pointer-events: none;
       `;
       firstLabel.textContent = `FIRST: ${pts.first.time}`;
+      
+      makeDraggable(firstMarker, firstLabel, 'first');
       
       overlay.appendChild(firstMarker);
       overlay.appendChild(firstLabel);
     }
     
-    // Add LAST click marker (BLUE)
+    // Add LAST click marker (BLUE) - DRAGGABLE
     if (pts.last && pts.last.screenX && pts.last.screenY) {
       const lastMarker = document.createElement('div');
+      lastMarker.id = 'last-marker';
       lastMarker.style.cssText = `
         position: fixed;
         left: ${pts.last.screenX - 15}px;
@@ -461,9 +743,12 @@ async function showClickOverlay(page, points) {
         border-radius: 50%;
         background: rgba(68, 68, 255, 0.3);
         animation: pulse 1s infinite;
+        cursor: grab;
+        pointer-events: auto;
       `;
       
       const lastLabel = document.createElement('div');
+      lastLabel.id = 'last-label';
       lastLabel.style.cssText = `
         position: fixed;
         left: ${pts.last.screenX + 20}px;
@@ -475,8 +760,11 @@ async function showClickOverlay(page, points) {
         font-size: 12px;
         font-weight: bold;
         font-family: sans-serif;
+        pointer-events: none;
       `;
       lastLabel.textContent = `LAST: ${pts.last.time}`;
+      
+      makeDraggable(lastMarker, lastLabel, 'last');
       
       overlay.appendChild(lastMarker);
       overlay.appendChild(lastLabel);
@@ -494,11 +782,12 @@ async function showClickOverlay(page, points) {
     overlay.appendChild(style);
     overlay.appendChild(infoBox);
     document.body.appendChild(overlay);
-  }, points);
+  }, { pts: points, stats: trainingStats });
   
   console.log('  📍 FIRST click planned at: ' + (points.first?.time || 'N/A'));
   console.log('  📍 LAST click planned at: ' + (points.last?.time || 'N/A'));
-  console.log('\n  ⏳ Waiting for user confirmation...');
+  console.log('\n  ⏳ Waiting for user confirmation (drag markers if needed)...');
+  console.log('     → Drag circles to correct positions');
   console.log('     → Press ENTER in browser to confirm');
   console.log('     → Press ESC in browser to skip\n');
   
@@ -514,6 +803,35 @@ async function removeClickOverlay(page) {
   await page.evaluate(() => {
     const overlay = document.getElementById('irrigation-click-overlay');
     if (overlay) overlay.remove();
+  });
+}
+
+/**
+ * Get the corrected positions from the draggable overlay
+ * @param {Page} page - Playwright page
+ * @returns {Promise<{original: Object, corrected: Object, wasCorrected: boolean}>}
+ */
+async function getCorrectedPositions(page) {
+  return await page.evaluate(() => {
+    const corrected = window.__irrigationCorrected || null;
+    const original = window.__irrigationOriginal || null;
+    
+    if (!corrected || !original) {
+      return { original: null, corrected: null, wasCorrected: false };
+    }
+    
+    const wasCorrected = corrected.first?.wasDragged || corrected.last?.wasDragged;
+    
+    return {
+      original,
+      corrected: {
+        first: { screenX: corrected.first?.screenX, screenY: corrected.first?.screenY },
+        last: { screenX: corrected.last?.screenX, screenY: corrected.last?.screenY }
+      },
+      wasCorrected,
+      firstWasDragged: corrected.first?.wasDragged || false,
+      lastWasDragged: corrected.last?.wasDragged || false
+    };
   });
 }
 
@@ -3290,14 +3608,22 @@ async function main() {
             if (screenCoords && screenCoords.first && screenCoords.last) {
               console.log('  ✅ Screen coordinates calculated successfully!');
               
-              // Prepare overlay data with screen positions
+              // Apply learned adjustments from training data
+              const adjustedFirst = applyLearnedAdjustments(
+                screenCoords.first.screenX, 
+                screenCoords.last.screenX
+              );
+              
+              // Prepare overlay data with adjusted screen positions
               const overlayData = {
                 first: {
                   ...screenCoords.first,
+                  screenX: adjustedFirst.firstScreenX, // Use adjusted X
                   time: firstEvent.time || 'N/A'
                 },
                 last: {
                   ...screenCoords.last,
+                  screenX: adjustedFirst.lastScreenX, // Use adjusted X
                   time: lastEvent.time || 'N/A'
                 }
               };
@@ -3305,15 +3631,56 @@ async function main() {
               console.log('  👁️  SHOWING OVERLAY NOW - Check the browser window!');
               console.log(`     → FIRST point: ${overlayData.first.time} at (${Math.round(overlayData.first.screenX)}, ${Math.round(overlayData.first.screenY)})`);
               console.log(`     → LAST point: ${overlayData.last.time} at (${Math.round(overlayData.last.screenX)}, ${Math.round(overlayData.last.screenY)})`);
+              if (adjustedFirst.adjustmentsApplied) {
+                console.log(`     → 🧠 Learned adjustments applied: first${adjustedFirst.bias.firstIndexBias >= 0 ? '+' : ''}${adjustedFirst.bias.firstIndexBias}px, last${adjustedFirst.bias.lastIndexBias >= 0 ? '+' : ''}${adjustedFirst.bias.lastIndexBias}px`);
+              }
+              
+              // Get training stats to display in overlay
+              const trainingStats = getTrainingStats();
               
               // Show overlay and wait for user confirmation
               let userConfirmed = false;
               try {
-                userConfirmed = await showClickOverlay(page, overlayData);
+                userConfirmed = await showClickOverlay(page, overlayData, trainingStats);
                 console.log(`  🔍 User confirmation result: ${userConfirmed ? 'CONFIRMED' : 'SKIPPED'}`);
               } catch (overlayError) {
                 console.log(`  ❌ ERROR showing overlay: ${overlayError.message}`);
                 console.log('     → Proceeding without visual confirmation');
+              }
+              
+              // If user confirmed, check for corrections and save them
+              if (userConfirmed) {
+                try {
+                  const corrections = await getCorrectedPositions(page);
+                  
+                  if (corrections.wasCorrected) {
+                    console.log('  🎯 User made corrections - saving to training data...');
+                    
+                    // Save the correction
+                    saveCorrection(
+                      {
+                        firstScreenX: corrections.original.first?.screenX,
+                        lastScreenX: corrections.original.last?.screenX,
+                        firstIndex: firstEvent.index,
+                        lastIndex: lastEvent.index
+                      },
+                      {
+                        firstScreenX: corrections.corrected.first?.screenX,
+                        lastScreenX: corrections.corrected.last?.screenX
+                      },
+                      {
+                        totalDataPoints: dataPoints ? dataPoints.length : 0,
+                        chartWidth: screenCoords.first?.screenX && screenCoords.last?.screenX 
+                          ? Math.abs(screenCoords.last.screenX - screenCoords.first.screenX) 
+                          : 0
+                      }
+                    );
+                  } else {
+                    console.log('  ✓ No corrections made - prediction was accurate');
+                  }
+                } catch (corrError) {
+                  console.log(`  ⚠️ Could not save correction: ${corrError.message}`);
+                }
               }
               
               if (!userConfirmed) {
