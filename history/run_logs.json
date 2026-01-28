@@ -128,5 +128,49 @@
     "endTime": 1769583098719,
     "duration": 502,
     "successRate": 100
+  },
+  {
+    "timestamp": "2026-01-28T07:28:22.374Z",
+    "startTime": 1769585302374,
+    "manager": "승진",
+    "totalFarmsTargeted": 3,
+    "startFromFarm": 1,
+    "farmsCompleted": 3,
+    "datesProcessed": 5,
+    "chartsClicked": 9,
+    "successCount": 5,
+    "skipCount": 0,
+    "noIrrigationCount": 0,
+    "errorCount": 0,
+    "dateRange": {
+      "start": "2026년 01월 23일",
+      "end": "2026년 01월 28일"
+    },
+    "mode": "normal",
+    "endTime": 1769586123202,
+    "duration": 821,
+    "successRate": 100
+  },
+  {
+    "timestamp": "2026-01-28T08:30:16.767Z",
+    "startTime": 1769589016767,
+    "manager": "승진",
+    "totalFarmsTargeted": 3,
+    "startFromFarm": 38,
+    "farmsCompleted": 3,
+    "datesProcessed": 1,
+    "chartsClicked": 1,
+    "successCount": 1,
+    "skipCount": 0,
+    "noIrrigationCount": 0,
+    "errorCount": 0,
+    "dateRange": {
+      "start": "2026년 01월 24일",
+      "end": "2026년 01월 24일"
+    },
+    "mode": "normal",
+    "endTime": 1769589535796,
+    "duration": 519,
+    "successRate": 100
   }
 ]

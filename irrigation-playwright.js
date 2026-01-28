@@ -3411,6 +3411,9 @@ async function main() {
         if (tableStatus.needsFirstClick || tableStatus.needsLastClick) {
         console.log('  ⚠️  Tables need data, clicking chart points...\n');
         
+        // 🎯 Track whether user made visual corrections (used to skip auto-clicking)
+        let userMadeCorrections = false;
+
         // NETWORK INTERCEPTION APPROACH (Replaces Highcharts DOM access)
         console.log('  ⏳ Waiting for chart data from network...');
         console.log('  🔍 DEBUG: About to call waitForChartData()...');
@@ -3747,10 +3750,11 @@ async function main() {
               if (userConfirmed) {
                 try {
                   const corrections = await getCorrectedPositions(page);
-                  
+
                   if (corrections.wasCorrected) {
+                    userMadeCorrections = true;
                     console.log('  🎯 User made corrections - saving to training data...');
-                    
+
                     // Save the correction
                     saveCorrection(
                       {
@@ -3765,8 +3769,8 @@ async function main() {
                       },
                       {
                         totalDataPoints: dataPoints ? dataPoints.length : 0,
-                        chartWidth: screenCoords.first?.screenX && screenCoords.last?.screenX 
-                          ? Math.abs(screenCoords.last.screenX - screenCoords.first.screenX) 
+                        chartWidth: screenCoords.first?.screenX && screenCoords.last?.screenX
+                          ? Math.abs(screenCoords.last.screenX - screenCoords.first.screenX)
                           : 0
                       }
                     );
@@ -3777,10 +3781,10 @@ async function main() {
                   console.log(`  ⚠️ Could not save correction: ${corrError.message}`);
                 }
               }
-              
+
               if (!userConfirmed) {
                 console.log('  ⏭️  User skipped this date, moving to next...\n');
-                
+
                 // Skip to next date (only if not at T-0)
                 if (dayOffset > 0) {
                   const nextClicked = await page.evaluate(() => {
@@ -3791,15 +3795,22 @@ async function main() {
                     }
                     return false;
                   });
-                  
+
                   if (nextClicked) {
                     await page.waitForTimeout(300);
                   }
                 }
                 continue; // Skip to next iteration
               }
-              
-              console.log('  ✅ User confirmed, proceeding with clicks...\n');
+
+              // 🎯 CRITICAL FIX: If user made visual corrections, skip auto-clicking!
+              // The user's manually dragged times are already saved - don't overwrite them
+              if (userMadeCorrections) {
+                console.log('  ✅ User confirmed WITH manual corrections');
+                console.log('  ⏭️  Skipping auto-click (using corrected times from visual overlay)\n');
+              } else {
+                console.log('  ✅ User confirmed WITHOUT corrections, proceeding with auto-click...\n');
+              }
             } else {
               console.log('  ⚠️ Could not calculate screen coordinates for overlay');
               console.log('     → screenCoords:', JSON.stringify(screenCoords));
@@ -3835,9 +3846,16 @@ async function main() {
           continue; // Skip to next date
         }
 
+        // 🎯 CRITICAL FIX: Skip chart auto-clicking if user made visual corrections
+        // The user's manually dragged times are already saved in window.__irrigationCorrected
+        // Auto-clicking would overwrite those correct values with predicted (wrong) values
+        if (!userMadeCorrections) {
+          // User either didn't use visual confirmation OR confirmed without making changes
+          // Proceed with normal auto-clicking flow
+
         const clickResults = await page.evaluate((needs) => {
           const results = [];
-          
+
           // Log to browser console for debugging
           console.log('🔍 [BROWSER] Starting irrigation point detection...');
           console.log('🔍 [BROWSER] Needs first click:', needs.needsFirstClick);
@@ -4867,13 +4885,24 @@ async function main() {
         
         // ⚡ FAST: Brief wait for UI update
         await page.waitForTimeout(500);
-        
+
         // Take screenshot after clicking
         const step6Screenshot = path.join(CONFIG.screenshotDir, `farm-${farmIdx + 1}-date-${dateIdx}-after-clicks-${timestamp}.png`);
         await page.screenshot({ path: step6Screenshot, fullPage: true });
         console.log(`     📸 Screenshot: ${step6Screenshot}\n`);
-        
-        // Extract final table values
+
+        } else {
+          // User made visual corrections - skip auto-clicking
+          console.log('     ⏭️  Chart auto-clicking SKIPPED (user made visual corrections)');
+          console.log('     ✅ Using corrected times from visual overlay instead\n');
+
+          // Take screenshot showing the corrected state
+          const step6Screenshot = path.join(CONFIG.screenshotDir, `farm-${farmIdx + 1}-date-${dateIdx}-after-visual-correction-${timestamp}.png`);
+          await page.screenshot({ path: step6Screenshot, fullPage: true });
+          console.log(`     📸 Screenshot: ${step6Screenshot}\n`);
+        }
+
+        // Extract final table values (happens whether auto-clicked or manually corrected)
         console.log('     📊 Extracting irrigation data from tables...');
       
       // ⚡ FAST: Extract data immediately
@@ -4881,43 +4910,70 @@ async function main() {
         const results = {
           firstIrrigationTime: null,
           lastIrrigationTime: null,
-          debug: []
+          debug: [],
+          source: 'unknown'
         };
-        
+
         console.log('📊 [BROWSER] Extracting irrigation time data from tables...');
-        
-        // Strategy 1: Look for time input fields (type="time")
-        const timeInputs = Array.from(document.querySelectorAll('input[type="time"]'));
-        results.debug.push(`Found ${timeInputs.length} time input fields`);
-        console.log(`📊 [BROWSER] Found ${timeInputs.length} time input fields`);
-        
-        // For each time input, look backwards in the DOM to find its label
-        timeInputs.forEach((input, idx) => {
-          const value = input.value;
-          results.debug.push(`Time input ${idx + 1}: value="${value || 'EMPTY'}"`);
-          
-          // Find the parent container
-          let container = input.closest('div');
-          if (container) {
-            // Look for text content in the same container or its siblings
-            const containerText = container.textContent || '';
-            results.debug.push(`Container text: "${containerText.substring(0, 50)}..."`);
-            
-            // Check if this is the "first irrigation time" field
-            if (containerText.includes('첫 급액') || containerText.includes('첫급액')) {
-              results.firstIrrigationTime = value;
-              results.debug.push(`✅ Matched FIRST time: "${value}"`);
-              console.log(`✅ [BROWSER] Found FIRST irrigation time: "${value}"`);
-            }
-            // Check if this is the "last irrigation time" field
-            else if (containerText.includes('마지막 급액') || containerText.includes('마지막급액')) {
-              results.lastIrrigationTime = value;
-              results.debug.push(`✅ Matched LAST time: "${value}"`);
-              console.log(`✅ [BROWSER] Found LAST irrigation time: "${value}"`);
-            }
+
+        // ⭐ PRIORITY: Check if visual confirmation overlay set corrected times
+        if (window.__irrigationCorrected) {
+          console.log('🔍 [BROWSER] Found visual confirmation corrected times');
+
+          if (window.__irrigationCorrected.firstTime) {
+            results.firstIrrigationTime = window.__irrigationCorrected.firstTime;
+            results.source = 'visual-overlay-first';
+            results.debug.push(`✅ Using corrected FIRST time from overlay: "${results.firstIrrigationTime}"`);
+            console.log(`✅ [BROWSER] Using corrected FIRST time from overlay: "${results.firstIrrigationTime}"`);
           }
-        });
-        
+
+          if (window.__irrigationCorrected.lastTime) {
+            results.lastIrrigationTime = window.__irrigationCorrected.lastTime;
+            results.source = results.source === 'visual-overlay-first' ? 'visual-overlay-both' : 'visual-overlay-last';
+            results.debug.push(`✅ Using corrected LAST time from overlay: "${results.lastIrrigationTime}"`);
+            console.log(`✅ [BROWSER] Using corrected LAST time from overlay: "${results.lastIrrigationTime}"`);
+          }
+        } else {
+          console.log('ℹ️ [BROWSER] No visual confirmation data found, using fallback strategies');
+        }
+
+        // 📝 FALLBACK: If no corrected times from overlay, read from input fields
+        if (!results.firstIrrigationTime || !results.lastIrrigationTime) {
+          // Strategy 1: Look for time input fields (type="time")
+          const timeInputs = Array.from(document.querySelectorAll('input[type="time"]'));
+          results.debug.push(`Found ${timeInputs.length} time input fields`);
+          console.log(`📊 [BROWSER] Found ${timeInputs.length} time input fields`);
+
+          // For each time input, look backwards in the DOM to find its label
+          timeInputs.forEach((input, idx) => {
+            const value = input.value;
+            results.debug.push(`Time input ${idx + 1}: value="${value || 'EMPTY'}"`);
+
+            // Find the parent container
+            let container = input.closest('div');
+            if (container) {
+              // Look for text content in the same container or its siblings
+              const containerText = container.textContent || '';
+              results.debug.push(`Container text: "${containerText.substring(0, 50)}..."`);
+
+              // Check if this is the "first irrigation time" field and not already set
+              if ((containerText.includes('첫 급액') || containerText.includes('첫급액')) && !results.firstIrrigationTime) {
+                results.firstIrrigationTime = value;
+                results.source = results.source === 'unknown' ? 'input-first' : results.source + '+input-first';
+                results.debug.push(`📝 Fallback FIRST time from input: "${value}"`);
+                console.log(`📝 [BROWSER] Fallback FIRST time from input: "${value}"`);
+              }
+              // Check if this is the "last irrigation time" field and not already set
+              else if ((containerText.includes('마지막 급액') || containerText.includes('마지막급액')) && !results.lastIrrigationTime) {
+                results.lastIrrigationTime = value;
+                results.source = results.source === 'unknown' ? 'input-last' : results.source + '+input-last';
+                results.debug.push(`📝 Fallback LAST time from input: "${value}"`);
+                console.log(`📝 [BROWSER] Fallback LAST time from input: "${value}"`);
+              }
+            }
+          });
+        }
+
         // If still not found, fallback to generic search
         if (!results.firstIrrigationTime || !results.lastIrrigationTime) {
           results.debug.push('Trying fallback strategy...');
@@ -4925,11 +4981,11 @@ async function main() {
           const allText = Array.from(document.querySelectorAll('td, div, span, p'));
           allText.forEach((elem, idx) => {
           const text = elem.textContent.trim();
-          
+
           // If we find the label
           if (text.includes('구역 1 첫 급액') && text.includes('시간')) {
             results.debug.push(`Found first label: "${text}"`);
-            
+
             // Look in siblings, parent, or nearby elements
             const parent = elem.parentElement;
             if (parent) {
@@ -4937,52 +4993,56 @@ async function main() {
               siblings.forEach(sib => {
                 const sibText = sib.textContent.trim();
                 if (sibText.match(/\d{2}:\d{2}/) && !sibText.includes('급액')) {
-                  results.firstIrrigationTime = sibText;
-                  results.debug.push(`Found first time in sibling: "${sibText}"`);
+                  if (!results.firstIrrigationTime) {
+                    results.firstIrrigationTime = sibText;
+                    results.debug.push(`Found first time in sibling: "${sibText}"`);
+                  }
                 }
               });
             }
-            
+
             // Try next element
             const next = allText[idx + 1];
-            if (next && next.textContent.match(/\d{2}:\d{2}/)) {
+            if (next && next.textContent.match(/\d{2}:\d{2}/) && !results.firstIrrigationTime) {
               results.firstIrrigationTime = next.textContent.trim();
               results.debug.push(`Found first time in next element: "${next.textContent.trim()}"`);
             }
           }
-          
+
           if (text.includes('구역 1 마지막 급액') && text.includes('시간')) {
             results.debug.push(`Found last label: "${text}"`);
-            
+
             const parent = elem.parentElement;
             if (parent) {
               const siblings = Array.from(parent.children);
               siblings.forEach(sib => {
                 const sibText = sib.textContent.trim();
                 if (sibText.match(/\d{2}:\d{2}/) && !sibText.includes('급액')) {
-                  results.lastIrrigationTime = sibText;
-                  results.debug.push(`Found last time in sibling: "${sibText}"`);
+                  if (!results.lastIrrigationTime) {
+                    results.lastIrrigationTime = sibText;
+                    results.debug.push(`Found last time in sibling: "${sibText}"`);
+                  }
                 }
               });
             }
-            
+
             const next = allText[idx + 1];
-            if (next && next.textContent.match(/\d{2}:\d{2}/)) {
+            if (next && next.textContent.match(/\d{2}:\d{2}/) && !results.lastIrrigationTime) {
               results.lastIrrigationTime = next.textContent.trim();
               results.debug.push(`Found last time in next element: "${next.textContent.trim()}"`);
             }
           }
           }); // End forEach
-          
+
           // Strategy 3: If still not found, look for ANY elements with time format in the right panel
           if (!results.firstIrrigationTime || !results.lastIrrigationTime) {
             const timeElements = allText.filter(elem => {
               const text = elem.textContent.trim();
               return text.match(/^\d{2}:\d{2}$/);
             });
-            
+
             results.debug.push(`Found ${timeElements.length} elements with time format`);
-            
+
             if (timeElements.length >= 2) {
               // Assume first time-format element is "첫 급액시간"
               if (!results.firstIrrigationTime) {
@@ -4997,18 +5057,37 @@ async function main() {
             }
           } // End Strategy 3 if block
         } // End fallback if block
-        
+
         console.log('📋 [BROWSER] Extraction complete:');
+        console.log(`   → Source: ${results.source}`);
         console.log(`   → First time: ${results.firstIrrigationTime || 'NOT FOUND'}`);
         console.log(`   → Last time: ${results.lastIrrigationTime || 'NOT FOUND'}`);
-        
+
         return results;
       });
       
         console.log(`  → Debug info: ${finalData.debug.join(' | ')}`);
+        console.log(`  → Data source: ${finalData.source || 'unknown'}`);
         console.log(`  → 첫 급액시간 1: ${finalData.firstIrrigationTime || 'NOT FOUND'}`);
-        console.log(`  → 마지막 급액시간 1: ${finalData.lastIrrigationTime || 'NOT FOUND'}\n`);
-        
+        console.log(`  → 마지막 급액시간 1: ${finalData.lastIrrigationTime || 'NOT FOUND'}`);
+
+        // 🔍 Verification: Log data source and warn if unexpected
+        if (finalData.source && finalData.source.includes('visual-overlay')) {
+          console.log(`  ✅ Using corrected times from visual confirmation overlay`);
+        } else if (finalData.source && finalData.source.includes('input')) {
+          if (userMadeCorrections) {
+            console.log(`  ⚠️  WARNING: Expected visual overlay data but got input fields!`);
+            console.log(`  → User made corrections but overlay data was not found`);
+            console.log(`  → This may indicate the corrections were not saved properly`);
+          } else {
+            console.log(`  ✅ Using times from input fields (auto-click or pre-filled)`);
+          }
+        } else {
+          console.log(`  ❌ WARNING: Data source unknown! Times may be incorrect.`);
+          console.log(`  → source value: "${finalData.source}"`);
+        }
+        console.log('');
+
         // Add this date's data to collection
         const dateData = {
           date: displayedDate,
