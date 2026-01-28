@@ -122,6 +122,91 @@ function clearCheckpoint() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// F9 CRASH REPORT - Manual trigger from dashboard
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Check if F9 was triggered from dashboard and save crash report if so
+ * @param {Page} page - Playwright page object
+ * @param {string} context - Context description for the crash report
+ * @returns {Promise<boolean>} - true if F9 was triggered and handled
+ */
+async function checkAndHandleF9Trigger(page, context = 'Manual F9 Trigger') {
+  try {
+    const response = await fetch('http://localhost:3456/control/check-f9');
+    const data = await response.json();
+    
+    if (data.triggered) {
+      console.log('\n📸 F9 TRIGGERED! Saving crash report...');
+      await saveCrashReport(page, context);
+      return true;
+    }
+  } catch (err) {
+    // F9 check failed silently (server might not be running)
+  }
+  return false;
+}
+
+/**
+ * Save crash report with screenshot and debug info to crash-reports folder
+ * @param {Page} page - Playwright page object
+ * @param {string} reason - Reason for the crash report
+ */
+async function saveCrashReport(page, reason = 'Manual F9 Trigger') {
+  const crashDir = './crash-reports';
+  const timestamp = new Date().toISOString().replace(/:/g, '-').replace(/\./g, '-');
+  const reportDir = path.join(crashDir, `${timestamp}_${reason.replace(/\s+/g, '_')}`);
+  
+  // Ensure directory exists
+  if (!fs.existsSync(reportDir)) {
+    fs.mkdirSync(reportDir, { recursive: true });
+  }
+  
+  console.log(`📸 Saving crash report to: ${reportDir}`);
+  
+  try {
+    // 1. Screenshot
+    const screenshotPath = path.join(reportDir, 'screenshot.png');
+    await page.screenshot({ path: screenshotPath, fullPage: true });
+    console.log(`   ✅ Screenshot saved: ${screenshotPath}`);
+    
+    // 2. Current URL
+    const url = page.url();
+    fs.writeFileSync(path.join(reportDir, 'url.txt'), url);
+    console.log(`   ✅ URL saved`);
+    
+    // 3. HTML content
+    try {
+      const html = await page.content();
+      fs.writeFileSync(path.join(reportDir, 'page.html'), html);
+      console.log(`   ✅ HTML saved`);
+    } catch (e) {
+      console.log(`   ⚠️ Could not capture HTML: ${e.message}`);
+    }
+    
+    // 4. Crash summary
+    const summary = {
+      timestamp: new Date().toISOString(),
+      reason: reason,
+      url: url,
+      userAgent: await page.evaluate(() => navigator.userAgent)
+    };
+    fs.writeFileSync(path.join(reportDir, 'CRASH_SUMMARY.json'), JSON.stringify(summary, null, 2));
+    console.log(`   ✅ Summary saved`);
+    
+    // 5. Console logs (if we have them)
+    fs.writeFileSync(path.join(reportDir, 'reason.txt'), reason);
+    
+    console.log(`📸 Crash report complete: ${reportDir}\n`);
+    return reportDir;
+    
+  } catch (e) {
+    console.log(`❌ Error saving crash report: ${e.message}`);
+    return null;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // ADAPTIVE PAGE READINESS - Event-based instead of fixed delays
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -508,95 +593,132 @@ async function waitForUserConfirmation(page, timeout = 60000) {
  * @param {number} lastIndex - Index of last irrigation point
  * @returns {Promise<{first: {screenX, screenY, x, y, time}, last: {screenX, screenY, x, y, time}}|null>}
  */
-async function calculateScreenCoordinates(page, firstIndex, lastIndex) {
+async function calculateScreenCoordinates(page, firstIndex, lastIndex, totalDataPoints = 1000) {
   try {
-    console.log(`  🔍 calculateScreenCoordinates called with firstIndex=${firstIndex}, lastIndex=${lastIndex}`);
+    console.log(`  🔍 calculateScreenCoordinates called with firstIndex=${firstIndex}, lastIndex=${lastIndex}, totalDataPoints=${totalDataPoints}`);
     
-    const coords = await page.evaluate(({ firstIdx, lastIdx }) => {
+    const coords = await page.evaluate(({ firstIdx, lastIdx, totalPoints }) => {
       console.log(`[BROWSER] calculateScreenCoordinates: firstIdx=${firstIdx}, lastIdx=${lastIdx}`);
       
-      // Access Highcharts global
-      if (!window.Highcharts || !window.Highcharts.charts) {
-        console.error('[BROWSER] Highcharts not found!');
-        return { error: 'Highcharts not available' };
+      const result = { first: null, last: null, debug: {}, method: 'unknown' };
+      
+      // ═══════════════════════════════════════════════════════════════
+      // METHOD 1: Try Highcharts API (most accurate)
+      // ═══════════════════════════════════════════════════════════════
+      let chart = null;
+      if (window.Highcharts && window.Highcharts.charts) {
+        chart = window.Highcharts.charts.find(c => c !== undefined);
       }
       
-      const chart = window.Highcharts.charts.find(c => c !== undefined);
-      if (!chart || !chart.series || !chart.series[0]) {
-        console.error('[BROWSER] Chart or series not found!');
-        return { error: 'Chart series not found' };
+      if (chart && chart.series && chart.series[0] && chart.series[0].data) {
+        const dataPoints = chart.series[0].data;
+        console.log(`[BROWSER] Using Highcharts API: ${dataPoints.length} data points`);
+        result.method = 'highcharts';
+        
+        const chartContainer = document.querySelector('.highcharts-container');
+        if (chartContainer) {
+          const containerRect = chartContainer.getBoundingClientRect();
+          
+          // Get first point
+          if (firstIdx >= 0 && firstIdx < dataPoints.length) {
+            const p = dataPoints[firstIdx];
+            if (p && p.plotX !== undefined && p.plotY !== undefined) {
+              result.first = {
+                screenX: containerRect.left + p.plotX + chart.plotLeft,
+                screenY: containerRect.top + p.plotY + chart.plotTop,
+                x: p.x, y: p.y,
+                time: p.category || new Date(p.x).toTimeString().slice(0, 5)
+              };
+            }
+          }
+          
+          // Get last point
+          if (lastIdx >= 0 && lastIdx < dataPoints.length) {
+            const p = dataPoints[lastIdx];
+            if (p && p.plotX !== undefined && p.plotY !== undefined) {
+              result.last = {
+                screenX: containerRect.left + p.plotX + chart.plotLeft,
+                screenY: containerRect.top + p.plotY + chart.plotTop,
+                x: p.x, y: p.y,
+                time: p.category || new Date(p.x).toTimeString().slice(0, 5)
+              };
+            }
+          }
+          
+          if (result.first && result.last) {
+            console.log(`[BROWSER] Highcharts coords: first=(${result.first.screenX}, ${result.first.screenY}), last=(${result.last.screenX}, ${result.last.screenY})`);
+            return result;
+          }
+        }
       }
       
-      const dataPoints = chart.series[0].data;
-      if (!dataPoints || dataPoints.length === 0) {
-        console.error('[BROWSER] No data points!');
-        return { error: 'No data points in chart' };
-      }
+      // ═══════════════════════════════════════════════════════════════
+      // METHOD 2: SVG-based calculation (fallback)
+      // ═══════════════════════════════════════════════════════════════
+      console.log('[BROWSER] Highcharts not available, using SVG fallback');
+      result.method = 'svg-fallback';
       
-      console.log(`[BROWSER] Chart has ${dataPoints.length} data points`);
+      // Find the chart plot area
+      const plotArea = document.querySelector('.highcharts-plot-background') || 
+                       document.querySelector('.highcharts-plot-border') ||
+                       document.querySelector('.highcharts-series-group');
       
-      // Get chart container for absolute positioning
-      const chartContainer = document.querySelector('.highcharts-container');
+      const chartContainer = document.querySelector('.highcharts-container') || 
+                             document.querySelector('[data-highcharts-chart]');
+      
       if (!chartContainer) {
-        console.error('[BROWSER] Chart container not found!');
+        console.error('[BROWSER] No chart container found for SVG fallback');
         return { error: 'Chart container not found' };
       }
       
       const containerRect = chartContainer.getBoundingClientRect();
-      console.log(`[BROWSER] Container rect: left=${containerRect.left}, top=${containerRect.top}`);
+      console.log(`[BROWSER] Container: ${containerRect.width}x${containerRect.height} at (${containerRect.left}, ${containerRect.top})`);
       
-      const result = { first: null, last: null, debug: {} };
+      // Estimate plot area (typically ~80% of container with margins)
+      const plotLeft = containerRect.left + 60;  // Approximate left margin
+      const plotTop = containerRect.top + 30;    // Approximate top margin
+      const plotWidth = containerRect.width - 100;  // Subtract margins
+      const plotHeight = containerRect.height - 80; // Subtract margins
       
-      // Get first point coordinates
-      if (firstIdx >= 0 && firstIdx < dataPoints.length) {
-        const firstPoint = dataPoints[firstIdx];
-        if (firstPoint && firstPoint.plotX !== undefined && firstPoint.plotY !== undefined) {
-          // Convert to SCREEN coordinates (add container position)
-          result.first = {
-            screenX: containerRect.left + firstPoint.plotX + chart.plotLeft,
-            screenY: containerRect.top + firstPoint.plotY + chart.plotTop,
-            plotX: firstPoint.plotX,
-            plotY: firstPoint.plotY,
-            x: firstPoint.x,
-            y: firstPoint.y,
-            time: firstPoint.category || new Date(firstPoint.x).toTimeString().slice(0, 5)
-          };
-          console.log(`[BROWSER] First point: screenX=${result.first.screenX}, screenY=${result.first.screenY}`);
-        } else {
-          result.debug.firstError = 'plotX/plotY undefined';
-        }
-      } else {
-        result.debug.firstError = `Index ${firstIdx} out of range (0-${dataPoints.length - 1})`;
-      }
+      // Calculate X positions based on index percentage
+      const firstXPercent = firstIdx / totalPoints;
+      const lastXPercent = lastIdx / totalPoints;
       
-      // Get last point coordinates
-      if (lastIdx >= 0 && lastIdx < dataPoints.length) {
-        const lastPoint = dataPoints[lastIdx];
-        if (lastPoint && lastPoint.plotX !== undefined && lastPoint.plotY !== undefined) {
-          // Convert to SCREEN coordinates (add container position)
-          result.last = {
-            screenX: containerRect.left + lastPoint.plotX + chart.plotLeft,
-            screenY: containerRect.top + lastPoint.plotY + chart.plotTop,
-            plotX: lastPoint.plotX,
-            plotY: lastPoint.plotY,
-            x: lastPoint.x,
-            y: lastPoint.y,
-            time: lastPoint.category || new Date(lastPoint.x).toTimeString().slice(0, 5)
-          };
-          console.log(`[BROWSER] Last point: screenX=${result.last.screenX}, screenY=${result.last.screenY}`);
-        } else {
-          result.debug.lastError = 'plotX/plotY undefined';
-        }
-      } else {
-        result.debug.lastError = `Index ${lastIdx} out of range (0-${dataPoints.length - 1})`;
-      }
+      // Calculate screen X positions
+      const firstScreenX = plotLeft + (plotWidth * firstXPercent);
+      const lastScreenX = plotLeft + (plotWidth * lastXPercent);
+      
+      // Use middle of plot for Y (we don't have exact Y values without Highcharts)
+      const middleY = plotTop + (plotHeight / 2);
+      
+      result.first = {
+        screenX: firstScreenX,
+        screenY: middleY,
+        time: 'N/A',
+        x: firstIdx,
+        y: 0
+      };
+      
+      result.last = {
+        screenX: lastScreenX,
+        screenY: middleY,
+        time: 'N/A',
+        x: lastIdx,
+        y: 0
+      };
+      
+      console.log(`[BROWSER] SVG fallback coords: first=(${firstScreenX.toFixed(0)}, ${middleY.toFixed(0)}), last=(${lastScreenX.toFixed(0)}, ${middleY.toFixed(0)})`);
       
       return result;
-    }, { firstIdx: firstIndex, lastIdx: lastIndex });
+    }, { firstIdx: firstIndex, lastIdx: lastIndex, totalPoints: totalDataPoints });
     
     if (coords && coords.error) {
       console.log(`  ⚠️ Browser returned error: ${coords.error}`);
       return null;
+    }
+    
+    if (coords && coords.method) {
+      console.log(`  📍 Coordinate method used: ${coords.method}`);
     }
     
     if (coords && coords.debug) {
@@ -2431,6 +2553,12 @@ async function main() {
       // Get current config (may have been updated via "Add More Farms")
       const currentConfig = dashboard.getConfig();
       
+      // 📸 CHECK FOR F9 TRIGGER (crash report request from dashboard)
+      const f9Triggered = await checkAndHandleF9Trigger(page, `Farm ${farmIdx + 1}`);
+      if (f9Triggered) {
+        console.log('📸 F9 crash report saved. Continuing automation...');
+      }
+      
       // Check if we've reached the current maxFarms limit
       if (farmIdx >= currentConfig.maxFarms) {
         console.log(`\n✅ Reached maxFarms limit (${currentConfig.maxFarms}). Stopping farm processing.\n`);
@@ -2612,6 +2740,12 @@ async function main() {
     // 📅 STEP 2: Process each date from T-5 to T-0
     for (let dayOffset = 5; dayOffset >= 0; dayOffset--) {
       dateIdx++;
+      
+      // 📸 CHECK FOR F9 TRIGGER (crash report request from dashboard)
+      const f9Triggered = await checkAndHandleF9Trigger(page, `Date loop T-${dayOffset}`);
+      if (f9Triggered) {
+        console.log('📸 F9 crash report saved. Continuing automation...');
+      }
       
       // 📅 CALCULATE TARGET DATE EXPLICITLY
       const targetDate = new Date(today);
@@ -3145,7 +3279,9 @@ async function main() {
             
             let screenCoords = null;
             try {
-              screenCoords = await calculateScreenCoordinates(page, firstEvent.index, lastEvent.index);
+              // Pass total data points for SVG fallback calculation
+              const totalPoints = dataPoints ? dataPoints.length : 1000;
+              screenCoords = await calculateScreenCoordinates(page, firstEvent.index, lastEvent.index, totalPoints);
               console.log('  📍 Screen coords result:', JSON.stringify(screenCoords, null, 2));
             } catch (coordError) {
               console.log(`  ❌ ERROR calculating coordinates: ${coordError.message}`);
@@ -3249,8 +3385,23 @@ async function main() {
           // METHOD 1: Try Highcharts API (Most Accurate)
           // ============================================
           let chart = null;
+          
+          // Debug: Check what's available
+          console.log('🔬 [DEBUG] window.Highcharts exists:', !!window.Highcharts);
+          console.log('🔬 [DEBUG] window.Highcharts.charts exists:', !!(window.Highcharts && window.Highcharts.charts));
           if (window.Highcharts && window.Highcharts.charts) {
+            console.log('🔬 [DEBUG] Highcharts.charts array length:', window.Highcharts.charts.length);
+            console.log('🔬 [DEBUG] Highcharts.charts contents:', window.Highcharts.charts.map((c, i) => `[${i}]: ${c ? 'chart' : 'undefined'}`).join(', '));
             chart = window.Highcharts.charts.find(c => c !== undefined);
+          }
+          
+          if (chart) {
+            console.log('🔬 [DEBUG] chart found:', !!chart);
+            console.log('🔬 [DEBUG] chart.series exists:', !!(chart && chart.series));
+            console.log('🔬 [DEBUG] chart.series[0] exists:', !!(chart && chart.series && chart.series[0]));
+            if (chart.series && chart.series[0]) {
+              console.log('🔬 [DEBUG] series[0].data.length:', chart.series[0].data.length);
+            }
           }
           
           if (chart && chart.series && chart.series[0]) {
@@ -3261,64 +3412,227 @@ async function main() {
           const dataPoints = series.data;
           
             if (dataPoints.length > 0) {
-              // Find irrigation spikes (Y-value drops)
-          const spikes = [];
-          for (let i = 1; i < dataPoints.length; i++) {
-            const prevY = dataPoints[i - 1].y;
-            const currY = dataPoints[i].y;
-            const drop = prevY - currY;
-            
-                // Significant drop = irrigation event
-            if (drop > 5) {
-              spikes.push({
-                index: i,
-                    point: dataPoints[i],
-                    x: dataPoints[i].x,
-                    y: currY,
-                    plotX: dataPoints[i].plotX + chart.plotLeft,
-                    plotY: dataPoints[i].plotY + chart.plotTop,
-                drop: drop,
-                    time: dataPoints[i].category || dataPoints[i].x
-              });
-            }
-          }
-          
-              if (spikes.length > 0) {
-                results.push({ message: `Found ${spikes.length} irrigation spikes via API` });
+              // ═══════════════════════════════════════════════════════════════
+              // HSSP ALGORITHM - Rolling Window Valley Detection
+              // This replaces the simple "drop > 5" detection with proper:
+              // 1. Rolling window analysis (compare with N points ago)
+              // 2. Valley traceback (find lowest point before rise)
+              // 3. Time filtering (only 07:00-17:00)
+              // 4. Debouncing (minimum separation between events)
+              // ═══════════════════════════════════════════════════════════════
+              
+              console.log('🔬 [HSSP] Starting HSSP Algorithm (Improved)...');
+              
+              // HSSP PARAMETERS - TUNED FOR REAL IRRIGATION DETECTION
+              // The algorithm looks for RISES in moisture (irrigation adding water)
+              // and traces back to find the VALLEY (lowest point before rise)
+              const HSSP = {
+                SURGE_WINDOW: 10,             // Compare with 10 data points ago (more stable)
+                SURGE_THRESHOLD_PERCENT: 0.05, // 5% of Y range (was 1.5% - too sensitive)
+                SURGE_THRESHOLD_MIN: 0.1,     // Absolute minimum threshold (was 0.02 - caught noise)
+                MIN_RISE_ABSOLUTE: 0.05,      // Minimum absolute rise to consider (NEW)
+                LOOKBACK_WINDOW: 30,          // Look back 30 points for valley (was 20)
+                DEBOUNCE_POINTS: 60,          // Min 60 points between events (was 30 - ~1 hour)
+                DAYTIME_START: 7,             // Only 7:00 AM onwards
+                DAYTIME_END: 17,              // Only until 5:00 PM
+                MIN_VALLEY_DEPTH: 0.03        // Valley must be at least this much lower than surge (NEW)
+              };
+              
+              // Step 1: Calculate Y range for adaptive threshold
+              const yValues = dataPoints.map(p => p.y);
+              const maxY = Math.max(...yValues);
+              const minY = Math.min(...yValues);
+              const yRange = maxY - minY;
+              
+              // Use higher threshold: max of (5% of range) or (absolute minimum)
+              const surgeThreshold = Math.max(
+                HSSP.SURGE_THRESHOLD_MIN, 
+                yRange * HSSP.SURGE_THRESHOLD_PERCENT,
+                HSSP.MIN_RISE_ABSOLUTE
+              );
+              
+              // DEBUG: Log threshold calculation details
+              console.log(`🔬 [HSSP-DEBUG] Threshold calc: MIN=${HSSP.SURGE_THRESHOLD_MIN}, 5%ofRange=${(yRange * HSSP.SURGE_THRESHOLD_PERCENT).toFixed(4)}, absMin=${HSSP.MIN_RISE_ABSOLUTE}`);
+              console.log(`🔬 [HSSP-DEBUG] Final threshold=${surgeThreshold.toFixed(4)} - This might be TOO HIGH if range is small!`);
+              
+              // Check a sample of rises to see what values exist
+              let maxRiseFound = 0;
+              for (let i = HSSP.SURGE_WINDOW; i < Math.min(dataPoints.length, 200); i++) {
+                const rise = dataPoints[i].y - dataPoints[i - HSSP.SURGE_WINDOW].y;
+                if (rise > maxRiseFound) maxRiseFound = rise;
+              }
+              console.log(`🔬 [HSSP-DEBUG] Max rise in first 200 points: ${maxRiseFound.toFixed(4)} (threshold is ${surgeThreshold.toFixed(4)})`);
+              console.log(`🔬 [HSSP-DEBUG] Would any rise pass? ${maxRiseFound > surgeThreshold ? 'YES' : 'NO - THRESHOLD TOO HIGH!'}`);
+              
+              console.log(`🔬 [HSSP] Y range: ${minY.toFixed(2)} to ${maxY.toFixed(2)} (span: ${yRange.toFixed(2)})`);
+              console.log(`🔬 [HSSP] Surge threshold: ${surgeThreshold.toFixed(4)} (5% of range or min 0.1)`);
+              console.log(`🔬 [HSSP] Data points: ${dataPoints.length}`);
+              console.log(`🔬 [HSSP] Time filter: ${HSSP.DAYTIME_START}:00 - ${HSSP.DAYTIME_END}:00`);
+              
+              results.push({ message: `HSSP: Y range ${minY.toFixed(1)}-${maxY.toFixed(1)}, threshold ${surgeThreshold.toFixed(4)}` });
+              
+              // Step 2: Rolling window + valley traceback
+              const allEvents = [];
+              let lastEventIndex = -HSSP.DEBOUNCE_POINTS;
+              let surgesChecked = 0;
+              let surgesRejectedTime = 0;
+              let surgesRejectedRise = 0;
+              
+              for (let i = HSSP.SURGE_WINDOW; i < dataPoints.length - 5; i++) {
+                const currentVal = dataPoints[i].y;
+                const pastVal = dataPoints[i - HSSP.SURGE_WINDOW].y;
+                const rise = currentVal - pastVal;
                 
-                const firstSpike = spikes[0];
-                const lastSpike = spikes[spikes.length - 1];
-                
-              // Click first spike
-              if (needs.needsFirstClick) {
-                firstSpike.point.select(true, false);
-                firstSpike.point.firePointEvent('click');
-          results.push({ 
-                  action: '✅ API: Clicked FIRST spike', 
-                  x: Math.round(firstSpike.plotX), 
-                  y: Math.round(firstSpike.plotY),
-                  time: firstSpike.time
-                });
+                // Detect sustained rise (moisture going UP = irrigation)
+                if (rise > surgeThreshold && i > lastEventIndex + HSSP.DEBOUNCE_POINTS) {
+                  surgesChecked++;
+                  
+                  // VALLEY TRACEBACK: Find lowest point in lookback window
+                  let valleyIndex = i;
+                  let minVal = currentVal;
+                  const startSearch = Math.max(0, i - HSSP.LOOKBACK_WINDOW);
+                  
+                  for (let j = i; j >= startSearch; j--) {
+                    if (dataPoints[j].y <= minVal) {
+                      minVal = dataPoints[j].y;
+                      valleyIndex = j;
+                    }
+                  }
+                  
+                  // Calculate total rise from valley to current point
+                  const totalRise = currentVal - minVal;
+                  
+                  // TIME FILTER: Only 07:00-17:00
+                  const timestamp = dataPoints[valleyIndex].x;
+                  const eventDate = new Date(timestamp);
+                  const hour = eventDate.getHours();
+                  const minute = eventDate.getMinutes();
+                  const timeStr = `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+                  
+                  // Check if time is within valid range
+                  const isValidTime = hour >= HSSP.DAYTIME_START && hour <= HSSP.DAYTIME_END;
+                  
+                  // Check if rise is significant enough
+                  const isSignificantRise = totalRise >= HSSP.MIN_VALLEY_DEPTH;
+                  
+                  console.log(`🔬 [HSSP] Checking surge at index ${i}: rise=${rise.toFixed(4)}, valley at ${timeStr}, totalRise=${totalRise.toFixed(4)}`);
+                  
+                  if (!isValidTime) {
+                    console.log(`🔬 [HSSP] ⏭️ REJECTED: ${timeStr} is outside ${HSSP.DAYTIME_START}:00-${HSSP.DAYTIME_END}:00`);
+                    surgesRejectedTime++;
+                    continue;
+                  }
+                  
+                  if (!isSignificantRise) {
+                    console.log(`🔬 [HSSP] ⏭️ REJECTED: totalRise ${totalRise.toFixed(4)} < min ${HSSP.MIN_VALLEY_DEPTH}`);
+                    surgesRejectedRise++;
+                    continue;
+                  }
+                  
+                  console.log(`🔬 [HSSP] ✅ ACCEPTED: Valley at ${timeStr} (index ${valleyIndex}), totalRise: ${totalRise.toFixed(4)}`);
+                  
+                  allEvents.push({
+                    index: valleyIndex,
+                    point: dataPoints[valleyIndex],
+                    x: dataPoints[valleyIndex].x,
+                    y: dataPoints[valleyIndex].y,
+                    plotX: dataPoints[valleyIndex].plotX + chart.plotLeft,
+                    plotY: dataPoints[valleyIndex].plotY + chart.plotTop,
+                    rise: totalRise,
+                    hour: hour,
+                    minute: minute,
+                    time: timeStr
+                  });
+                  
+                  lastEventIndex = valleyIndex;
+                  i = Math.max(i, valleyIndex + 15); // Skip forward to avoid double-detection
+                }
               }
               
-              // Click last spike (use a different approach to ensure it registers)
-              if (needs.needsLastClick) {
-                // Deselect first spike first
-                if (needs.needsFirstClick) {
-                  firstSpike.point.select(false, false);
+              console.log(`🔬 [HSSP] Surge check summary: ${surgesChecked} checked, ${surgesRejectedTime} rejected (time), ${surgesRejectedRise} rejected (rise too small)`);
+              results.push({ message: `HSSP: Checked ${surgesChecked} surges, rejected ${surgesRejectedTime} (time) + ${surgesRejectedRise} (rise)` });
+              
+              console.log(`🔬 [HSSP] Raw detections: ${allEvents.length} events`);
+              results.push({ message: `HSSP: ${allEvents.length} raw irrigation events detected` });
+              
+              // Step 3: De-duplicate events that are too close together
+              const uniqueEvents = [];
+              const minSeparation = dataPoints.length * 0.05; // 5% of data apart
+              
+              for (const event of allEvents) {
+                let isDuplicate = false;
+                
+                for (let j = 0; j < uniqueEvents.length; j++) {
+                  const existing = uniqueEvents[j];
+                  
+                  if (Math.abs(event.index - existing.index) < minSeparation) {
+                    isDuplicate = true;
+                    // Keep the one with larger rise (more significant irrigation)
+                    if (event.rise > existing.rise) {
+                      uniqueEvents[j] = event;
+                      console.log(`🔬 [HSSP] Replaced duplicate: kept event at ${event.time} (larger rise)`);
+                    }
+                    break;
+                  }
                 }
                 
-                lastSpike.point.select(true, false);
-                lastSpike.point.firePointEvent('click');
-          results.push({
-                  action: '✅ API: Clicked LAST spike', 
-                  x: Math.round(lastSpike.plotX), 
-                  y: Math.round(lastSpike.plotY),
-                  time: lastSpike.time
-                });
+                if (!isDuplicate) {
+                  uniqueEvents.push(event);
+                }
               }
+              
+              // Sort by index (chronological order)
+              uniqueEvents.sort((a, b) => a.index - b.index);
+              
+              console.log(`🔬 [HSSP] Final events after de-duplication: ${uniqueEvents.length}`);
+              results.push({ message: `HSSP: ${uniqueEvents.length} final irrigation events (after de-dup)` });
+              
+              if (uniqueEvents.length > 0) {
+                // Log all detected events
+                uniqueEvents.forEach((evt, idx) => {
+                  console.log(`🔬 [HSSP] Event ${idx + 1}: ${evt.time} (index ${evt.index}, rise: ${evt.rise.toFixed(4)})`);
+                });
+                
+                const firstEvent = uniqueEvents[0];
+                const lastEvent = uniqueEvents[uniqueEvents.length - 1];
+                
+                results.push({ message: `HSSP: First=${firstEvent.time}, Last=${lastEvent.time}` });
+                
+                // Click first event (valley = irrigation START)
+                if (needs.needsFirstClick) {
+                  firstEvent.point.select(true, false);
+                  firstEvent.point.firePointEvent('click');
+                  results.push({ 
+                    action: '✅ HSSP: Clicked FIRST irrigation (valley)', 
+                    x: Math.round(firstEvent.plotX), 
+                    y: Math.round(firstEvent.plotY),
+                    time: firstEvent.time
+                  });
+                  console.log(`✅ [HSSP] Clicked FIRST irrigation at ${firstEvent.time}`);
+                }
+                
+                // Click last event
+                if (needs.needsLastClick) {
+                  // Deselect first event first
+                  if (needs.needsFirstClick) {
+                    firstEvent.point.select(false, false);
+                  }
+                  
+                  lastEvent.point.select(true, false);
+                  lastEvent.point.firePointEvent('click');
+                  results.push({
+                    action: '✅ HSSP: Clicked LAST irrigation (valley)', 
+                    x: Math.round(lastEvent.plotX), 
+                    y: Math.round(lastEvent.plotY),
+                    time: lastEvent.time
+                  });
+                  console.log(`✅ [HSSP] Clicked LAST irrigation at ${lastEvent.time}`);
+                }
                 
                 return results;
+              } else {
+                console.log('🔬 [HSSP] No irrigation events found in valid time range (07:00-17:00)');
+                results.push({ message: 'HSSP: No irrigation events in valid time range' });
               }
             }
           }
@@ -4330,7 +4644,7 @@ async function main() {
       manager: CONFIG.targetName,
       dateRange: {
         description: '5 days ago to today',
-        totalDays: totalDaysToCheck,
+        totalDays: 6, // Fixed: was using undefined totalDaysToCheck
         method: 'Previous/Next period buttons'
       },
       totalFarms: allFarmData.length,

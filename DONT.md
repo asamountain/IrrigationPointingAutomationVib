@@ -135,4 +135,87 @@ fs.writeFileSync('checkpoint.json', newData);
 
 ---
 
-*Last updated: 2026-01-26*
+## PROTECTED CORE FUNCTIONALITY - DO NOT MODIFY
+
+The following core functionality is **stable and working**. Do not change these sections unless absolutely necessary.
+
+---
+
+### 1. Farm List Looping Logic
+
+**File:** `irrigation-playwright.js` - `main()` function
+
+The farm iteration and switching logic works correctly. This includes:
+- Reading farms from `farms.json`
+- Iterating through each farm in order
+- Navigating to each farm's page
+- Checkpoint saving/restoration
+
+---
+
+### 2. Date Navigation (T-5 to T-0)
+
+**File:** `irrigation-playwright.js`
+
+The date navigation using button clicks (not URL parameters) works correctly:
+- Goes backwards 5 days first
+- Then forwards day by day
+- Uses `button[aria-label="이전 기간"]` and `button[aria-label="다음 기간"]`
+
+---
+
+### 3. HSSP Irrigation Detection Algorithm
+
+**File:** `src/chartAnalysis.js` - `detectIrrigationEvents()` function
+
+The algorithm parameters are tuned and working (updated 2026-01-28):
+
+| Parameter | Value | Purpose |
+|-----------|-------|---------|
+| SURGE_WINDOW | 10 | Compare with 10 minutes ago (more stable) |
+| SURGE_THRESHOLD_PERCENT | 0.05 | 5% of Y range triggers detection |
+| SURGE_THRESHOLD_MIN | 0.1 | Absolute minimum threshold |
+| MIN_RISE_ABSOLUTE | 0.05 | Minimum absolute rise |
+| LOOKBACK_WINDOW | 30 | Look back 30 minutes for valley |
+| DEBOUNCE_MINUTES | 60 | Minimum 60 min between events |
+| MIN_VALLEY_DEPTH | 0.03 | Valley must be this much lower |
+| DAYTIME_START | 7 | Only 7AM onwards |
+| DAYTIME_END | 17 | Only until 5PM |
+
+---
+
+### 4. Table Validation and Refresh
+
+**File:** `irrigation-playwright.js`
+
+Functions that work correctly:
+- `checkForEmptyCells(page)` - Detects empty cells (excluding rightmost column)
+- `clickTableRefresh(page)` - Clicks "표 새로고침" button
+- `attemptTableRefresh(page, maxRetries)` - Retry logic (up to 3 times)
+
+---
+
+### 5. Report Generation and Sending
+
+**File:** `irrigation-playwright.js`
+
+Functions that work correctly:
+- `sendReport()` - Sends irrigation report to server
+- `recordNoIrrigationReport()` - Creates JSON when no irrigation detected
+
+---
+
+### Protected Functions Quick Reference
+
+| Function | File | Status |
+|----------|------|--------|
+| `main()` | irrigation-playwright.js | PROTECTED |
+| `detectIrrigationEvents()` | src/chartAnalysis.js | PROTECTED |
+| `checkForEmptyCells()` | irrigation-playwright.js | PROTECTED |
+| `attemptTableRefresh()` | irrigation-playwright.js | PROTECTED |
+| `sendReport()` | irrigation-playwright.js | PROTECTED |
+| `recordNoIrrigationReport()` | irrigation-playwright.js | PROTECTED |
+
+---
+
+*Last updated: 2026-01-28*

@@ -15,15 +15,17 @@ import { log, logSubsection, delay } from './utils.js';
 // ═══════════════════════════════════════════════════════════════════════════════
 
 const HSSP_PARAMS = {
-  SURGE_WINDOW: 5,        // Compare with N minutes ago (catches slow rises)
-  SURGE_THRESHOLD_PERCENT: 0.015, // 1.5% of Y range as minimum threshold
-  SURGE_THRESHOLD_MIN: 0.02,      // Absolute minimum threshold
-  LOOKBACK_WINDOW: 20,    // Look back N minutes to find valley
-  DEBOUNCE_MINUTES: 30,   // Minimum minutes between events
+  SURGE_WINDOW: 10,       // Compare with 10 minutes ago (more stable, was 5)
+  SURGE_THRESHOLD_PERCENT: 0.05,  // 5% of Y range as minimum threshold (was 1.5% - too sensitive)
+  SURGE_THRESHOLD_MIN: 0.1,       // Absolute minimum threshold (was 0.02 - caught noise)
+  MIN_RISE_ABSOLUTE: 0.05,        // Minimum absolute rise to consider (NEW)
+  LOOKBACK_WINDOW: 30,    // Look back 30 minutes to find valley (was 20)
+  DEBOUNCE_MINUTES: 60,   // Minimum 60 minutes between events (was 30)
   MIN_SEPARATION_PERCENT: 0.05,   // Events must be 5% of data apart
   DAYTIME_START: 7,       // Start of valid irrigation hours
   DAYTIME_END: 17,        // End of valid irrigation hours
-  MIN_DATA_POINTS: 10     // Minimum data points required
+  MIN_DATA_POINTS: 10,    // Minimum data points required
+  MIN_VALLEY_DEPTH: 0.03  // Valley must be at least this much lower than surge (NEW)
 };
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -53,14 +55,16 @@ export function detectIrrigationEvents(dataPoints) {
   
   log(`Y range: ${minY.toFixed(2)} to ${maxY.toFixed(2)} (span: ${yRange.toFixed(2)})`, 'info');
   
-  // Calculate adaptive surge threshold
+  // Calculate adaptive surge threshold (use higher of multiple criteria)
   const surgeThreshold = Math.max(
     HSSP_PARAMS.SURGE_THRESHOLD_MIN,
-    yRange * HSSP_PARAMS.SURGE_THRESHOLD_PERCENT
+    yRange * HSSP_PARAMS.SURGE_THRESHOLD_PERCENT,
+    HSSP_PARAMS.MIN_RISE_ABSOLUTE
   );
   
-  log(`Surge threshold: ${surgeThreshold.toFixed(4)}`, 'info');
+  log(`Surge threshold: ${surgeThreshold.toFixed(4)} (5% of range or min 0.1)`, 'info');
   log(`Lookback window: ${HSSP_PARAMS.LOOKBACK_WINDOW} minutes`, 'info');
+  log(`Time filter: ${HSSP_PARAMS.DAYTIME_START}:00 - ${HSSP_PARAMS.DAYTIME_END}:00`, 'info');
   
   const allEvents = [];
   let lastEventIndex = -HSSP_PARAMS.DEBOUNCE_MINUTES;
@@ -76,7 +80,7 @@ export function detectIrrigationEvents(dataPoints) {
     
     // DETECT: Sustained rise (comparing SURGE_WINDOW minutes)
     if (diff > surgeThreshold && i > lastEventIndex + HSSP_PARAMS.DEBOUNCE_MINUTES) {
-      log(`Sustained rise at index ${i} (5-min rise: ${diff.toFixed(4)})`, 'step');
+      log(`Checking surge at index ${i} (10-min rise: ${diff.toFixed(4)})`, 'step');
       
       // FIND VALLEY: Scan lookback window for ABSOLUTE MINIMUM
       let minVal = currentVal;
@@ -90,6 +94,9 @@ export function detectIrrigationEvents(dataPoints) {
         }
       }
       
+      // Calculate total rise from valley to current point
+      const totalRise = currentVal - minVal;
+      
       // VALIDATE: Must be in daytime (07:00 - 17:00)
       const eventTimestamp = dataPoints[valleyIndex].x;
       const eventDate = new Date(eventTimestamp);
@@ -98,15 +105,22 @@ export function detectIrrigationEvents(dataPoints) {
       const isDaytime = eventHour >= HSSP_PARAMS.DAYTIME_START && 
                         eventHour <= HSSP_PARAMS.DAYTIME_END;
       
+      // Check if rise is significant enough
+      const isSignificantRise = totalRise >= HSSP_PARAMS.MIN_VALLEY_DEPTH;
+      
       const timeStr = `${String(eventHour).padStart(2, '0')}:${String(eventMinute).padStart(2, '0')}`;
       
-      if (isDaytime) {
+      if (!isDaytime) {
+        log(`⏭️ REJECTED: ${timeStr} is outside ${HSSP_PARAMS.DAYTIME_START}:00-${HSSP_PARAMS.DAYTIME_END}:00`, 'warning');
+      } else if (!isSignificantRise) {
+        log(`⏭️ REJECTED: totalRise ${totalRise.toFixed(4)} < min ${HSSP_PARAMS.MIN_VALLEY_DEPTH}`, 'warning');
+      } else {
         allEvents.push({
           index: valleyIndex,
           x: dataPoints[valleyIndex].x,
           y: dataPoints[valleyIndex].y,
           peakIndex: i,
-          rise: currentVal - dataPoints[valleyIndex].y,
+          rise: totalRise,
           time: timeStr,
           hour: eventHour,
           minute: eventMinute
@@ -114,9 +128,7 @@ export function detectIrrigationEvents(dataPoints) {
         
         lastEventIndex = valleyIndex;
         i = Math.max(i, valleyIndex + 15); // Skip forward to avoid double-detection
-        log(`✅ Valley at ${timeStr} (index ${valleyIndex})`, 'success');
-      } else {
-        log(`⏭️ Valley at ${timeStr} rejected (outside ${HSSP_PARAMS.DAYTIME_START}:00-${HSSP_PARAMS.DAYTIME_END}:00)`, 'warning');
+        log(`✅ ACCEPTED: Valley at ${timeStr} (index ${valleyIndex}), rise: ${totalRise.toFixed(4)}`, 'success');
       }
     }
   }
