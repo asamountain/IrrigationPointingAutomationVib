@@ -210,17 +210,80 @@
         "totalDataPoints": 1078,
         "chartWidth": 42.55844155844159
       }
+    },
+    {
+      "timestamp": "2026-01-28T06:32:22.037Z",
+      "predicted": {
+        "firstScreenX": 653.4050046339203,
+        "lastScreenX": 756.6496756255792,
+        "firstIndex": 514,
+        "lastIndex": 706
+      },
+      "corrected": {
+        "firstScreenX": 665.405,
+        "lastScreenX": 756.6496756255792
+      },
+      "delta": {
+        "firstOffsetX": 12,
+        "lastOffsetX": 0
+      },
+      "metadata": {
+        "totalDataPoints": 1079,
+        "chartWidth": 72.24467099165895
+      }
+    },
+    {
+      "timestamp": "2026-01-28T06:32:48.493Z",
+      "predicted": {
+        "firstScreenX": 657.4050046339203,
+        "lastScreenX": 755.6496756255792,
+        "firstIndex": 514,
+        "lastIndex": 706
+      },
+      "corrected": {
+        "firstScreenX": 621.405,
+        "lastScreenX": 728.65
+      },
+      "delta": {
+        "firstOffsetX": -36,
+        "lastOffsetX": -27
+      },
+      "metadata": {
+        "totalDataPoints": 1079,
+        "chartWidth": 72.24467099165895
+      }
+    },
+    {
+      "timestamp": "2026-01-28T06:33:49.625Z",
+      "predicted": {
+        "firstScreenX": 655.4050046339203,
+        "lastScreenX": 751.6496756255792,
+        "firstIndex": 514,
+        "lastIndex": 706
+      },
+      "corrected": {
+        "firstScreenX": 624.405,
+        "lastScreenX": 743.65
+      },
+      "delta": {
+        "firstOffsetX": -31,
+        "lastOffsetX": -8
+      },
+      "metadata": {
+        "totalDataPoints": 1079,
+        "chartWidth": 72.24467099165895
+      }
     }
   ],
   "statistics": {
-    "totalCorrections": 10,
-    "avgFirstOffset": -21.7,
-    "avgLastOffset": 9.3,
-    "avgOffset": 16,
-    "lastUpdated": "2026-01-28T05:32:02.390Z"
+    "totalCorrections": 13,
+    "avgFirstOffset": -21.2,
+    "avgLastOffset": 3.2,
+    "avgOffset": 12,
+    "lastUpdated": "2026-01-28T06:33:49.626Z"
   },
   "learnedAdjustments": {
-    "firstIndexBias": -22,
-    "lastIndexBias": 9
+    "firstIndexBias": -21,
+    "lastIndexBias": 3
   }
 }

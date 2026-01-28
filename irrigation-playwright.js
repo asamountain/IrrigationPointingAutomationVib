@@ -579,13 +579,13 @@ async function showClickOverlay(page, points, trainingStats = null) {
       z-index: 99999;
     `;
     
-    // Create info box with learning stats - DRAGGABLE
+    // Create info box with learning stats - DRAGGABLE (bottom-left position)
     const infoBox = document.createElement('div');
     infoBox.id = 'irrigation-info-box';
     infoBox.style.cssText = `
       position: fixed;
-      top: 10px;
-      right: 10px;
+      bottom: 10px;
+      left: 10px;
       background: rgba(0, 0, 0, 0.9);
       color: white;
       padding: 15px 20px;
@@ -609,8 +609,9 @@ async function showClickOverlay(page, points, trainingStats = null) {
       const origLeft = infoBox.offsetLeft;
       const origTop = infoBox.offsetTop;
       
-      // Switch from right-positioning to left-positioning for dragging
-      infoBox.style.right = 'auto';
+      // Switch from bottom/left-positioning to top/left-positioning for dragging
+      infoBox.style.bottom = 'auto';
+      infoBox.style.top = origTop + 'px';
       infoBox.style.left = origLeft + 'px';
       
       function onMove(e) {
@@ -650,11 +651,68 @@ async function showClickOverlay(page, points, trainingStats = null) {
         <span style="color: #888; font-size: 11px;" id="last-coords">(${Math.round(pts.last?.screenX || 0)}, ${Math.round(pts.last?.screenY || 0)})</span>
       </div>
       <div style="border-top: 1px solid #444; padding-top: 10px; margin-top: 5px;">
-        <div style="color: #FFD700; font-size: 12px; margin-bottom: 5px;">🖱️ Drag vertical lines to correct positions</div>
-        <div style="color: #4CAF50; font-weight: bold;">Press ENTER to confirm</div>
+        <div style="color: #FFD700; font-size: 12px; margin-bottom: 5px;">🖱️ Drag vertical lines to set time</div>
+        <div style="color: #4CAF50; font-weight: bold;">Press ENTER to save (저장)</div>
         <div style="color: #FF9800;">Press ESC to skip this date</div>
       </div>
     `;
+    
+    // Get chart bounds for vertical line height and time calculation
+    const chartPlot = document.querySelector('.highcharts-plot-background');
+    const chartBounds = chartPlot ? chartPlot.getBoundingClientRect() : { top: 300, height: 200, left: 500, width: 400 };
+    const lineTop = chartBounds.top || 300;
+    const lineHeight = chartBounds.height || 200;
+    const chartLeft = chartBounds.left || 500;
+    const chartWidth = chartBounds.width || 400;
+    
+    // Time range for the chart (typically 02:00 to 20:00 = 18 hours)
+    const startHour = 2; // 02:00
+    const endHour = 20;  // 20:00
+    const totalMinutes = (endHour - startHour) * 60; // 1080 minutes
+    
+    // Function to calculate time from X position
+    function xPositionToTime(xPos) {
+      const relativeX = xPos - chartLeft;
+      const percentage = Math.max(0, Math.min(1, relativeX / chartWidth));
+      const minutesFromStart = Math.round(percentage * totalMinutes);
+      const totalMinutesFromMidnight = startHour * 60 + minutesFromStart;
+      const hours = Math.floor(totalMinutesFromMidnight / 60);
+      const minutes = totalMinutesFromMidnight % 60;
+      return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
+    }
+    
+    // Function to update the irrigation time table cells
+    function updateTableCell(markerType, timeStr) {
+      // Find the time input fields in the table
+      const timeInputs = document.querySelectorAll('input[type="time"], input[placeholder*="시간"], input[placeholder*="분"]');
+      
+      // Try to find and update the correct cell based on marker type
+      // First irrigation time is typically the first time input, Last is the second
+      if (markerType === 'first') {
+        // Look for "첫 급액" or first time input
+        const firstInput = document.querySelector('input[value]:nth-of-type(1)') || 
+                          document.querySelectorAll('input')[0];
+        if (firstInput && firstInput.tagName === 'INPUT') {
+          // Convert to AM/PM format if needed
+          const [h, m] = timeStr.split(':');
+          const hour = parseInt(h);
+          const ampm = hour >= 12 ? 'PM' : 'AM';
+          const hour12 = hour > 12 ? hour - 12 : (hour === 0 ? 12 : hour);
+          const formattedTime = `${String(hour12).padStart(2, '0')}:${m} ${ampm}`;
+          
+          // Store for later use when clicking save
+          window.__irrigationCorrected.firstTime = formattedTime;
+        }
+      } else {
+        // Look for "마지막 급액" or second time input
+        window.__irrigationCorrected.lastTime = timeStr;
+        const [h, m] = timeStr.split(':');
+        const hour = parseInt(h);
+        const ampm = hour >= 12 ? 'PM' : 'AM';
+        const hour12 = hour > 12 ? hour - 12 : (hour === 0 ? 12 : hour);
+        window.__irrigationCorrected.lastTime = `${String(hour12).padStart(2, '0')}:${m} ${ampm}`;
+      }
+    }
     
     // Helper to make a vertical line marker draggable (horizontal movement only)
     function makeDraggable(marker, label, markerType) {
@@ -665,7 +723,6 @@ async function showClickOverlay(page, points, trainingStats = null) {
         e.preventDefault();
         e.stopPropagation();
         marker.style.cursor = 'grabbing';
-        marker.style.animation = 'none'; // Stop pulsing while dragging
         marker.style.opacity = '1';
         
         const startX = e.clientX;
@@ -676,38 +733,43 @@ async function showClickOverlay(page, points, trainingStats = null) {
           const dx = e.clientX - startX;
           
           // Move marker (horizontal only for vertical line)
-          marker.style.left = (origLeft + dx) + 'px';
+          const newLeft = origLeft + dx;
+          marker.style.left = newLeft + 'px';
           
           // Move label (horizontal only)
           label.style.left = (labelOrigLeft + dx) + 'px';
           
-          // Update stored position (X position is center of the line)
-          const newX = origLeft + dx + 2; // +2 to get center of 4px wide line
+          // Calculate time from X position
+          const newX = newLeft + 2; // +2 to get center of 4px wide line
+          const timeStr = xPositionToTime(newX);
           const newY = pts.first?.screenY || pts.last?.screenY || 0;
           
+          // Update label with time
+          label.textContent = `${markerType === 'first' ? 'FIRST' : 'LAST'}: ${timeStr}`;
+          
           if (markerType === 'first') {
-            window.__irrigationCorrected.first = { screenX: newX, screenY: newY, wasDragged: true };
-            document.getElementById('first-coords').textContent = `(${Math.round(newX)}) ✏️`;
+            window.__irrigationCorrected.first = { screenX: newX, screenY: newY, wasDragged: true, time: timeStr };
+            document.getElementById('first-coords').textContent = `${timeStr} ✏️`;
+            document.getElementById('first-time').textContent = timeStr;
           } else {
-            window.__irrigationCorrected.last = { screenX: newX, screenY: newY, wasDragged: true };
-            document.getElementById('last-coords').textContent = `(${Math.round(newX)}) ✏️`;
+            window.__irrigationCorrected.last = { screenX: newX, screenY: newY, wasDragged: true, time: timeStr };
+            document.getElementById('last-coords').textContent = `${timeStr} ✏️`;
+            document.getElementById('last-time').textContent = timeStr;
           }
         }
         
         function onUp() {
           marker.style.cursor = 'ew-resize';
-          marker.style.animation = 'pulse 1s infinite';
           document.removeEventListener('mousemove', onMove);
           document.removeEventListener('mouseup', onUp);
           
-          // Mark that a correction was made
-          if (markerType === 'first') {
-            label.textContent = `FIRST: (corrected)`;
-            label.style.background = '#FF8800';
-          } else {
-            label.textContent = `LAST: (corrected)`;
-            label.style.background = '#8888FF';
-          }
+          // Get final time and update table cell
+          const finalX = parseFloat(marker.style.left) + 2;
+          const finalTime = xPositionToTime(finalX);
+          updateTableCell(markerType, finalTime);
+          
+          // Mark that a correction was made with final time
+          label.style.background = markerType === 'first' ? '#FF8800' : '#8888FF';
         }
         
         document.addEventListener('mousemove', onMove);
@@ -715,13 +777,7 @@ async function showClickOverlay(page, points, trainingStats = null) {
       });
     }
     
-    // Get chart bounds for vertical line height
-    const chartPlot = document.querySelector('.highcharts-plot-background');
-    const chartBounds = chartPlot ? chartPlot.getBoundingClientRect() : { top: 300, height: 200 };
-    const lineTop = chartBounds.top || 300;
-    const lineHeight = chartBounds.height || 200;
-    
-    // Add FIRST click marker (RED VERTICAL LINE) - DRAGGABLE
+    // Add FIRST click marker (RED VERTICAL LINE) - DRAGGABLE (no animation)
     if (pts.first && pts.first.screenX && pts.first.screenY) {
       const firstMarker = document.createElement('div');
       firstMarker.id = 'first-marker';
@@ -734,7 +790,6 @@ async function showClickOverlay(page, points, trainingStats = null) {
         background: rgba(255, 68, 68, 0.8);
         border-left: 2px solid #FF4444;
         border-right: 2px solid #FF4444;
-        animation: pulse 1s infinite;
         cursor: ew-resize;
         pointer-events: auto;
       `;
@@ -763,7 +818,7 @@ async function showClickOverlay(page, points, trainingStats = null) {
       overlay.appendChild(firstLabel);
     }
     
-    // Add LAST click marker (BLUE VERTICAL LINE) - DRAGGABLE
+    // Add LAST click marker (BLUE VERTICAL LINE) - DRAGGABLE (no animation)
     if (pts.last && pts.last.screenX && pts.last.screenY) {
       const lastMarker = document.createElement('div');
       lastMarker.id = 'last-marker';
@@ -776,7 +831,6 @@ async function showClickOverlay(page, points, trainingStats = null) {
         background: rgba(68, 68, 255, 0.8);
         border-left: 2px solid #4444FF;
         border-right: 2px solid #4444FF;
-        animation: pulse 1s infinite;
         cursor: ew-resize;
         pointer-events: auto;
       `;
@@ -805,16 +859,6 @@ async function showClickOverlay(page, points, trainingStats = null) {
       overlay.appendChild(lastLabel);
     }
     
-    // Add CSS animation
-    const style = document.createElement('style');
-    style.textContent = `
-      @keyframes pulse {
-        0%, 100% { transform: scale(1); opacity: 1; }
-        50% { transform: scale(1.2); opacity: 0.7; }
-      }
-    `;
-    
-    overlay.appendChild(style);
     overlay.appendChild(infoBox);
     document.body.appendChild(overlay);
   }, { pts: points, stats: trainingStats });
@@ -906,6 +950,15 @@ async function waitForUserConfirmation(page, timeout = 60000) {
           if (e.key === 'Enter') {
             window._overlayConfirmed = true;
             document.removeEventListener('keydown', handler);
+            
+            // Click the save button (저장)
+            const saveButton = document.querySelector('button.chakra-button.css-1jeqlkp') ||
+                               Array.from(document.querySelectorAll('button')).find(b => b.textContent.includes('저장'));
+            if (saveButton) {
+              console.log('[BROWSER] Clicking save button...');
+              saveButton.click();
+            }
+            
             browserResolve(true);
           } else if (e.key === 'Escape') {
             window._overlayConfirmed = false;
@@ -931,6 +984,7 @@ async function waitForUserConfirmation(page, timeout = 60000) {
         await removeClickOverlay(page);
         if (result) {
           console.log('  ✅ Confirmed (Enter pressed or auto-confirmed)');
+          console.log('  💾 Save button clicked');
         } else {
           console.log('  ⏭️  Skipped (Escape pressed)');
         }
