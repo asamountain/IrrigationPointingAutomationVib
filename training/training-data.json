@@ -273,17 +273,395 @@
         "totalDataPoints": 1079,
         "chartWidth": 72.24467099165895
       }
+    },
+    {
+      "timestamp": "2026-01-28T06:44:33.675Z",
+      "predicted": {
+        "firstScreenX": 657.2333333333333,
+        "lastScreenX": 704.5407407407407,
+        "firstIndex": 522,
+        "lastIndex": 584
+      },
+      "corrected": {
+        "firstScreenX": 662.233,
+        "lastScreenX": 715.541
+      },
+      "delta": {
+        "firstOffsetX": 5,
+        "lastOffsetX": 11
+      },
+      "metadata": {
+        "totalDataPoints": 1080,
+        "chartWidth": 23.307407407407368
+      }
+    },
+    {
+      "timestamp": "2026-01-28T06:45:12.199Z",
+      "predicted": {
+        "firstScreenX": 659.2333333333333,
+        "lastScreenX": 705.5407407407407,
+        "firstIndex": 522,
+        "lastIndex": 584
+      },
+      "corrected": {
+        "firstScreenX": 659.2333333333333,
+        "lastScreenX": 719.541
+      },
+      "delta": {
+        "firstOffsetX": 0,
+        "lastOffsetX": 14
+      },
+      "metadata": {
+        "totalDataPoints": 1080,
+        "chartWidth": 23.307407407407368
+      }
+    },
+    {
+      "timestamp": "2026-01-28T06:45:28.484Z",
+      "predicted": {
+        "firstScreenX": 661.2333333333333,
+        "lastScreenX": 706.5407407407407,
+        "firstIndex": 522,
+        "lastIndex": 584
+      },
+      "corrected": {
+        "firstScreenX": 659.233,
+        "lastScreenX": 720.541
+      },
+      "delta": {
+        "firstOffsetX": -2,
+        "lastOffsetX": 14
+      },
+      "metadata": {
+        "totalDataPoints": 1080,
+        "chartWidth": 23.307407407407368
+      }
+    },
+    {
+      "timestamp": "2026-01-28T06:45:42.691Z",
+      "predicted": {
+        "firstScreenX": 662.2333333333333,
+        "lastScreenX": 707.5407407407407,
+        "firstIndex": 522,
+        "lastIndex": 584
+      },
+      "corrected": {
+        "firstScreenX": 659.233,
+        "lastScreenX": 688.541
+      },
+      "delta": {
+        "firstOffsetX": -3,
+        "lastOffsetX": -19
+      },
+      "metadata": {
+        "totalDataPoints": 1080,
+        "chartWidth": 23.307407407407368
+      }
+    },
+    {
+      "timestamp": "2026-01-28T06:45:55.998Z",
+      "predicted": {
+        "firstScreenX": 663.2333333333333,
+        "lastScreenX": 705.5407407407407,
+        "firstIndex": 522,
+        "lastIndex": 584
+      },
+      "corrected": {
+        "firstScreenX": 657.233,
+        "lastScreenX": 707.541
+      },
+      "delta": {
+        "firstOffsetX": -6,
+        "lastOffsetX": 2
+      },
+      "metadata": {
+        "totalDataPoints": 1080,
+        "chartWidth": 23.307407407407368
+      }
+    },
+    {
+      "timestamp": "2026-01-28T06:46:12.857Z",
+      "predicted": {
+        "firstScreenX": 663.2333333333333,
+        "lastScreenX": 705.5407407407407,
+        "firstIndex": 522,
+        "lastIndex": 584
+      },
+      "corrected": {
+        "firstScreenX": 659.233,
+        "lastScreenX": 723.541
+      },
+      "delta": {
+        "firstOffsetX": -4,
+        "lastOffsetX": 18
+      },
+      "metadata": {
+        "totalDataPoints": 1080,
+        "chartWidth": 23.307407407407368
+      }
+    },
+    {
+      "timestamp": "2026-01-28T06:46:38.024Z",
+      "predicted": {
+        "firstScreenX": 652.0333024976874,
+        "lastScreenX": 776.9463459759481,
+        "firstIndex": 490,
+        "lastIndex": 772
+      },
+      "corrected": {
+        "firstScreenX": 648.033,
+        "lastScreenX": 782.946
+      },
+      "delta": {
+        "firstOffsetX": -4,
+        "lastOffsetX": 6
+      },
+      "metadata": {
+        "totalDataPoints": 1081,
+        "chartWidth": 105.91304347826076
+      }
+    },
+    {
+      "timestamp": "2026-01-28T06:46:52.443Z",
+      "predicted": {
+        "firstScreenX": 653.0333024976874,
+        "lastScreenX": 776.9463459759481,
+        "firstIndex": 490,
+        "lastIndex": 772
+      },
+      "corrected": {
+        "firstScreenX": 648.033,
+        "lastScreenX": 784.946
+      },
+      "delta": {
+        "firstOffsetX": -5,
+        "lastOffsetX": 8
+      },
+      "metadata": {
+        "totalDataPoints": 1081,
+        "chartWidth": 105.91304347826076
+      }
+    },
+    {
+      "timestamp": "2026-01-28T06:47:08.784Z",
+      "predicted": {
+        "firstScreenX": 653.0333024976874,
+        "lastScreenX": 776.9463459759481,
+        "firstIndex": 490,
+        "lastIndex": 772
+      },
+      "corrected": {
+        "firstScreenX": 649.033,
+        "lastScreenX": 782.946
+      },
+      "delta": {
+        "firstOffsetX": -4,
+        "lastOffsetX": 6
+      },
+      "metadata": {
+        "totalDataPoints": 1081,
+        "chartWidth": 105.91304347826076
+      }
+    },
+    {
+      "timestamp": "2026-01-28T06:48:09.844Z",
+      "predicted": {
+        "firstScreenX": 654.0333024976874,
+        "lastScreenX": 776.9463459759481,
+        "firstIndex": 490,
+        "lastIndex": 772
+      },
+      "corrected": {
+        "firstScreenX": 649.033,
+        "lastScreenX": 749.946
+      },
+      "delta": {
+        "firstOffsetX": -5,
+        "lastOffsetX": -27
+      },
+      "metadata": {
+        "totalDataPoints": 1081,
+        "chartWidth": 105.91304347826076
+      }
+    },
+    {
+      "timestamp": "2026-01-28T06:49:12.784Z",
+      "predicted": {
+        "firstScreenX": 541.6188714153561,
+        "lastScreenX": 597.836262719704,
+        "firstIndex": 490,
+        "lastIndex": 772
+      },
+      "corrected": {
+        "firstScreenX": 649.619,
+        "lastScreenX": 778.836
+      },
+      "delta": {
+        "firstOffsetX": 108,
+        "lastOffsetX": 181
+      },
+      "metadata": {
+        "totalDataPoints": 1081,
+        "chartWidth": 41.21739130434787
+      }
+    },
+    {
+      "timestamp": "2026-01-28T06:49:23.232Z",
+      "predicted": {
+        "firstScreenX": 677.9343200740055,
+        "lastScreenX": 781.5661424606845,
+        "firstIndex": 535,
+        "lastIndex": 763
+      },
+      "corrected": {
+        "firstScreenX": 647.934,
+        "lastScreenX": 781.5661424606845
+      },
+      "delta": {
+        "firstOffsetX": -30,
+        "lastOffsetX": 0
+      },
+      "metadata": {
+        "totalDataPoints": 1081,
+        "chartWidth": 85.631822386679
+      }
+    },
+    {
+      "timestamp": "2026-01-28T06:50:18.845Z",
+      "predicted": {
+        "firstScreenX": 630.6333333333333,
+        "lastScreenX": 825.9425925925925,
+        "firstIndex": 414,
+        "lastIndex": 883
+      },
+      "corrected": {
+        "firstScreenX": 658.633,
+        "lastScreenX": 738.943
+      },
+      "delta": {
+        "firstOffsetX": 28,
+        "lastOffsetX": -87
+      },
+      "metadata": {
+        "totalDataPoints": 1080,
+        "chartWidth": 176.3092592592592
+      }
+    },
+    {
+      "timestamp": "2026-01-28T06:50:32.506Z",
+      "predicted": {
+        "firstScreenX": 632.6333333333333,
+        "lastScreenX": 820.9425925925925,
+        "firstIndex": 414,
+        "lastIndex": 883
+      },
+      "corrected": {
+        "firstScreenX": 659.633,
+        "lastScreenX": 764.943
+      },
+      "delta": {
+        "firstOffsetX": 27,
+        "lastOffsetX": -56
+      },
+      "metadata": {
+        "totalDataPoints": 1080,
+        "chartWidth": 176.3092592592592
+      }
+    },
+    {
+      "timestamp": "2026-01-28T06:50:51.365Z",
+      "predicted": {
+        "firstScreenX": 633.6333333333333,
+        "lastScreenX": 817.9425925925925,
+        "firstIndex": 414,
+        "lastIndex": 883
+      },
+      "corrected": {
+        "firstScreenX": 651.633,
+        "lastScreenX": 764.943
+      },
+      "delta": {
+        "firstOffsetX": 18,
+        "lastOffsetX": -53
+      },
+      "metadata": {
+        "totalDataPoints": 1080,
+        "chartWidth": 176.3092592592592
+      }
+    },
+    {
+      "timestamp": "2026-01-28T06:51:14.818Z",
+      "predicted": {
+        "firstScreenX": 634.6333333333333,
+        "lastScreenX": 815.9425925925925,
+        "firstIndex": 414,
+        "lastIndex": 883
+      },
+      "corrected": {
+        "firstScreenX": 651.633,
+        "lastScreenX": 754.943
+      },
+      "delta": {
+        "firstOffsetX": 17,
+        "lastOffsetX": -61
+      },
+      "metadata": {
+        "totalDataPoints": 1080,
+        "chartWidth": 176.3092592592592
+      }
+    },
+    {
+      "timestamp": "2026-01-28T06:51:20.679Z",
+      "predicted": {
+        "firstScreenX": 635.6333333333333,
+        "lastScreenX": 812.9425925925925,
+        "firstIndex": 414,
+        "lastIndex": 883
+      },
+      "corrected": {
+        "firstScreenX": 651.633,
+        "lastScreenX": 770.943
+      },
+      "delta": {
+        "firstOffsetX": 16,
+        "lastOffsetX": -42
+      },
+      "metadata": {
+        "totalDataPoints": 1080,
+        "chartWidth": 176.3092592592592
+      }
+    },
+    {
+      "timestamp": "2026-01-28T06:51:38.523Z",
+      "predicted": {
+        "firstScreenX": 636.6333333333333,
+        "lastScreenX": 810.9425925925925,
+        "firstIndex": 414,
+        "lastIndex": 883
+      },
+      "corrected": {
+        "firstScreenX": 653.633,
+        "lastScreenX": 768.943
+      },
+      "delta": {
+        "firstOffsetX": 17,
+        "lastOffsetX": -42
+      },
+      "metadata": {
+        "totalDataPoints": 1080,
+        "chartWidth": 176.3092592592592
+      }
     }
   ],
   "statistics": {
-    "totalCorrections": 13,
-    "avgFirstOffset": -21.2,
-    "avgLastOffset": 3.2,
-    "avgOffset": 12,
-    "lastUpdated": "2026-01-28T06:33:49.626Z"
+    "totalCorrections": 31,
+    "avgFirstOffset": -0.4,
+    "avgLastOffset": -4.7,
+    "avgOffset": 3,
+    "lastUpdated": "2026-01-28T06:51:38.523Z"
   },
   "learnedAdjustments": {
-    "firstIndexBias": -21,
-    "lastIndexBias": 3
+    "firstIndexBias": 0,
+    "lastIndexBias": -5
   }
 }

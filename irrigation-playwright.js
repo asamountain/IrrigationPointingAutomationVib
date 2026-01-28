@@ -681,36 +681,38 @@ async function showClickOverlay(page, points, trainingStats = null) {
       return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
     }
     
-    // Function to update the irrigation time table cells
-    function updateTableCell(markerType, timeStr) {
-      // Find the time input fields in the table
-      const timeInputs = document.querySelectorAll('input[type="time"], input[placeholder*="시간"], input[placeholder*="분"]');
+    // Function to update the irrigation time input fields on the page
+    function updateTimeInput(markerType, timeStr) {
+      // Find all time input fields on the page
+      const timeInputs = document.querySelectorAll('input[type="time"]');
       
-      // Try to find and update the correct cell based on marker type
-      // First irrigation time is typically the first time input, Last is the second
-      if (markerType === 'first') {
-        // Look for "첫 급액" or first time input
-        const firstInput = document.querySelector('input[value]:nth-of-type(1)') || 
-                          document.querySelectorAll('input')[0];
-        if (firstInput && firstInput.tagName === 'INPUT') {
-          // Convert to AM/PM format if needed
-          const [h, m] = timeStr.split(':');
-          const hour = parseInt(h);
-          const ampm = hour >= 12 ? 'PM' : 'AM';
-          const hour12 = hour > 12 ? hour - 12 : (hour === 0 ? 12 : hour);
-          const formattedTime = `${String(hour12).padStart(2, '0')}:${m} ${ampm}`;
-          
-          // Store for later use when clicking save
-          window.__irrigationCorrected.firstTime = formattedTime;
-        }
-      } else {
-        // Look for "마지막 급액" or second time input
+      console.log(`[BROWSER] Updating ${markerType} time input to: ${timeStr}`);
+      console.log(`[BROWSER] Found ${timeInputs.length} time inputs`);
+      
+      // The page has time inputs for first and last irrigation
+      // First input (index 0) = 첫 급액 시간 (first irrigation)
+      // Second input (index 1) = 마지막 급액 시간 (last irrigation)
+      
+      if (markerType === 'first' && timeInputs.length > 0) {
+        const firstInput = timeInputs[0];
+        firstInput.value = timeStr; // Set value in HH:MM format
+        
+        // Trigger input event to notify React/Chakra UI of the change
+        firstInput.dispatchEvent(new Event('input', { bubbles: true }));
+        firstInput.dispatchEvent(new Event('change', { bubbles: true }));
+        
+        console.log(`[BROWSER] Set first input value to: ${timeStr}`);
+        window.__irrigationCorrected.firstTime = timeStr;
+      } else if (markerType === 'last' && timeInputs.length > 1) {
+        const lastInput = timeInputs[1];
+        lastInput.value = timeStr; // Set value in HH:MM format
+        
+        // Trigger input event to notify React/Chakra UI of the change
+        lastInput.dispatchEvent(new Event('input', { bubbles: true }));
+        lastInput.dispatchEvent(new Event('change', { bubbles: true }));
+        
+        console.log(`[BROWSER] Set last input value to: ${timeStr}`);
         window.__irrigationCorrected.lastTime = timeStr;
-        const [h, m] = timeStr.split(':');
-        const hour = parseInt(h);
-        const ampm = hour >= 12 ? 'PM' : 'AM';
-        const hour12 = hour > 12 ? hour - 12 : (hour === 0 ? 12 : hour);
-        window.__irrigationCorrected.lastTime = `${String(hour12).padStart(2, '0')}:${m} ${ampm}`;
       }
     }
     
@@ -747,6 +749,9 @@ async function showClickOverlay(page, points, trainingStats = null) {
           // Update label with time
           label.textContent = `${markerType === 'first' ? 'FIRST' : 'LAST'}: ${timeStr}`;
           
+          // Update the time input field on the page in REAL-TIME
+          updateTimeInput(markerType, timeStr);
+          
           if (markerType === 'first') {
             window.__irrigationCorrected.first = { screenX: newX, screenY: newY, wasDragged: true, time: timeStr };
             document.getElementById('first-coords').textContent = `${timeStr} ✏️`;
@@ -763,10 +768,10 @@ async function showClickOverlay(page, points, trainingStats = null) {
           document.removeEventListener('mousemove', onMove);
           document.removeEventListener('mouseup', onUp);
           
-          // Get final time and update table cell
+          // Final update to time input
           const finalX = parseFloat(marker.style.left) + 2;
           const finalTime = xPositionToTime(finalX);
-          updateTableCell(markerType, finalTime);
+          updateTimeInput(markerType, finalTime);
           
           // Mark that a correction was made with final time
           label.style.background = markerType === 'first' ? '#FF8800' : '#8888FF';
