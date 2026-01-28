@@ -535,8 +535,9 @@ async function waitForPageReady(page, options = {}) {
 async function showClickOverlay(page, points, trainingStats = null) {
   console.log('\n  👁️  VISUAL CONFIRMATION MODE (TRAINABLE)');
   console.log('  ══════════════════════════════════════════════════════════════════');
-  console.log('  🔴 RED circle = FIRST click (drag to correct position)');
-  console.log('  🔵 BLUE circle = LAST click (drag to correct position)');
+  console.log('  🔴 RED vertical line = FIRST click (drag left/right to correct)');
+  console.log('  🔵 BLUE vertical line = LAST click (drag left/right to correct)');
+  console.log('  📦 Info panel is draggable - move it to see the table!');
   console.log('  ══════════════════════════════════════════════════════════════════\n');
   
   // Inject overlay onto the chart with draggable markers
@@ -578,7 +579,7 @@ async function showClickOverlay(page, points, trainingStats = null) {
       z-index: 99999;
     `;
     
-    // Create info box with learning stats
+    // Create info box with learning stats - DRAGGABLE
     const infoBox = document.createElement('div');
     infoBox.id = 'irrigation-info-box';
     infoBox.style.cssText = `
@@ -595,7 +596,38 @@ async function showClickOverlay(page, points, trainingStats = null) {
       pointer-events: auto;
       min-width: 300px;
       border: 2px solid #4CAF50;
+      cursor: move;
+      user-select: none;
     `;
+    
+    // Make info box draggable
+    infoBox.addEventListener('mousedown', (e) => {
+      if (e.target.tagName === 'BUTTON') return; // Don't drag when clicking buttons
+      e.preventDefault();
+      const startX = e.clientX;
+      const startY = e.clientY;
+      const origLeft = infoBox.offsetLeft;
+      const origTop = infoBox.offsetTop;
+      
+      // Switch from right-positioning to left-positioning for dragging
+      infoBox.style.right = 'auto';
+      infoBox.style.left = origLeft + 'px';
+      
+      function onMove(e) {
+        const dx = e.clientX - startX;
+        const dy = e.clientY - startY;
+        infoBox.style.left = (origLeft + dx) + 'px';
+        infoBox.style.top = (origTop + dy) + 'px';
+      }
+      
+      function onUp() {
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+      }
+      
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    });
     
     const learningInfo = stats ? `
       <div style="margin-bottom: 10px; padding: 8px; background: rgba(76, 175, 80, 0.2); border-radius: 4px;">
@@ -605,28 +637,28 @@ async function showClickOverlay(page, points, trainingStats = null) {
     ` : '';
     
     infoBox.innerHTML = `
-      <div style="font-size: 16px; font-weight: bold; margin-bottom: 10px; color: #4CAF50;">
-        👁️ Visual Confirmation Mode
+      <div style="font-size: 16px; font-weight: bold; margin-bottom: 10px; color: #4CAF50; cursor: move;">
+        👁️ Visual Confirmation Mode <span style="font-size: 10px; color: #888;">(drag to move)</span>
       </div>
       ${learningInfo}
       <div id="first-marker-info" style="margin-bottom: 8px;">
-        <span style="color: #FF4444; font-size: 18px;">●</span> FIRST: <span id="first-time">${pts.first?.time || 'N/A'}</span>
+        <span style="color: #FF4444; font-size: 18px;">|</span> FIRST: <span id="first-time">${pts.first?.time || 'N/A'}</span>
         <span style="color: #888; font-size: 11px;" id="first-coords">(${Math.round(pts.first?.screenX || 0)}, ${Math.round(pts.first?.screenY || 0)})</span>
       </div>
       <div id="last-marker-info" style="margin-bottom: 12px;">
-        <span style="color: #4444FF; font-size: 18px;">●</span> LAST: <span id="last-time">${pts.last?.time || 'N/A'}</span>
+        <span style="color: #4444FF; font-size: 18px;">|</span> LAST: <span id="last-time">${pts.last?.time || 'N/A'}</span>
         <span style="color: #888; font-size: 11px;" id="last-coords">(${Math.round(pts.last?.screenX || 0)}, ${Math.round(pts.last?.screenY || 0)})</span>
       </div>
       <div style="border-top: 1px solid #444; padding-top: 10px; margin-top: 5px;">
-        <div style="color: #FFD700; font-size: 12px; margin-bottom: 5px;">🖱️ Drag markers to correct positions</div>
+        <div style="color: #FFD700; font-size: 12px; margin-bottom: 5px;">🖱️ Drag vertical lines to correct positions</div>
         <div style="color: #4CAF50; font-weight: bold;">Press ENTER to confirm</div>
         <div style="color: #FF9800;">Press ESC to skip this date</div>
       </div>
     `;
     
-    // Helper to make an element draggable
+    // Helper to make a vertical line marker draggable (horizontal movement only)
     function makeDraggable(marker, label, markerType) {
-      marker.style.cursor = 'grab';
+      marker.style.cursor = 'ew-resize';
       marker.style.pointerEvents = 'auto';
       
       marker.addEventListener('mousedown', (e) => {
@@ -634,41 +666,36 @@ async function showClickOverlay(page, points, trainingStats = null) {
         e.stopPropagation();
         marker.style.cursor = 'grabbing';
         marker.style.animation = 'none'; // Stop pulsing while dragging
+        marker.style.opacity = '1';
         
         const startX = e.clientX;
-        const startY = e.clientY;
         const origLeft = parseFloat(marker.style.left);
-        const origTop = parseFloat(marker.style.top);
         const labelOrigLeft = parseFloat(label.style.left);
-        const labelOrigTop = parseFloat(label.style.top);
         
         function onMove(e) {
           const dx = e.clientX - startX;
-          const dy = e.clientY - startY;
           
-          // Move marker
+          // Move marker (horizontal only for vertical line)
           marker.style.left = (origLeft + dx) + 'px';
-          marker.style.top = (origTop + dy) + 'px';
           
-          // Move label (maintain relative offset)
+          // Move label (horizontal only)
           label.style.left = (labelOrigLeft + dx) + 'px';
-          label.style.top = (labelOrigTop + dy) + 'px';
           
-          // Update stored position
-          const newX = origLeft + dx + 15; // +15 to get center
-          const newY = origTop + dy + 15;
+          // Update stored position (X position is center of the line)
+          const newX = origLeft + dx + 2; // +2 to get center of 4px wide line
+          const newY = pts.first?.screenY || pts.last?.screenY || 0;
           
           if (markerType === 'first') {
             window.__irrigationCorrected.first = { screenX: newX, screenY: newY, wasDragged: true };
-            document.getElementById('first-coords').textContent = `(${Math.round(newX)}, ${Math.round(newY)}) ✏️`;
+            document.getElementById('first-coords').textContent = `(${Math.round(newX)}) ✏️`;
           } else {
             window.__irrigationCorrected.last = { screenX: newX, screenY: newY, wasDragged: true };
-            document.getElementById('last-coords').textContent = `(${Math.round(newX)}, ${Math.round(newY)}) ✏️`;
+            document.getElementById('last-coords').textContent = `(${Math.round(newX)}) ✏️`;
           }
         }
         
         function onUp() {
-          marker.style.cursor = 'grab';
+          marker.style.cursor = 'ew-resize';
           marker.style.animation = 'pulse 1s infinite';
           document.removeEventListener('mousemove', onMove);
           document.removeEventListener('mouseup', onUp);
@@ -688,21 +715,27 @@ async function showClickOverlay(page, points, trainingStats = null) {
       });
     }
     
-    // Add FIRST click marker (RED) - DRAGGABLE
+    // Get chart bounds for vertical line height
+    const chartPlot = document.querySelector('.highcharts-plot-background');
+    const chartBounds = chartPlot ? chartPlot.getBoundingClientRect() : { top: 300, height: 200 };
+    const lineTop = chartBounds.top || 300;
+    const lineHeight = chartBounds.height || 200;
+    
+    // Add FIRST click marker (RED VERTICAL LINE) - DRAGGABLE
     if (pts.first && pts.first.screenX && pts.first.screenY) {
       const firstMarker = document.createElement('div');
       firstMarker.id = 'first-marker';
       firstMarker.style.cssText = `
         position: fixed;
-        left: ${pts.first.screenX - 15}px;
-        top: ${pts.first.screenY - 15}px;
-        width: 30px;
-        height: 30px;
-        border: 3px solid #FF4444;
-        border-radius: 50%;
-        background: rgba(255, 68, 68, 0.3);
+        left: ${pts.first.screenX - 2}px;
+        top: ${lineTop}px;
+        width: 4px;
+        height: ${lineHeight}px;
+        background: rgba(255, 68, 68, 0.8);
+        border-left: 2px solid #FF4444;
+        border-right: 2px solid #FF4444;
         animation: pulse 1s infinite;
-        cursor: grab;
+        cursor: ew-resize;
         pointer-events: auto;
       `;
       
@@ -710,8 +743,8 @@ async function showClickOverlay(page, points, trainingStats = null) {
       firstLabel.id = 'first-label';
       firstLabel.style.cssText = `
         position: fixed;
-        left: ${pts.first.screenX + 20}px;
-        top: ${pts.first.screenY - 10}px;
+        left: ${pts.first.screenX + 8}px;
+        top: ${lineTop - 25}px;
         background: #FF4444;
         color: white;
         padding: 3px 8px;
@@ -720,6 +753,7 @@ async function showClickOverlay(page, points, trainingStats = null) {
         font-weight: bold;
         font-family: sans-serif;
         pointer-events: none;
+        white-space: nowrap;
       `;
       firstLabel.textContent = `FIRST: ${pts.first.time}`;
       
@@ -729,21 +763,21 @@ async function showClickOverlay(page, points, trainingStats = null) {
       overlay.appendChild(firstLabel);
     }
     
-    // Add LAST click marker (BLUE) - DRAGGABLE
+    // Add LAST click marker (BLUE VERTICAL LINE) - DRAGGABLE
     if (pts.last && pts.last.screenX && pts.last.screenY) {
       const lastMarker = document.createElement('div');
       lastMarker.id = 'last-marker';
       lastMarker.style.cssText = `
         position: fixed;
-        left: ${pts.last.screenX - 15}px;
-        top: ${pts.last.screenY - 15}px;
-        width: 30px;
-        height: 30px;
-        border: 3px solid #4444FF;
-        border-radius: 50%;
-        background: rgba(68, 68, 255, 0.3);
+        left: ${pts.last.screenX - 2}px;
+        top: ${lineTop}px;
+        width: 4px;
+        height: ${lineHeight}px;
+        background: rgba(68, 68, 255, 0.8);
+        border-left: 2px solid #4444FF;
+        border-right: 2px solid #4444FF;
         animation: pulse 1s infinite;
-        cursor: grab;
+        cursor: ew-resize;
         pointer-events: auto;
       `;
       
@@ -751,8 +785,8 @@ async function showClickOverlay(page, points, trainingStats = null) {
       lastLabel.id = 'last-label';
       lastLabel.style.cssText = `
         position: fixed;
-        left: ${pts.last.screenX + 20}px;
-        top: ${pts.last.screenY - 10}px;
+        left: ${pts.last.screenX + 8}px;
+        top: ${lineTop - 25}px;
         background: #4444FF;
         color: white;
         padding: 3px 8px;
@@ -761,6 +795,7 @@ async function showClickOverlay(page, points, trainingStats = null) {
         font-weight: bold;
         font-family: sans-serif;
         pointer-events: none;
+        white-space: nowrap;
       `;
       lastLabel.textContent = `LAST: ${pts.last.time}`;
       
@@ -786,8 +821,9 @@ async function showClickOverlay(page, points, trainingStats = null) {
   
   console.log('  📍 FIRST click planned at: ' + (points.first?.time || 'N/A'));
   console.log('  📍 LAST click planned at: ' + (points.last?.time || 'N/A'));
-  console.log('\n  ⏳ Waiting for user confirmation (drag markers if needed)...');
-  console.log('     → Drag circles to correct positions');
+  console.log('\n  ⏳ Waiting for user confirmation (drag vertical lines if needed)...');
+  console.log('     → Drag vertical lines left/right to correct positions');
+  console.log('     → Drag the info panel to see the table');
   console.log('     → Press ENTER in browser to confirm');
   console.log('     → Press ESC in browser to skip\n');
   
