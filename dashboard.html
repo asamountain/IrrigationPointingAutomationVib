@@ -505,6 +505,24 @@
                     </select>
                 </div>
             </div>
+            <div class="config-grid">
+                <div class="config-item">
+                    <label class="config-label">📅 Day Filter (for Auto-Send Reports)</label>
+                    <select id="day-filter-select">
+                        <option value="">All farms (no filter)</option>
+                        <option value="월">월 (Monday) - farms with [월...]</option>
+                        <option value="화">화 (Tuesday) - farms with [화...]</option>
+                        <option value="수">수 (Wednesday) - farms with [수...]</option>
+                        <option value="목">목 (Thursday) - farms with [목...]</option>
+                        <option value="금">금 (Friday) - farms with [금...]</option>
+                        <option value="토">토 (Saturday) - farms with [토...]</option>
+                        <option value="일">일 (Sunday) - farms with [일...]</option>
+                    </select>
+                    <div style="margin-top: 8px; font-size: 0.9em; color: #999; font-style: italic;">
+                        Filters farms by [월수금] prefix in name (e.g., select 금 on Friday)
+                    </div>
+                </div>
+            </div>
             <div class="start-container">
                 <button class="btn-start" id="btn-start" onclick="startAutomation()">🚀 Start Automation</button>
                 <button class="btn-primary" id="btn-send-reports" onclick="startReportSending()" style="margin-left: 15px; background: linear-gradient(135deg, #ff6b6b 0%, #ee5a6f 100%);">
@@ -693,6 +711,7 @@
             const manager = managerSelect.value === 'custom' ? customManager.value.trim() : managerSelect.value;
             const startFrom = parseInt(document.getElementById('start-from-select').value);
             const maxFarms = parseInt(document.getElementById('max-farms-select').value);
+            const dayFilter = document.getElementById('day-filter-select').value; // NEW: Day filter
 
             if (!manager) {
                 alert('Please enter a manager name');
@@ -704,24 +723,30 @@
                 const response = await fetch('http://localhost:3456/control/start-report-sending', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ manager, startFrom, maxFarms })
+                    body: JSON.stringify({ manager, startFrom, maxFarms, dayFilter }) // ADD dayFilter
                 });
 
                 if (response.ok) {
                     automationStarted = true;
-                    
+
                     // Hide config panel, show dashboard
                     document.getElementById('config-panel').classList.add('hidden');
                     document.getElementById('status-bar').classList.remove('hidden');
                     document.getElementById('dashboard-grid').classList.remove('hidden');
                     document.getElementById('controls-panel').classList.remove('hidden');
-                    
+
                     // Update manager display
                     document.getElementById('manager').textContent = manager;
-                    
+
                     addLog(`🚀 Starting Report Sending Mode with manager: ${manager}`, 'success');
                     addLog(`Starting from: ${startFrom === 0 ? 'All farms' : 'Farm #' + startFrom}`, 'info');
                     addLog(`Max farms to process: ${maxFarms === 999 ? 'All' : maxFarms}`, 'info');
+                    // NEW: Log day filter
+                    if (dayFilter) {
+                        addLog(`📅 Day filter: ${dayFilter} (only farms with [${dayFilter}...] in name)`, 'info');
+                    } else {
+                        addLog(`📅 Day filter: None (processing all farms)`, 'info');
+                    }
                 } else {
                     alert('Failed to start report sending. Server may already be running.');
                 }

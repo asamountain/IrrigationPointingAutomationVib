@@ -23,7 +23,8 @@ class DashboardServer {
       manager: '승진',
       startFrom: 0,
       mode: 'normal',
-      maxFarms: 3
+      maxFarms: 3,
+      dayFilter: ''  // Day filter: '', '월', '화', '수', '목', '금', '토', '일'
     };
   }
 
@@ -131,6 +132,9 @@ class DashboardServer {
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ success: true, config: this.config }));
           console.log(`📤 Report Sending Mode activated:`, this.config);
+          if (this.config.dayFilter) {
+            console.log(`📅 Day filter: ${this.config.dayFilter} (only farms with [${this.config.dayFilter}...] in name)`);
+          }
         } catch (error) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ success: false, error: error.message }));

@@ -12,7 +12,7 @@ import fs from 'fs';
 import path from 'path';
 import { execSync } from 'child_process';
 import DashboardServer from './dashboard-server.js';
-import { setupNetworkInterception, waitForChartData, extractDataPoints } from './network-interceptor.js';
+import { setupNetworkInterception, waitForChartData, extractDataPoints, resetCapturedData } from './network-interceptor.js';
 import { trainAlgorithm } from './trainAlgorithm.js';
 
 // Configuration (move to config.js later)
@@ -547,9 +547,13 @@ async function showClickOverlay(page, points, trainingStats = null) {
     if (existing) existing.remove();
     
     // Initialize corrected positions storage (will be read after confirmation)
+    // IMPORTANT: Initialize firstTime and lastTime immediately to ensure they match overlay display
     window.__irrigationCorrected = {
       first: { screenX: pts.first?.screenX, screenY: pts.first?.screenY, wasDragged: false },
-      last: { screenX: pts.last?.screenX, screenY: pts.last?.screenY, wasDragged: false }
+      last: { screenX: pts.last?.screenX, screenY: pts.last?.screenY, wasDragged: false },
+      firstTime: pts.first?.time || null,
+      lastTime: pts.last?.time || null,
+      nodeId: pts.nodeId || null  // Store nodeId for API call
     };
     window.__irrigationOriginal = {
       first: { screenX: pts.first?.screenX, screenY: pts.first?.screenY },
@@ -681,39 +685,65 @@ async function showClickOverlay(page, points, trainingStats = null) {
       return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
     }
     
-    // Function to update the irrigation time input fields on the page
+    // Helper function to properly update React/Chakra UI input state
+    function triggerReactUpdate(input, value) {
+      // Get React's internal value setter to bypass React's controlled input
+      const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
+        window.HTMLInputElement.prototype, 'value'
+      ).set;
+
+      // Set value using native setter
+      nativeInputValueSetter.call(input, value);
+
+      // Dispatch events that React listens to
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+
+      // Also try to trigger React's synthetic events
+      const reactEvent = new Event('input', { bubbles: true });
+      Object.defineProperty(reactEvent, 'target', { value: input, writable: false });
+      input.dispatchEvent(reactEvent);
+    }
+
+    // Function to update ALL irrigation time input fields on the page by label
     function updateTimeInput(markerType, timeStr) {
-      // Find all time input fields on the page
-      const timeInputs = document.querySelectorAll('input[type="time"]');
-      
+      // Find ALL time input fields on the page
+      const allTimeInputs = document.querySelectorAll('input[type="time"]');
+      let updatedCount = 0;
+
       console.log(`[BROWSER] Updating ${markerType} time input to: ${timeStr}`);
-      console.log(`[BROWSER] Found ${timeInputs.length} time inputs`);
-      
-      // The page has time inputs for first and last irrigation
-      // First input (index 0) = 첫 급액 시간 (first irrigation)
-      // Second input (index 1) = 마지막 급액 시간 (last irrigation)
-      
-      if (markerType === 'first' && timeInputs.length > 0) {
-        const firstInput = timeInputs[0];
-        firstInput.value = timeStr; // Set value in HH:MM format
-        
-        // Trigger input event to notify React/Chakra UI of the change
-        firstInput.dispatchEvent(new Event('input', { bubbles: true }));
-        firstInput.dispatchEvent(new Event('change', { bubbles: true }));
-        
-        console.log(`[BROWSER] Set first input value to: ${timeStr}`);
+      console.log(`[BROWSER] Found ${allTimeInputs.length} time inputs total`);
+
+      // Update ALL inputs that match the marker type based on container text
+      for (const input of allTimeInputs) {
+        // Find the container that has the label text
+        const container = input.closest('div')?.parentElement?.parentElement ||
+                          input.closest('div')?.parentElement ||
+                          input.closest('div');
+        const containerText = container?.textContent || '';
+
+        // Check for first irrigation inputs (첫 급액)
+        if (markerType === 'first' && containerText.includes('첫 급액')) {
+          triggerReactUpdate(input, timeStr);
+          updatedCount++;
+          console.log(`[BROWSER] Updated first irrigation input: ${containerText.substring(0, 30)}...`);
+        }
+        // Check for last irrigation inputs (마지막 급액)
+        else if (markerType === 'last' && containerText.includes('마지막 급액')) {
+          triggerReactUpdate(input, timeStr);
+          updatedCount++;
+          console.log(`[BROWSER] Updated last irrigation input: ${containerText.substring(0, 30)}...`);
+        }
+      }
+
+      // Store in corrected data
+      if (markerType === 'first') {
         window.__irrigationCorrected.firstTime = timeStr;
-      } else if (markerType === 'last' && timeInputs.length > 1) {
-        const lastInput = timeInputs[1];
-        lastInput.value = timeStr; // Set value in HH:MM format
-        
-        // Trigger input event to notify React/Chakra UI of the change
-        lastInput.dispatchEvent(new Event('input', { bubbles: true }));
-        lastInput.dispatchEvent(new Event('change', { bubbles: true }));
-        
-        console.log(`[BROWSER] Set last input value to: ${timeStr}`);
+      } else {
         window.__irrigationCorrected.lastTime = timeStr;
       }
+
+      console.log(`[BROWSER] Updated ${updatedCount} ${markerType} input fields to: ${timeStr}`);
     }
     
     // Helper to make a vertical line marker draggable (horizontal movement only)
@@ -767,12 +797,64 @@ async function showClickOverlay(page, points, trainingStats = null) {
           marker.style.cursor = 'ew-resize';
           document.removeEventListener('mousemove', onMove);
           document.removeEventListener('mouseup', onUp);
-          
+
           // Final update to time input
           const finalX = parseFloat(marker.style.left) + 2;
           const finalTime = xPositionToTime(finalX);
           updateTimeInput(markerType, finalTime);
-          
+
+          // ========== CRITICAL: Trigger Highcharts click event after drag ==========
+          // This makes dragging behave the same as manual chart clicks
+          try {
+            const chart = Highcharts.charts.find(c => c && c.renderTo);
+            if (chart) {
+              // Get the chart container position
+              const chartContainer = chart.container;
+              const chartRect = chartContainer.getBoundingClientRect();
+
+              // Convert screen X to chart plot X
+              const plotX = finalX - chartRect.left - chart.plotLeft;
+
+              // Find the nearest point in the SPLY series (irrigation series)
+              const splySeriesIndex = chart.series.findIndex(s =>
+                s.name && s.name.includes('SPLY')
+              );
+              const series = splySeriesIndex >= 0 ? chart.series[splySeriesIndex] : chart.series[0];
+
+              if (series && series.points && series.points.length > 0) {
+                // Find the point closest to our X position
+                let nearestPoint = null;
+                let minDistance = Infinity;
+
+                for (const point of series.points) {
+                  const distance = Math.abs(point.plotX - plotX);
+                  if (distance < minDistance) {
+                    minDistance = distance;
+                    nearestPoint = point;
+                  }
+                }
+
+                if (nearestPoint && minDistance < 50) {  // Within 50px tolerance
+                  console.log('[BROWSER] 🎯 Triggering Highcharts click at ' + (nearestPoint.category || nearestPoint.x) + ' (distance: ' + minDistance.toFixed(1) + 'px)');
+
+                  // Deselect any previously selected points
+                  chart.getSelectedPoints().forEach(p => p.select(false, false));
+
+                  // Select and trigger click event on the nearest point
+                  nearestPoint.select(true, false);
+                  nearestPoint.firePointEvent('click');
+
+                  console.log('[BROWSER] ✅ Highcharts click event fired for ' + markerType);
+                } else {
+                  console.log('[BROWSER] ⚠️ No Highcharts point found near dragged position (nearest: ' + minDistance.toFixed(1) + 'px)');
+                }
+              }
+            }
+          } catch (err) {
+            console.error('[BROWSER] Error triggering Highcharts event:', err);
+          }
+          // ========== END Highcharts trigger ==========
+
           // Mark that a correction was made with final time
           label.style.background = markerType === 'first' ? '#FF8800' : '#8888FF';
         }
@@ -866,6 +948,15 @@ async function showClickOverlay(page, points, trainingStats = null) {
     
     overlay.appendChild(infoBox);
     document.body.appendChild(overlay);
+
+    // Sync the initial times to input fields immediately when overlay is shown
+    // This ensures the page's input fields match the overlay display from the start
+    if (pts.first?.time) {
+      updateTimeInput('first', pts.first.time);
+    }
+    if (pts.last?.time) {
+      updateTimeInput('last', pts.last.time);
+    }
   }, { pts: points, stats: trainingStats });
   
   console.log('  📍 FIRST click planned at: ' + (points.first?.time || 'N/A'));
@@ -955,16 +1046,98 @@ async function waitForUserConfirmation(page, timeout = 60000) {
           if (e.key === 'Enter') {
             window._overlayConfirmed = true;
             document.removeEventListener('keydown', handler);
-            
-            // Click the save button (저장)
-            const saveButton = document.querySelector('button.chakra-button.css-1jeqlkp') ||
-                               Array.from(document.querySelectorAll('button')).find(b => b.textContent.includes('저장'));
-            if (saveButton) {
-              console.log('[BROWSER] Clicking save button...');
-              saveButton.click();
+
+            // Get nodeId from stored corrected data
+            const nodeId = window.__irrigationCorrected?.nodeId;
+            const firstTime = window.__irrigationCorrected?.firstTime;
+            const lastTime = window.__irrigationCorrected?.lastTime;
+
+            // Get current date from the date display element on page
+            // The page shows date like "2026년 01월 27일" - need to extract and format
+            let dateParam = null;
+            const allElements = document.querySelectorAll('div, span, p, button');
+            for (const el of allElements) {
+              const text = el.textContent || '';
+              const dateMatch = text.match(/(\d{4})년\s*(\d{1,2})월\s*(\d{1,2})일/);
+              if (dateMatch) {
+                const year = dateMatch[1];
+                const month = dateMatch[2].padStart(2, '0');
+                const day = dateMatch[3].padStart(2, '0');
+                dateParam = `${year}-${month}-${day}`;
+                break;
+              }
             }
-            
-            browserResolve(true);
+
+            // Convert HH:MM time string to Unix timestamp (seconds)
+            function timeToUnixTimestamp(timeStr, dateStr) {
+              // timeStr = "10:08", dateStr = "2026-01-27"
+              const dateObj = new Date(dateStr + 'T' + timeStr + ':00+09:00'); // Korea timezone (UTC+9)
+              return Math.floor(dateObj.getTime() / 1000);
+            }
+
+            console.log(`[BROWSER] Saving: nodeId=${nodeId}, date=${dateParam}, first=${firstTime}, last=${lastTime}`);
+
+            // Make direct PUT API call to save irrigation times
+            if (nodeId && dateParam && firstTime && lastTime) {
+              const apiUrl = `https://newapis.iofarm.com/pipeline/manual/node/${nodeId}?category=IRRIGATION&date=${dateParam}`;
+
+              const payload = {
+                category: "IRRIGATION",
+                date: dateParam,
+                manuals: {
+                  "FirstSplyTime_1_cmp1": timeToUnixTimestamp(firstTime, dateParam),
+                  "LastSplyTime_1_cmp1": timeToUnixTimestamp(lastTime, dateParam)
+                }
+              };
+
+              console.log('[BROWSER] API URL:', apiUrl);
+              console.log('[BROWSER] API Payload:', JSON.stringify(payload));
+
+              fetch(apiUrl, {
+                method: 'PUT',
+                credentials: 'include',  // Include cookies for auth
+                headers: {
+                  'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(payload)
+              }).then(async response => {
+                // Read response body for verification
+                const responseText = await response.text();
+                console.log(`[BROWSER] API Response: ${response.status} - ${responseText}`);
+
+                if (response.ok) {
+                  console.log(`[BROWSER] ✅ Save API call successful (${response.status})`);
+
+                  // Verify by reading back the saved data
+                  try {
+                    const verifyUrl = `https://newapis.iofarm.com/pipeline/manual/node/${nodeId}?category=IRRIGATION&date=${dateParam}`;
+                    const verifyResponse = await fetch(verifyUrl, { credentials: 'include' });
+                    const savedData = await verifyResponse.json();
+                    console.log('[BROWSER] 📋 Verified saved data:', JSON.stringify(savedData));
+
+                    // Check if our values are in the response
+                    if (savedData.FirstSplyTime_1_cmp1 || savedData.LastSplyTime_1_cmp1) {
+                      console.log('[BROWSER] ✅ Data verified - values persisted to backend');
+                    } else {
+                      console.log('[BROWSER] ⚠️ Warning: Saved values not found in verification response');
+                    }
+                  } catch (verifyErr) {
+                    console.log('[BROWSER] ⚠️ Could not verify saved data:', verifyErr.message);
+                  }
+                } else {
+                  console.error(`[BROWSER] ❌ Save failed: ${response.status} - ${responseText}`);
+                }
+                browserResolve(true);
+              }).catch(err => {
+                console.error('[BROWSER] ❌ Save API call failed:', err);
+                browserResolve(true);
+              });
+            } else {
+              console.log('[BROWSER] ⚠️ Missing required data for API call:');
+              console.log(`   nodeId=${nodeId}, dateParam=${dateParam}, firstTime=${firstTime}, lastTime=${lastTime}`);
+              browserResolve(true);
+            }
+            return; // Don't resolve immediately, wait for API response
           } else if (e.key === 'Escape') {
             window._overlayConfirmed = false;
             document.removeEventListener('keydown', handler);
@@ -1926,14 +2099,38 @@ async function runReportSending(config, dashboard, runStats) {
     });
     
     console.log(`  ✅ Found ${farmList.length} farms\n`);
-    
-    // Broadcast farm count
-    if (dashboard) {
-      dashboard.broadcast('update_farm_count', { count: farmList.length });
+
+    // ════════════════════════════════════════════════════════════════════
+    // DAY FILTER: Filter farms by [월수금] prefix in name
+    // ════════════════════════════════════════════════════════════════════
+    const dayFilter = config.dayFilter || '';
+    let filteredFarms = farmList;
+
+    if (dayFilter) {
+      filteredFarms = farmList.filter(farm => {
+        // Look for bracket prefix like [월수금] or [월] at start of name
+        const bracketMatch = farm.name.match(/^\[([^\]]+)\]/);
+        if (!bracketMatch) {
+          // No bracket prefix - skip this farm when filter is active
+          return false;
+        }
+        // Check if the selected day is in the bracket
+        const daysInBracket = bracketMatch[1];
+        return daysInBracket.includes(dayFilter);
+      });
+
+      console.log(`📅 Day filter: ${dayFilter}`);
+      console.log(`   Filtered: ${filteredFarms.length}/${farmList.length} farms match [${dayFilter}...]`);
+      console.log(`   Skipped: ${farmList.length - filteredFarms.length} farms (no bracket or day not matching)\n`);
     }
-    
-    // Step 3: Calculate farm range
-    const totalFarms = farmList.length;
+
+    // Broadcast farm count (filtered count if filter is active)
+    if (dashboard) {
+      dashboard.broadcast('update_farm_count', { count: filteredFarms.length });
+    }
+
+    // Step 3: Calculate farm range (use filteredFarms instead of farmList)
+    const totalFarms = filteredFarms.length;
     let startIndex = (config.startFrom > 0) ? (config.startFrom - 1) : 0;
     let maxCount = config.maxFarms || totalFarms;
     
@@ -1944,10 +2141,10 @@ async function runReportSending(config, dashboard, runStats) {
     }
     
     let endIndex = Math.min(startIndex + maxCount, totalFarms);
-    const farmsToProcess = farmList.slice(startIndex, endIndex);
-    
+    const farmsToProcess = filteredFarms.slice(startIndex, endIndex);
+
     console.log(`📋 Processing Plan:`);
-    console.log(`   → Total farms: ${totalFarms}`);
+    console.log(`   → Total farms: ${totalFarms}${dayFilter ? ` (filtered by [${dayFilter}])` : ''}`);
     console.log(`   → Range: Farm #${startIndex + 1} to #${endIndex}`);
     console.log(`   → Count: ${farmsToProcess.length}\n`);
     
@@ -3388,6 +3585,10 @@ async function main() {
           // Move to next date using "Next period" button (except for T-0, the last date)
           if (dayOffset > 0) {
             console.log(`     ⏭️  Moving to next date (T-${dayOffset} → T-${dayOffset - 1})...`);
+
+            // Reset captured data to allow fresh capture for new date
+            resetCapturedData(networkData);
+
             const nextClicked = await page.evaluate(() => {
               const nextButton = document.querySelector('button[aria-label="다음 기간"]');
               if (nextButton) {
@@ -3396,14 +3597,14 @@ async function main() {
               }
               return false;
             });
-            
+
             if (nextClicked) {
               console.log(`     ✅ Moved to next date`);
               // ⚡ FAST: Brief wait for date picker (unavoidable UI)
               await page.waitForTimeout(300);
             }
           }
-          
+
           continue; // Skip to next date
         }
         
@@ -3441,10 +3642,13 @@ async function main() {
             console.log('  → Will attempt to continue anyway...\n');
           }
           
-          // Extract normalized data points
+          // Extract normalized data points and nodeId
           console.log('  🔍 DEBUG: About to extract data points from chart data...');
-          const dataPoints = extractDataPoints(chartData);
-          console.log(`  🔍 DEBUG: extractDataPoints returned ${dataPoints?.length || 0} points`);
+          const extractResult = extractDataPoints(chartData);
+          // Handle both new format {dataPoints, nodeId} and legacy format (just array)
+          const dataPoints = extractResult?.dataPoints || extractResult;
+          const nodeId = extractResult?.nodeId || null;
+          console.log(`  🔍 DEBUG: extractDataPoints returned ${dataPoints?.length || 0} points, nodeId=${nodeId}`);
           
           if (!dataPoints || dataPoints.length < 10) {
             console.log('  ⚠️  Insufficient data points for analysis');
@@ -3454,6 +3658,10 @@ async function main() {
             // Skip to next date (only if not at T-0)
             if (dayOffset > 0) {
               console.log(`     ⏭️  Moving to next date (T-${dayOffset} → T-${dayOffset - 1})...`);
+
+              // Reset captured data to allow fresh capture for new date
+              resetCapturedData(networkData);
+
               const nextClicked = await page.evaluate(() => {
                 const nextButton = document.querySelector('button[aria-label="다음 기간"]');
                 if (nextButton) {
@@ -3462,7 +3670,7 @@ async function main() {
                 }
                 return false;
               });
-              
+
               if (nextClicked) {
                 // ⚡ FAST: Brief wait for date picker UI
                 await page.waitForTimeout(300);
@@ -3609,6 +3817,10 @@ async function main() {
             // Skip to next date (only if not at T-0)
             if (dayOffset > 0) {
               console.log(`     ⏭️  Moving to next date (T-${dayOffset} → T-${dayOffset - 1})...`);
+
+              // Reset captured data to allow fresh capture for new date
+              resetCapturedData(networkData);
+
               const nextClicked = await page.evaluate(() => {
                 const nextButton = document.querySelector('button[aria-label="다음 기간"]');
                 if (nextButton) {
@@ -3617,7 +3829,7 @@ async function main() {
                 }
                 return false;
               });
-              
+
               if (nextClicked) {
                 // ⚡ FAST: Brief wait for date picker UI
                 await page.waitForTimeout(300);
@@ -3723,7 +3935,8 @@ async function main() {
                   ...screenCoords.last,
                   screenX: adjustedFirst.lastScreenX, // Use adjusted X
                   time: lastEvent.time || 'N/A'
-                }
+                },
+                nodeId: nodeId // Pass nodeId for API call
               };
               
               console.log('  👁️  SHOWING OVERLAY NOW - Check the browser window!');
@@ -3787,6 +4000,9 @@ async function main() {
 
                 // Skip to next date (only if not at T-0)
                 if (dayOffset > 0) {
+                  // Reset captured data to allow fresh capture for new date
+                  resetCapturedData(networkData);
+
                   const nextClicked = await page.evaluate(() => {
                     const nextButton = document.querySelector('button[aria-label="다음 기간"]');
                     if (nextButton) {
@@ -3829,6 +4045,10 @@ async function main() {
           // Skip to next date if data unavailable (only if not at T-0)
           if (dayOffset > 0) {
             console.log(`     ⏭️  Moving to next date (T-${dayOffset} → T-${dayOffset - 1})...`);
+
+            // Reset captured data to allow fresh capture for new date
+            resetCapturedData(networkData);
+
             const nextClicked = await page.evaluate(() => {
               const nextButton = document.querySelector('button[aria-label="다음 기간"]');
               if (nextButton) {
@@ -3837,7 +4057,7 @@ async function main() {
               }
               return false;
             });
-            
+
             if (nextClicked) {
               // ⚡ FAST: Brief wait for date picker UI
               await page.waitForTimeout(300);
@@ -4298,16 +4518,38 @@ async function main() {
             }
             
             // 2. Find END: Look forward to find where water level RECOVERS (after irrigation)
+            // First, find the LOWEST point (deepest drop) after the irrigation starts
             let endIndex = dropIndex;
-            let highestYAfter = drop.y;
-            
+            let lowestYAfter = drop.y;  // Track the lowest point (highest Y value in screen coords)
+            let lowestIndex = dropIndex;
+
+            // Phase 1: Find the lowest point (deepest part of irrigation drop)
             for (let j = dropIndex + 1; j < Math.min(finalCoords.length, dropIndex + 30); j++) {
               const currentY = smoothedY[j];
-              // Find where water level is high again (recovered from irrigation)
-              if (currentY < highestYAfter) {
-                highestYAfter = currentY;
-                endIndex = j;
+              // In screen coordinates: higher Y = lower water level
+              if (currentY > lowestYAfter) {
+                lowestYAfter = currentY;
+                lowestIndex = j;
               }
+            }
+
+            // Phase 2: From the lowest point, find where water level starts RECOVERING
+            // (Y value decreases = water level rises)
+            const recoveryThreshold = (lowestYAfter - drop.y) * 0.3; // 30% recovery
+            endIndex = lowestIndex; // Default to lowest point if no clear recovery
+
+            for (let j = lowestIndex + 1; j < Math.min(finalCoords.length, lowestIndex + 20); j++) {
+              const currentY = smoothedY[j];
+              // Check if water level has recovered significantly (Y decreased from lowest)
+              if (lowestYAfter - currentY > recoveryThreshold) {
+                endIndex = j;
+                break;
+              }
+            }
+
+            // If no clear recovery found, use the lowest point as end
+            if (endIndex === lowestIndex) {
+              endIndex = lowestIndex;
             }
             
             // Validate
@@ -4466,6 +4708,10 @@ async function main() {
           // Move to next date (only if not at T-0)
           if (dayOffset > 0) {
             console.log(`     ⏭️  Moving to next date (T-${dayOffset} → T-${dayOffset - 1})...`);
+
+            // Reset captured data to allow fresh capture for new date
+            resetCapturedData(networkData);
+
             const nextClicked = await page.evaluate(() => {
               const nextButton = document.querySelector('button[aria-label="다음 기간"]');
               if (nextButton) { nextButton.click(); return true; }
@@ -5136,6 +5382,10 @@ async function main() {
       // URL date parameter does NOT work - must use button clicks
       if (dayOffset > 0) {
         console.log(`     ⏭️  Moving to next date (T-${dayOffset} → T-${dayOffset - 1})...`);
+
+        // Reset captured data to allow fresh capture for new date
+        resetCapturedData(networkData);
+
         const nextClicked = await page.evaluate(() => {
           const nextButton = document.querySelector('button[aria-label="다음 기간"]');
           if (nextButton) {
@@ -5144,7 +5394,7 @@ async function main() {
           }
           return false;
         });
-        
+
         if (nextClicked) {
           await page.waitForTimeout(800);
           await waitForPageReady(page, { waitForChart: true });
