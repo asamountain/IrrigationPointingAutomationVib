@@ -1,0 +1,21 @@
+FIRST Click (Start of irrigation):
+
+                    ╭────╮
+                   ╱      ╲
+                  ╱        ──────
+    ────────────●╱
+                ↑
+         FIRST CLICK HERE
+         (The very last "flat" point BEFORE the curve starts rising)
+         (Must be AFTER 07:00 "yellow zone")
+
+LAST Click (End of irrigation):
+
+         LAST CLICK HERE
+                ↓
+                ╭●───╮
+               ╱      ╲
+              ╱        ──────
+    ─────────╱
+    
+    (The PEAK - highest point of the curve)

@@ -69,6 +69,17 @@ export async function waitForChartData(capturedData, timeoutMs = 15000) {
   throw new Error(`Timeout: No sensor data with "node." keys found within ${timeoutMs}ms`);
 }
 
+/**
+ * Reset captured data to allow fresh capture for new date/page
+ * Call this before navigating to a new date or selecting a new report
+ */
+export function resetCapturedData(capturedData) {
+  capturedData.chartData = null;
+  capturedData.dataUrl = null;
+  capturedData.timestamp = null;
+  console.log('[NETWORK] 🔄 Captured data reset for new date/page');
+}
+
 export function extractDataPoints(apiResponse) {
   console.log('🔍 [NETWORK] Analyzing API response for sensor data...');
   
