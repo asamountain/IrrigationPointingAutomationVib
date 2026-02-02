@@ -13,10 +13,34 @@ window.__irrigationCorrected = null;
 window.__irrigationOriginal = null;
 window._overlayConfirmed = null;
 
+// DEBUG: Global call counter for tracing
+window.__debugCallCount = 0;
+
+/**
+ * DEBUG LOGGER - Traces all function calls with timestamps and stack traces
+ */
+function debugLog(functionName, message, data = null) {
+  window.__debugCallCount++;
+  const callNum = window.__debugCallCount;
+  const timestamp = new Date().toISOString().split('T')[1].split('.')[0];
+  const prefix = `[DEBUG #${callNum}] [${timestamp}] [${functionName}]`;
+  
+  console.log(`%c${prefix} ${message}`, 'color: #00ff00; font-weight: bold;');
+  if (data !== null) {
+    console.log(`%c  → Data:`, 'color: #00ff00;', data);
+  }
+  
+  // Print abbreviated stack trace
+  const stack = new Error().stack.split('\n').slice(2, 5).join('\n  ');
+  console.log(`%c  → Stack:\n  ${stack}`, 'color: #888;');
+}
+
 /**
  * Create the visual confirmation overlay with draggable vertical lines
  */
 function createOverlay(pts, stats) {
+  debugLog('createOverlay', 'STARTING overlay creation', { pts, stats });
+  
   // Remove existing overlay
   const existing = document.getElementById('irrigation-click-overlay');
   if (existing) existing.remove();
@@ -37,9 +61,32 @@ function createOverlay(pts, stats) {
   // Find chart container
   const chartContainer = document.querySelector('.highcharts-container, .highcharts-root')?.parentElement;
   if (!chartContainer) {
-    console.error('Cannot find chart container for overlay');
+    debugLog('createOverlay', 'ERROR: Cannot find chart container');
     return;
   }
+
+  // CRITICAL: Disable ALL Highcharts click events by intercepting them
+  // The website's Highcharts click handler updates BOTH input fields
+  debugLog('createOverlay', 'Disabling Highcharts click handlers...');
+  const charts = window.Highcharts?.charts || [];
+  charts.forEach((chart, idx) => {
+    if (chart) {
+      debugLog('createOverlay', `Disabling chart ${idx}`, { 
+        hasPlotOptions: !!chart.options?.plotOptions,
+        hasClickHandler: !!chart.options?.plotOptions?.series?.point?.events?.click
+      });
+      // Store original click handlers and disable them
+      chart._originalPlotOptionsClick = chart.options?.plotOptions?.series?.point?.events?.click;
+      if (chart.options?.plotOptions?.series?.point?.events) {
+        chart.options.plotOptions.series.point.events.click = null;
+      }
+      // Disable pointer events on chart container
+      if (chart.container) {
+        chart.container.style.pointerEvents = 'none';
+        debugLog('createOverlay', `Chart ${idx} pointer events disabled`);
+      }
+    }
+  });
 
   // Create overlay container
   const overlay = document.createElement('div');
@@ -48,6 +95,36 @@ function createOverlay(pts, stats) {
     position: fixed; top: 0; left: 0; width: 100%; height: 100%;
     pointer-events: none; z-index: 99999;
   `;
+  
+  // Create a BLOCKING layer over the chart area to intercept clicks
+  const chartBlocker = document.createElement('div');
+  chartBlocker.id = 'chart-click-blocker';
+  const chartRect = chartContainer.getBoundingClientRect();
+  chartBlocker.style.cssText = `
+    position: fixed;
+    top: ${chartRect.top}px;
+    left: ${chartRect.left}px;
+    width: ${chartRect.width}px;
+    height: ${chartRect.height}px;
+    pointer-events: auto;
+    z-index: 99998;
+    background: transparent;
+    cursor: default;
+  `;
+  // Block all events on the chart
+  chartBlocker.addEventListener('click', (e) => { 
+    debugLog('chartBlocker', 'BLOCKED click event on chart');
+    e.stopPropagation(); e.preventDefault(); 
+  });
+  chartBlocker.addEventListener('mousedown', (e) => { 
+    debugLog('chartBlocker', 'BLOCKED mousedown event on chart');
+    e.stopPropagation(); e.preventDefault(); 
+  });
+  chartBlocker.addEventListener('mouseup', (e) => { 
+    debugLog('chartBlocker', 'BLOCKED mouseup event on chart');
+    e.stopPropagation(); e.preventDefault(); 
+  });
+  overlay.appendChild(chartBlocker);
 
   // Create info box
   const infoBox = createInfoBox(pts, stats);
@@ -59,6 +136,8 @@ function createOverlay(pts, stats) {
   const lineHeight = chartBounds.height || 200;
   const chartLeft = chartBounds.left || 500;
   const chartWidth = chartBounds.width || 400;
+  
+  debugLog('createOverlay', 'Chart bounds calculated', { chartLeft, chartWidth, lineTop, lineHeight });
 
   // Time calculation helpers
   const startHour = 2, endHour = 20;
@@ -93,9 +172,9 @@ function createOverlay(pts, stats) {
   overlay.appendChild(infoBox);
   document.body.appendChild(overlay);
 
-  // Sync initial times to input fields
-  if (pts.first?.time) updateTimeInput('first', pts.first.time);
-  if (pts.last?.time) updateTimeInput('last', pts.last.time);
+  // DO NOT sync initial times - let user drag to set them
+  // The website already has its own values, we only update when user drags
+  console.log('[BROWSER] Overlay created - chart clicks BLOCKED, drag vertical lines to set times');
 }
 
 /**
@@ -195,22 +274,57 @@ function createMarker(type, point, lineTop, lineHeight) {
 }
 
 /**
- * Make a marker draggable with Highcharts event triggering
+ * Make a marker draggable - COMPLETELY ISOLATED from Highcharts events
+ * CRITICAL: Do NOT trigger any Highcharts click events - they update BOTH inputs!
  */
 function makeDraggable(marker, label, markerType, xPositionToTime, pts) {
+  debugLog('makeDraggable', `Setting up draggable for ${markerType} marker`);
+  
   marker.style.cursor = 'ew-resize';
   marker.style.pointerEvents = 'auto';
 
+  // Block ALL chart click events while our overlay is active
+  function blockChartClicks(e) {
+    debugLog('blockChartClicks', `BLOCKED event: ${e.type}`);
+    e.stopPropagation();
+    e.stopImmediatePropagation();
+    e.preventDefault();
+    return false;
+  }
+
   marker.addEventListener('mousedown', (e) => {
+    debugLog('makeDraggable.mousedown', `MOUSEDOWN on ${markerType} marker`, { 
+      clientX: e.clientX, 
+      clientY: e.clientY,
+      target: e.target.id 
+    });
+    
+    // CRITICAL: Block event from reaching Highcharts
     e.preventDefault();
     e.stopPropagation();
+    e.stopImmediatePropagation();
+    
     marker.style.cursor = 'grabbing';
 
     const startX = e.clientX;
     const origLeft = parseFloat(marker.style.left);
     const labelOrigLeft = parseFloat(label.style.left);
+    
+    debugLog('makeDraggable.mousedown', `Drag started`, { startX, origLeft, labelOrigLeft });
 
+    // Temporarily block ALL clicks on the chart container
+    const chartContainer = document.querySelector('.highcharts-container');
+    if (chartContainer) {
+      chartContainer.style.pointerEvents = 'none';
+      debugLog('makeDraggable.mousedown', 'Disabled chart pointer events');
+    }
+
+    let moveCount = 0;
     function onMove(e) {
+      moveCount++;
+      e.preventDefault();
+      e.stopPropagation();
+      
       const dx = e.clientX - startX;
       const newLeft = origLeft + dx;
       marker.style.left = newLeft + 'px';
@@ -221,124 +335,253 @@ function makeDraggable(marker, label, markerType, xPositionToTime, pts) {
       const newY = pts.first?.screenY || pts.last?.screenY || 0;
 
       label.textContent = `${markerType === 'first' ? 'FIRST' : 'LAST'}: ${timeStr}`;
+      
+      // Log every 10th move to avoid flooding
+      if (moveCount % 10 === 1) {
+        debugLog('makeDraggable.onMove', `DRAG MOVE #${moveCount} for ${markerType}`, { 
+          dx, newLeft, timeStr,
+          markerType
+        });
+      }
+      
+      // Update ONLY the correct input field
+      debugLog('makeDraggable.onMove', `CALLING updateTimeInput("${markerType}", "${timeStr}")`);
       updateTimeInput(markerType, timeStr);
 
       if (markerType === 'first') {
         window.__irrigationCorrected.first = { screenX: newX, screenY: newY, wasDragged: true, time: timeStr };
-        document.getElementById('first-coords').textContent = `${timeStr} ✏️`;
-        document.getElementById('first-time').textContent = timeStr;
+        const coordsEl = document.getElementById('first-coords');
+        const timeEl = document.getElementById('first-time');
+        if (coordsEl) coordsEl.textContent = `${timeStr} ✏️`;
+        if (timeEl) timeEl.textContent = timeStr;
       } else {
         window.__irrigationCorrected.last = { screenX: newX, screenY: newY, wasDragged: true, time: timeStr };
-        document.getElementById('last-coords').textContent = `${timeStr} ✏️`;
-        document.getElementById('last-time').textContent = timeStr;
+        const coordsEl = document.getElementById('last-coords');
+        const timeEl = document.getElementById('last-time');
+        if (coordsEl) coordsEl.textContent = `${timeStr} ✏️`;
+        if (timeEl) timeEl.textContent = timeStr;
       }
     }
 
-    function onUp() {
+    function onUp(e) {
+      debugLog('makeDraggable.onUp', `MOUSEUP on ${markerType} marker after ${moveCount} moves`);
+      
+      e.preventDefault();
+      e.stopPropagation();
+      
       marker.style.cursor = 'ew-resize';
       document.removeEventListener('mousemove', onMove);
       document.removeEventListener('mouseup', onUp);
 
+      // Re-enable chart clicks after drag completes
+      if (chartContainer) {
+        chartContainer.style.pointerEvents = 'auto';
+        debugLog('makeDraggable.onUp', 'Re-enabled chart pointer events');
+      }
+
       const finalX = parseFloat(marker.style.left) + 2;
       const finalTime = xPositionToTime(finalX);
+      
+      debugLog('makeDraggable.onUp', `Final position for ${markerType}`, { finalX, finalTime });
+      
+      // Final update to the correct input field ONLY
+      debugLog('makeDraggable.onUp', `FINAL CALL to updateTimeInput("${markerType}", "${finalTime}")`);
       updateTimeInput(markerType, finalTime);
 
-      // Trigger Highcharts click event after drag
-      triggerHighchartsClick(finalX, markerType);
-
+      // DO NOT trigger Highcharts click - it updates BOTH inputs!
+      // The website's Highcharts click handler fills both fields simultaneously
+      // We only need to update our target input field directly
+      
+      debugLog('makeDraggable.onUp', `✅ Drag COMPLETE for ${markerType}: ${finalTime}`);
       label.style.background = markerType === 'first' ? '#FF8800' : '#8888FF';
     }
 
     document.addEventListener('mousemove', onMove);
     document.addEventListener('mouseup', onUp);
   });
+  
+  // Also block click events on the marker (in case of accidental clicks)
+  marker.addEventListener('click', (e) => {
+    debugLog('makeDraggable.click', `BLOCKED click on ${markerType} marker`);
+    e.preventDefault();
+    e.stopPropagation();
+    e.stopImmediatePropagation();
+  });
 }
 
 /**
- * Trigger Highcharts click event at position (makes dragging work like manual clicks)
+ * DISABLED: triggerHighchartsClick
+ * 
+ * This function was causing the bug where both input fields were updated simultaneously.
+ * The website's Highcharts click handler updates BOTH 첫 급액 시간 and 마지막 급액 시간
+ * fields whenever any point on the chart is clicked.
+ * 
+ * We now update the input fields DIRECTLY via updateTimeInput() instead.
+ * This function is kept as a no-op for compatibility but does nothing.
  */
 function triggerHighchartsClick(finalX, markerType) {
-  try {
-    const chart = Highcharts.charts.find(c => c && c.renderTo);
-    if (!chart) return;
-
-    const chartRect = chart.container.getBoundingClientRect();
-    const plotX = finalX - chartRect.left - chart.plotLeft;
-
-    const splySeriesIndex = chart.series.findIndex(s => s.name && s.name.includes('SPLY'));
-    const series = splySeriesIndex >= 0 ? chart.series[splySeriesIndex] : chart.series[0];
-
-    if (!series?.points?.length) return;
-
-    let nearestPoint = null, minDistance = Infinity;
-    for (const point of series.points) {
-      const distance = Math.abs(point.plotX - plotX);
-      if (distance < minDistance) {
-        minDistance = distance;
-        nearestPoint = point;
-      }
-    }
-
-    if (nearestPoint && minDistance < 50) {
-      console.log(`[BROWSER] 🎯 Triggering Highcharts click at ${nearestPoint.category || nearestPoint.x} (distance: ${minDistance.toFixed(1)}px)`);
-      chart.getSelectedPoints().forEach(p => p.select(false, false));
-      nearestPoint.select(true, false);
-      nearestPoint.firePointEvent('click');
-      console.log(`[BROWSER] ✅ Highcharts click event fired for ${markerType}`);
-    }
-  } catch (err) {
-    console.error('[BROWSER] Error triggering Highcharts event:', err);
-  }
+  // DO NOT trigger Highcharts click events!
+  // The website's built-in handler updates BOTH input fields when a chart point is clicked.
+  // We only want to update ONE field at a time based on which marker was dragged.
+  console.log(`[BROWSER] ⚠️ triggerHighchartsClick disabled - using direct input update instead`);
+  return;
 }
 
 /**
  * Update time input fields on the page
+ * CRITICAL: Only update the field corresponding to the marker type
+ * RED bar (first) -> only "첫 급액 시간" field (input index 0)
+ * BLUE bar (last) -> only "마지막 급액 시간" field (input index 1)
+ * 
+ * SIMPLE INDEX-BASED APPROACH: The page always has exactly 2 time inputs
+ * Input 0 = 첫 급액 시간 (First irrigation time) -> RED bar
+ * Input 1 = 마지막 급액 시간 (Last irrigation time) -> BLUE bar
  */
 function updateTimeInput(markerType, timeStr) {
+  debugLog('updateTimeInput', `CALLED with markerType="${markerType}", timeStr="${timeStr}"`);
+  
+  // Get ALL time inputs on the page
   const allTimeInputs = document.querySelectorAll('input[type="time"]');
-  let updatedCount = 0;
-
-  for (const input of allTimeInputs) {
-    const container = input.closest('div')?.parentElement?.parentElement ||
-                      input.closest('div')?.parentElement || input.closest('div');
-    const containerText = container?.textContent || '';
-
-    if (markerType === 'first' && containerText.includes('첫 급액')) {
-      triggerReactUpdate(input, timeStr);
-      updatedCount++;
-    } else if (markerType === 'last' && containerText.includes('마지막 급액')) {
-      triggerReactUpdate(input, timeStr);
-      updatedCount++;
+  
+  debugLog('updateTimeInput', `Found ${allTimeInputs.length} time inputs`, {
+    inputs: Array.from(allTimeInputs).map((input, i) => ({
+      index: i,
+      currentValue: input.value,
+      className: input.className,
+      parentText: input.parentElement?.textContent?.substring(0, 50)
+    }))
+  });
+  
+  if (allTimeInputs.length < 2) {
+    debugLog('updateTimeInput', `ERROR: Expected 2 inputs, found ${allTimeInputs.length}`);
+    return;
+  }
+  
+  let targetInput = null;
+  let targetIndex = -1;
+  
+  // RED bar (first) -> ONLY update input index 0 (첫 급액 시간)
+  if (markerType === 'first') {
+    targetInput = allTimeInputs[0];
+    targetIndex = 0;
+    debugLog('updateTimeInput', `🔴 RED bar -> Will update input[0] ONLY`);
+  }
+  // BLUE bar (last) -> ONLY update input index 1 (마지막 급액 시간)
+  else if (markerType === 'last') {
+    targetInput = allTimeInputs[1];
+    targetIndex = 1;
+    debugLog('updateTimeInput', `🔵 BLUE bar -> Will update input[1] ONLY`);
+  }
+  
+  if (targetInput) {
+    const oldValue = targetInput.value;
+    debugLog('updateTimeInput', `BEFORE triggerReactUpdate: input[${targetIndex}] value = "${oldValue}"`);
+    
+    // Log the other input's value to check if it changes
+    const otherIndex = targetIndex === 0 ? 1 : 0;
+    const otherValueBefore = allTimeInputs[otherIndex]?.value;
+    debugLog('updateTimeInput', `OTHER input[${otherIndex}] value BEFORE = "${otherValueBefore}" (should NOT change)`);
+    
+    triggerReactUpdate(targetInput, timeStr);
+    
+    // Check values AFTER the update
+    const newValue = targetInput.value;
+    const otherValueAfter = allTimeInputs[otherIndex]?.value;
+    
+    debugLog('updateTimeInput', `AFTER triggerReactUpdate:`, {
+      targetInput: { index: targetIndex, before: oldValue, after: newValue },
+      otherInput: { index: otherIndex, before: otherValueBefore, after: otherValueAfter },
+      otherChanged: otherValueBefore !== otherValueAfter ? '⚠️ OTHER INPUT CHANGED!' : '✅ OK'
+    });
+    
+    if (otherValueBefore !== otherValueAfter) {
+      debugLog('updateTimeInput', `🚨🚨🚨 BUG DETECTED: OTHER INPUT CHANGED FROM "${otherValueBefore}" TO "${otherValueAfter}" 🚨🚨🚨`);
     }
+    
+  } else {
+    debugLog('updateTimeInput', `ERROR: Could not find target input for ${markerType}`);
   }
 
+  // Store in corrected data
   if (markerType === 'first') {
     window.__irrigationCorrected.firstTime = timeStr;
   } else {
     window.__irrigationCorrected.lastTime = timeStr;
   }
-
-  console.log(`[BROWSER] Updated ${updatedCount} ${markerType} input fields to: ${timeStr}`);
+  
+  debugLog('updateTimeInput', `COMPLETE for ${markerType}`);
 }
 
 /**
  * Trigger React state update for controlled inputs
+ * CRITICAL: Use bubbles:false to prevent website handlers from catching these events
  */
 function triggerReactUpdate(input, value) {
+  debugLog('triggerReactUpdate', `CALLED`, { 
+    inputId: input.id,
+    inputClass: input.className,
+    oldValue: input.value,
+    newValue: value
+  });
+  
+  // Store old value for comparison
+  const oldValue = input.value;
+  
+  // Method 1: Direct value setter (bypasses React but sets the value)
+  debugLog('triggerReactUpdate', 'Step 1: Using nativeInputValueSetter');
   const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
     window.HTMLInputElement.prototype, 'value'
   ).set;
   nativeInputValueSetter.call(input, value);
-  input.dispatchEvent(new Event('input', { bubbles: true }));
-  input.dispatchEvent(new Event('change', { bubbles: true }));
+  debugLog('triggerReactUpdate', `After nativeInputValueSetter: input.value = "${input.value}"`);
+  
+  // Method 2: Dispatch events WITHOUT bubbling to avoid website handlers
+  // The website's handlers listen for bubbling events and update BOTH fields
+  debugLog('triggerReactUpdate', 'Step 2: Dispatching events with bubbles=false');
+  const inputEvent = new Event('input', { bubbles: false, cancelable: true });
+  const changeEvent = new Event('change', { bubbles: false, cancelable: true });
+  
+  input.dispatchEvent(inputEvent);
+  input.dispatchEvent(changeEvent);
+  debugLog('triggerReactUpdate', 'Dispatched input and change events (bubbles=false)');
+  
+  // Method 3: Also try React's internal value tracker if available
+  const tracker = input._valueTracker;
+  if (tracker) {
+    tracker.setValue(oldValue); // Set to old value first
+  }
+  
+  // Force a React-compatible input event
+  const reactEvent = new Event('input', { bubbles: false });
+  Object.defineProperty(reactEvent, 'target', { value: input, writable: false });
+  input.dispatchEvent(reactEvent);
+  
+  console.log(`[BROWSER] triggerReactUpdate: Set input value to "${value}" (was "${oldValue}")`);
 }
 
 /**
- * Remove the overlay from DOM
+ * Remove the overlay from DOM and restore chart functionality
  */
 function removeOverlay() {
   const overlay = document.getElementById('irrigation-click-overlay');
   if (overlay) overlay.remove();
+  
+  // Restore Highcharts click handlers and pointer events
+  const charts = window.Highcharts?.charts || [];
+  charts.forEach(chart => {
+    if (chart) {
+      // Restore original click handler if we saved it
+      if (chart._originalPlotOptionsClick && chart.options?.plotOptions?.series?.point?.events) {
+        chart.options.plotOptions.series.point.events.click = chart._originalPlotOptionsClick;
+      }
+      // Re-enable pointer events
+      if (chart.container) {
+        chart.container.style.pointerEvents = 'auto';
+      }
+    }
+  });
+  
+  console.log('[BROWSER] Overlay removed, chart clicks restored');
 }
 
 /**
