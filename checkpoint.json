@@ -1,0 +1,16 @@
+{
+  "savedAt": "2026-02-04T09:28:23.446Z",
+  "farmIndex": 2,
+  "farmName": "[월수금]팜엔조이0101",
+  "dateIndex": 1,
+  "dateString": "2026-01-31",
+  "totalFarms": 3,
+  "totalDates": 6,
+  "lastClickedPoints": [],
+  "resumeInfo": {
+    "nextFarm": 2,
+    "nextDate": 2
+  },
+  "manager": "승진",
+  "mode": "normal"
+}

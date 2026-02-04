@@ -5,7 +5,7 @@
  * Handles the right panel tables showing "첫 급액 시간" and "마지막 급액 시간"
  */
 
-import { log } from './utils.js';
+import { log } from '../utils.js';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // 💧 TABLE STATUS CHECKING

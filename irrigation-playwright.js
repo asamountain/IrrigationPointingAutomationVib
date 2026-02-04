@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Irrigation Report Automation - Playwright Version
  * Purpose: Automate data extraction from admin.iocrops.com 관수리포트 menu
  * 
@@ -14,7 +14,68 @@ import { execSync } from 'child_process';
 import DashboardServer from './dashboard-server.js';
 import { setupNetworkInterception, waitForChartData, extractDataPoints, resetCapturedData } from './network-interceptor.js';
 import { trainAlgorithm } from './trainAlgorithm.js';
-import logger from './src/logger.js';
+import { handleAuthentication, ensureAtReportPage } from './src/automation/authentication.js';
+import { selectManager, extractFarmList, calculateFarmRange } from './src/automation/farmSelector.js';
+
+// ═══════════════════════════════════════════════════════════════════════════
+// NEW MODULES - Page-focused functionality
+// ═══════════════════════════════════════════════════════════════════════════
+import {
+  navigateToStartDate,
+  advanceToNextDate,
+  getCurrentDisplayedDate,
+  calculateTargetDate
+} from './src/automation/dateNavigator.js';
+
+import {
+  checkTableStatus,
+  extractIrrigationTimes
+} from './src/automation/tableOperations.js';
+
+import {
+  clickFirstIrrigationPoint,
+  clickLastIrrigationPoint,
+  createClickCheckpoint
+} from './src/automation/chartClicker.js';
+
+import {
+  showLearningOverlay,
+  addCountdownTimer,
+  collectUserCorrections,
+  saveTrainingData as saveTrainingDataToFile,
+  loadLearnedOffsets,
+  createTrainingEntry
+} from './src/automation/userInteraction.js';
+
+import {
+  saveFarmData,
+  saveRunStatistics,
+  initializeRunStats,
+  printRunSummary,
+  createDateDataEntry,
+  ensureOutputDirectory
+} from './src/automation/dataManager.js';
+import {
+  saveCheckpoint,
+  loadCheckpoint,
+  clearCheckpoint
+} from './src/core/checkpointManager.js';
+import {
+  navigateWithDiagnostics,
+  waitForPageReady
+} from './src/core/navigationHelper.js';
+import {
+  showClickOverlay,
+  removeClickOverlay,
+  waitForUserConfirmation,
+  handleVisualConfirmation
+} from './src/core/visualConfirmation.js';
+import { launchBrowser } from './src/core/browserLauncher.js';
+import {
+  initExecutionLog,
+  closeExecutionLog,
+  logSeparator
+} from './src/core/executionLogger.js';
 
 // Configuration (move to config.js later)
 const CONFIG = {
@@ -40,1536 +101,23 @@ const CONFIG = {
 // Training data file
 const TRAINING_FILE = './training/training-data.json';
 
-// Checkpoint file for resume functionality
-const CHECKPOINT_FILE = './history/checkpoint.json';
-
-// Adaptive timing configuration
+// Adaptive timing configuration (kept for network interceptor)
 const TIMING = {
-  API_RESPONSE_TIMEOUT: 15000,    // Max time to wait for chart data API
-  PAGE_LOAD_MIN_EXPECTED: 1500,   // Minimum expected page load time (ms)
-  TOO_FAST_THRESHOLD: 500,        // If faster than this, likely failed silently
-  RETRY_DELAYS: [1000, 3000, 5000, 10000], // Exponential backoff
-  MAX_RETRIES: 3
+  API_RESPONSE_TIMEOUT: 15000    // Max time to wait for chart data API
 };
 
 // Global dashboard instance (will be set in main)
 let globalDashboard = null;
 
 // ═══════════════════════════════════════════════════════════════════════════
-// CHECKPOINT SYSTEM - Date-level granularity with click tracking
+// Note: Checkpoint, navigation, and visual confirmation functions moved to modules
 // ═══════════════════════════════════════════════════════════════════════════
 
-/**
- * Save checkpoint after each date processing
- * Includes: farm index, date index, farm name, click coordinates for debugging
- */
-function saveCheckpoint(data) {
-  const checkpoint = {
-    savedAt: new Date().toISOString(),
-    farmIndex: data.farmIndex,
-    farmName: data.farmName,
-    dateIndex: data.dateIndex,
-    dateString: data.dateString,
-    totalFarms: data.totalFarms,
-    totalDates: data.totalDates,
-    // Click tracking for accuracy verification
-    lastClickedPoints: data.clickedPoints || null,
-    // Resume info
-    resumeInfo: {
-      nextFarm: data.dateIndex >= data.totalDates - 1 ? data.farmIndex + 1 : data.farmIndex,
-      nextDate: data.dateIndex >= data.totalDates - 1 ? 0 : data.dateIndex + 1
-    },
-    // Run context
-    manager: data.manager,
-    mode: data.mode
-  };
-  
-  try {
-    fs.writeFileSync(CHECKPOINT_FILE, JSON.stringify(checkpoint, null, 2));
-    console.log(`     💾 Checkpoint saved: Farm ${data.farmIndex + 1}, Date ${data.dateIndex + 1}`);
-  } catch (err) {
-    console.log(`     ⚠️ Failed to save checkpoint: ${err.message}`);
-  }
-}
-
-/**
- * Load checkpoint for resume functionality
- * @returns {Object|null} checkpoint data or null if not found
- */
-function loadCheckpoint() {
-  try {
-    if (fs.existsSync(CHECKPOINT_FILE)) {
-      const data = JSON.parse(fs.readFileSync(CHECKPOINT_FILE, 'utf-8'));
-      return data;
-    }
-  } catch (err) {
-    console.log(`⚠️ Could not load checkpoint: ${err.message}`);
-  }
-  return null;
-}
-
-/**
- * Clear checkpoint (call after successful completion)
- */
-function clearCheckpoint() {
-  try {
-    if (fs.existsSync(CHECKPOINT_FILE)) {
-      fs.unlinkSync(CHECKPOINT_FILE);
-      console.log('✅ Checkpoint cleared (run completed successfully)');
-    }
-  } catch (err) {
-    console.log(`⚠️ Could not clear checkpoint: ${err.message}`);
-  }
-}
-
 // ═══════════════════════════════════════════════════════════════════════════
-// TRAINING DATA MANAGER - Learn from user corrections
+// VISUAL OVERLAY MODE - Moved to visualConfirmation.js module
 // ═══════════════════════════════════════════════════════════════════════════
 
-/**
- * Load training data from JSON file
- * @returns {Object} Training data with corrections, statistics, and adjustments
- */
-function loadTrainingData() {
-  try {
-    if (fs.existsSync(TRAINING_FILE)) {
-      const data = JSON.parse(fs.readFileSync(TRAINING_FILE, 'utf8'));
-      return data;
-    }
-  } catch (err) {
-    console.log(`⚠️ Could not load training data: ${err.message}`);
-  }
-  
-  // Return default structure
-  return {
-    version: 1,
-    corrections: [],
-    statistics: {
-      totalCorrections: 0,
-      avgFirstOffset: 0,
-      avgLastOffset: 0,
-      lastUpdated: null
-    },
-    learnedAdjustments: {
-      firstIndexBias: 0,
-      lastIndexBias: 0
-    }
-  };
-}
-
-/**
- * Save training data to JSON file
- * @param {Object} data - Training data to save
- */
-function saveTrainingData(data) {
-  try {
-    fs.writeFileSync(TRAINING_FILE, JSON.stringify(data, null, 2), 'utf8');
-    console.log(`  💾 Training data saved (${data.statistics.totalCorrections} corrections)`);
-  } catch (err) {
-    console.log(`  ❌ Could not save training data: ${err.message}`);
-  }
-}
-
-/**
- * Save a correction to the training data
- * @param {Object} predicted - Original predicted positions {firstIndex, lastIndex, firstScreenX, lastScreenX}
- * @param {Object} corrected - User-corrected positions {firstScreenX, lastScreenX}
- * @param {Object} metadata - Chart metadata {yRange, dataPoints, totalDataPoints}
- */
-function saveCorrection(predicted, corrected, metadata = {}) {
-  const training = loadTrainingData();
-  
-  // Calculate pixel offsets
-  const firstOffsetX = (corrected.firstScreenX || 0) - (predicted.firstScreenX || 0);
-  const lastOffsetX = (corrected.lastScreenX || 0) - (predicted.lastScreenX || 0);
-  
-  // Only save if there was a meaningful correction (> 5px difference)
-  if (Math.abs(firstOffsetX) < 5 && Math.abs(lastOffsetX) < 5) {
-    console.log('  ℹ️ No significant correction detected, skipping save');
-    return;
-  }
-  
-  const correction = {
-    timestamp: new Date().toISOString(),
-    predicted: {
-      firstScreenX: predicted.firstScreenX,
-      lastScreenX: predicted.lastScreenX,
-      firstIndex: predicted.firstIndex,
-      lastIndex: predicted.lastIndex
-    },
-    corrected: {
-      firstScreenX: corrected.firstScreenX,
-      lastScreenX: corrected.lastScreenX
-    },
-    delta: {
-      firstOffsetX: Math.round(firstOffsetX),
-      lastOffsetX: Math.round(lastOffsetX)
-    },
-    metadata: {
-      totalDataPoints: metadata.totalDataPoints || 0,
-      chartWidth: metadata.chartWidth || 0
-    }
-  };
-  
-  training.corrections.push(correction);
-  
-  // Update statistics
-  updateTrainingStatistics(training);
-  
-  // Save to file
-  saveTrainingData(training);
-  
-  console.log(`  🧠 Correction saved: first=${firstOffsetX > 0 ? '+' : ''}${Math.round(firstOffsetX)}px, last=${lastOffsetX > 0 ? '+' : ''}${Math.round(lastOffsetX)}px`);
-}
-
-/**
- * Update training statistics based on all corrections
- * @param {Object} training - Training data object (modified in place)
- */
-function updateTrainingStatistics(training) {
-  const corrections = training.corrections;
-  
-  if (corrections.length === 0) {
-    training.statistics = {
-      totalCorrections: 0,
-      avgFirstOffset: 0,
-      avgLastOffset: 0,
-      lastUpdated: new Date().toISOString()
-    };
-    training.learnedAdjustments = { firstIndexBias: 0, lastIndexBias: 0 };
-    return;
-  }
-  
-  // Calculate weighted average (recent corrections count more)
-  let totalFirstOffset = 0;
-  let totalLastOffset = 0;
-  let totalWeight = 0;
-  
-  corrections.forEach((c, i) => {
-    // More recent corrections have higher weight
-    const weight = 1 + (i / corrections.length); // Weight increases for newer entries
-    totalFirstOffset += (c.delta.firstOffsetX || 0) * weight;
-    totalLastOffset += (c.delta.lastOffsetX || 0) * weight;
-    totalWeight += weight;
-  });
-  
-  const avgFirstOffset = totalWeight > 0 ? totalFirstOffset / totalWeight : 0;
-  const avgLastOffset = totalWeight > 0 ? totalLastOffset / totalWeight : 0;
-  
-  training.statistics = {
-    totalCorrections: corrections.length,
-    avgFirstOffset: Math.round(avgFirstOffset * 10) / 10,
-    avgLastOffset: Math.round(avgLastOffset * 10) / 10,
-    avgOffset: Math.round((Math.abs(avgFirstOffset) + Math.abs(avgLastOffset)) / 2),
-    lastUpdated: new Date().toISOString()
-  };
-  
-  // Apply learned adjustments only after collecting enough data
-  if (corrections.length >= 5) {
-    training.learnedAdjustments = {
-      firstIndexBias: Math.round(avgFirstOffset),
-      lastIndexBias: Math.round(avgLastOffset)
-    };
-  } else {
-    training.learnedAdjustments = { firstIndexBias: 0, lastIndexBias: 0 };
-  }
-}
-
-/**
- * Apply learned adjustments to predicted screen coordinates
- * @param {number} firstScreenX - Original first point X
- * @param {number} lastScreenX - Original last point X
- * @returns {Object} Adjusted coordinates {firstScreenX, lastScreenX, adjustmentsApplied}
- */
-function applyLearnedAdjustments(firstScreenX, lastScreenX) {
-  const training = loadTrainingData();
-  
-  if (training.statistics.totalCorrections < 5) {
-    // Not enough data yet
-    return { firstScreenX, lastScreenX, adjustmentsApplied: false };
-  }
-  
-  const adjustedFirst = firstScreenX + training.learnedAdjustments.firstIndexBias;
-  const adjustedLast = lastScreenX + training.learnedAdjustments.lastIndexBias;
-  
-  console.log(`  🧠 Applied learned adjustments: first${training.learnedAdjustments.firstIndexBias >= 0 ? '+' : ''}${training.learnedAdjustments.firstIndexBias}px, last${training.learnedAdjustments.lastIndexBias >= 0 ? '+' : ''}${training.learnedAdjustments.lastIndexBias}px`);
-  
-  return {
-    firstScreenX: adjustedFirst,
-    lastScreenX: adjustedLast,
-    adjustmentsApplied: true,
-    bias: training.learnedAdjustments
-  };
-}
-
-/**
- * Get training statistics for display in overlay
- * @returns {Object} Statistics {totalCorrections, avgOffset}
- */
-function getTrainingStats() {
-  const training = loadTrainingData();
-  return training.statistics;
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// F9 CRASH REPORT - Manual trigger from dashboard
-// ═══════════════════════════════════════════════════════════════════════════
-
-/**
- * Check if F9 was triggered from dashboard and save crash report if so
- * @param {Page} page - Playwright page object
- * @param {string} context - Context description for the crash report
- * @returns {Promise<boolean>} - true if F9 was triggered and handled
- */
-async function checkAndHandleF9Trigger(page, context = 'Manual F9 Trigger') {
-  try {
-    const response = await fetch('http://localhost:3456/control/check-f9');
-    const data = await response.json();
-    
-    if (data.triggered) {
-      console.log('\n📸 F9 TRIGGERED! Saving crash report...');
-      await saveCrashReport(page, context);
-      return true;
-    }
-  } catch (err) {
-    // F9 check failed silently (server might not be running)
-  }
-  return false;
-}
-
-/**
- * Save crash report with screenshot and debug info to crash-reports folder
- * @param {Page} page - Playwright page object
- * @param {string} reason - Reason for the crash report
- */
-async function saveCrashReport(page, reason = 'Manual F9 Trigger') {
-  const crashDir = './crash-reports';
-  const timestamp = new Date().toISOString().replace(/:/g, '-').replace(/\./g, '-');
-  const reportDir = path.join(crashDir, `${timestamp}_${reason.replace(/\s+/g, '_')}`);
-  
-  // Ensure directory exists
-  if (!fs.existsSync(reportDir)) {
-    fs.mkdirSync(reportDir, { recursive: true });
-  }
-  
-  console.log(`📸 Saving crash report to: ${reportDir}`);
-  
-  try {
-    // 1. Screenshot
-    const screenshotPath = path.join(reportDir, 'screenshot.png');
-    await page.screenshot({ path: screenshotPath, fullPage: true });
-    console.log(`   ✅ Screenshot saved: ${screenshotPath}`);
-    
-    // 2. Current URL
-    const url = page.url();
-    fs.writeFileSync(path.join(reportDir, 'url.txt'), url);
-    console.log(`   ✅ URL saved`);
-    
-    // 3. HTML content
-    try {
-      const html = await page.content();
-      fs.writeFileSync(path.join(reportDir, 'page.html'), html);
-      console.log(`   ✅ HTML saved`);
-    } catch (e) {
-      console.log(`   ⚠️ Could not capture HTML: ${e.message}`);
-    }
-    
-    // 4. Crash summary
-    const summary = {
-      timestamp: new Date().toISOString(),
-      reason: reason,
-      url: url,
-      userAgent: await page.evaluate(() => navigator.userAgent)
-    };
-    fs.writeFileSync(path.join(reportDir, 'CRASH_SUMMARY.json'), JSON.stringify(summary, null, 2));
-    console.log(`   ✅ Summary saved`);
-    
-    // 5. Console logs (if we have them)
-    fs.writeFileSync(path.join(reportDir, 'reason.txt'), reason);
-    
-    console.log(`📸 Crash report complete: ${reportDir}\n`);
-    return reportDir;
-    
-  } catch (e) {
-    console.log(`❌ Error saving crash report: ${e.message}`);
-    return null;
-  }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// ADAPTIVE PAGE READINESS - Event-based instead of fixed delays
-// ═══════════════════════════════════════════════════════════════════════════
-
-/**
- * Navigate to URL with timing diagnostics and retry logic
- * Detects "too fast" loads that might indicate silent failures
- */
-async function navigateWithDiagnostics(page, url, options = {}) {
-  const { expectedMinTime = TIMING.PAGE_LOAD_MIN_EXPECTED, retries = TIMING.MAX_RETRIES } = options;
-  
-  for (let attempt = 0; attempt <= retries; attempt++) {
-    const startTime = Date.now();
-    
-    try {
-      const response = await page.goto(url, { 
-        waitUntil: 'domcontentloaded', 
-        timeout: 15000 
-      });
-      
-      const loadTime = Date.now() - startTime;
-      
-      // Check response status
-      if (!response) {
-        console.log(`     ⚠️ Navigation returned null response (attempt ${attempt + 1})`);
-        if (attempt < retries) {
-          const delay = TIMING.RETRY_DELAYS[attempt];
-          console.log(`     🔄 Retrying in ${delay}ms...`);
-          await page.waitForTimeout(delay);
-          continue;
-        }
-        throw new Error('Navigation returned null response after all retries');
-      }
-      
-      const status = response.status();
-      if (status >= 400) {
-        console.log(`     ⚠️ HTTP ${status} error (attempt ${attempt + 1})`);
-        if (attempt < retries) {
-          const delay = TIMING.RETRY_DELAYS[attempt];
-          console.log(`     🔄 Retrying in ${delay}ms...`);
-          await page.waitForTimeout(delay);
-          continue;
-        }
-        throw new Error(`HTTP ${status} error after all retries`);
-      }
-      
-      // Timing diagnostics
-      if (loadTime < TIMING.TOO_FAST_THRESHOLD) {
-        console.log(`     ⚡ Suspiciously fast load: ${loadTime}ms (expected >${expectedMinTime}ms)`);
-        // Check for error indicators on page
-        const hasError = await page.locator('text=/error|오류|실패|too fast|rate limit/i').first().isVisible({ timeout: 1000 }).catch(() => false);
-        if (hasError) {
-          console.log(`     ⚠️ Error indicator found on page (attempt ${attempt + 1})`);
-          if (attempt < retries) {
-            const delay = TIMING.RETRY_DELAYS[attempt];
-            console.log(`     🔄 Retrying in ${delay}ms...`);
-            await page.waitForTimeout(delay);
-            continue;
-          }
-        }
-      }
-      
-      // Success
-      console.log(`     ✅ Page loaded in ${loadTime}ms (HTTP ${status})`);
-      return { response, loadTime, status, attempt };
-      
-    } catch (error) {
-      console.log(`     ❌ Navigation error: ${error.message} (attempt ${attempt + 1})`);
-      if (attempt < retries) {
-        const delay = TIMING.RETRY_DELAYS[attempt];
-        console.log(`     🔄 Retrying in ${delay}ms...`);
-        await page.waitForTimeout(delay);
-      } else {
-        throw error;
-      }
-    }
-  }
-}
-
-/**
- * Wait for page to be truly ready by checking for specific signals
- * Instead of fixed delays, wait for actual UI/API events
- */
-async function waitForPageReady(page, options = {}) {
-  const { 
-    waitForChart = false,
-    waitForFarmList = false,
-    timeout = 10000 
-  } = options;
-  
-  const checks = [];
-  
-  if (waitForChart) {
-    // Wait for Highcharts SVG to be visible
-    checks.push(
-      page.waitForSelector('.highcharts-root, .highcharts-container', { 
-        state: 'visible', 
-        timeout 
-      }).catch(() => null)
-    );
-  }
-  
-  if (waitForFarmList) {
-    // Wait for farm list container
-    checks.push(
-      page.waitForSelector('div.css-nd8svt a[href*="/report/point/"]', { 
-        state: 'visible', 
-        timeout 
-      }).catch(() => null)
-    );
-  }
-  
-  // Always wait for loading spinners to disappear
-  checks.push(
-    page.waitForSelector('.chakra-spinner, [class*="loading"], [class*="spinner"]', {
-      state: 'hidden',
-      timeout: 5000
-    }).catch(() => null)
-  );
-  
-  await Promise.all(checks);
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// VISUAL OVERLAY MODE - Show click points and wait for user confirmation
-// See IRRIGATION_RULES.md for click point definitions
-// ═══════════════════════════════════════════════════════════════════════════
-
-/**
- * Show visual overlay on chart with planned click positions
- * RED circle = FIRST click (last flat point before rise)
- * BLUE circle = LAST click (peak of curve)
- * 
- * @param {Page} page - Playwright page
- * @param {Object} points - {first: {x, y, time}, last: {x, y, time}}
- * @returns {Promise<boolean>} - true if user confirmed, false if skipped
- */
-async function showClickOverlay(page, points, trainingStats = null) {
-  console.log('\n  👁️  VISUAL CONFIRMATION MODE (TRAINABLE)');
-  console.log('  ══════════════════════════════════════════════════════════════════');
-  console.log('  🔴 RED vertical line = FIRST click (drag left/right to correct)');
-  console.log('  🔵 BLUE vertical line = LAST click (drag left/right to correct)');
-  console.log('  📦 Info panel is draggable - move it to see the table!');
-  console.log('  ══════════════════════════════════════════════════════════════════\n');
-  
-  // Inject overlay onto the chart with draggable markers
-  await page.evaluate(({ pts, stats }) => {
-    // Remove any existing overlay
-    const existing = document.getElementById('irrigation-click-overlay');
-    if (existing) existing.remove();
-    
-    // Initialize corrected positions storage (will be read after confirmation)
-    // IMPORTANT: Initialize firstTime and lastTime immediately to ensure they match overlay display
-    window.__irrigationCorrected = {
-      first: { screenX: pts.first?.screenX, screenY: pts.first?.screenY, wasDragged: false },
-      last: { screenX: pts.last?.screenX, screenY: pts.last?.screenY, wasDragged: false },
-      firstTime: pts.first?.time || null,
-      lastTime: pts.last?.time || null,
-      nodeId: pts.nodeId || null  // Store nodeId for API call
-    };
-    window.__irrigationOriginal = {
-      first: { screenX: pts.first?.screenX, screenY: pts.first?.screenY },
-      last: { screenX: pts.last?.screenX, screenY: pts.last?.screenY }
-    };
-    
-    // Find the chart container
-    const chartContainer = document.querySelector('.highcharts-container, .highcharts-root')?.parentElement;
-    if (!chartContainer) {
-      console.error('Cannot find chart container for overlay');
-      return;
-    }
-    
-    // Get chart position for absolute positioning
-    const chartRect = chartContainer.getBoundingClientRect();
-    
-    // Create overlay container
-    const overlay = document.createElement('div');
-    overlay.id = 'irrigation-click-overlay';
-    overlay.style.cssText = `
-      position: fixed;
-      top: 0;
-      left: 0;
-      width: 100%;
-      height: 100%;
-      pointer-events: none;
-      z-index: 99999;
-    `;
-    
-    // Create info box with learning stats - DRAGGABLE (bottom-left position)
-    const infoBox = document.createElement('div');
-    infoBox.id = 'irrigation-info-box';
-    infoBox.style.cssText = `
-      position: fixed;
-      bottom: 10px;
-      left: 10px;
-      background: rgba(0, 0, 0, 0.9);
-      color: white;
-      padding: 15px 20px;
-      border-radius: 8px;
-      font-family: 'Consolas', monospace;
-      font-size: 14px;
-      z-index: 100000;
-      pointer-events: auto;
-      min-width: 300px;
-      border: 2px solid #4CAF50;
-      cursor: move;
-      user-select: none;
-    `;
-    
-    // Make info box draggable
-    infoBox.addEventListener('mousedown', (e) => {
-      if (e.target.tagName === 'BUTTON') return; // Don't drag when clicking buttons
-      e.preventDefault();
-      const startX = e.clientX;
-      const startY = e.clientY;
-      const origLeft = infoBox.offsetLeft;
-      const origTop = infoBox.offsetTop;
-      
-      // Switch from bottom/left-positioning to top/left-positioning for dragging
-      infoBox.style.bottom = 'auto';
-      infoBox.style.top = origTop + 'px';
-      infoBox.style.left = origLeft + 'px';
-      
-      function onMove(e) {
-        const dx = e.clientX - startX;
-        const dy = e.clientY - startY;
-        infoBox.style.left = (origLeft + dx) + 'px';
-        infoBox.style.top = (origTop + dy) + 'px';
-      }
-      
-      function onUp() {
-        document.removeEventListener('mousemove', onMove);
-        document.removeEventListener('mouseup', onUp);
-      }
-      
-      document.addEventListener('mousemove', onMove);
-      document.addEventListener('mouseup', onUp);
-    });
-    
-    const learningInfo = stats ? `
-      <div style="margin-bottom: 10px; padding: 8px; background: rgba(76, 175, 80, 0.2); border-radius: 4px;">
-        <div style="color: #4CAF50; font-size: 11px;">🧠 LEARNING MODE ACTIVE</div>
-        <div style="color: #888; font-size: 11px;">Corrections: ${stats.totalCorrections || 0} | Bias: ±${Math.round(stats.avgOffset || 0)}px</div>
-      </div>
-    ` : '';
-    
-    infoBox.innerHTML = `
-      <div style="font-size: 16px; font-weight: bold; margin-bottom: 10px; color: #4CAF50; cursor: move;">
-        👁️ Visual Confirmation Mode <span style="font-size: 10px; color: #888;">(drag to move)</span>
-      </div>
-      ${learningInfo}
-      <div id="first-marker-info" style="margin-bottom: 8px;">
-        <span style="color: #FF4444; font-size: 18px;">|</span> FIRST: <span id="first-time">${pts.first?.time || 'N/A'}</span>
-        <span style="color: #888; font-size: 11px;" id="first-coords">(${Math.round(pts.first?.screenX || 0)}, ${Math.round(pts.first?.screenY || 0)})</span>
-      </div>
-      <div id="last-marker-info" style="margin-bottom: 12px;">
-        <span style="color: #4444FF; font-size: 18px;">|</span> LAST: <span id="last-time">${pts.last?.time || 'N/A'}</span>
-        <span style="color: #888; font-size: 11px;" id="last-coords">(${Math.round(pts.last?.screenX || 0)}, ${Math.round(pts.last?.screenY || 0)})</span>
-      </div>
-      <div style="border-top: 1px solid #444; padding-top: 10px; margin-top: 5px;">
-        <div style="color: #FFD700; font-size: 12px; margin-bottom: 5px;">🖱️ Drag vertical lines to set time</div>
-        <div style="color: #4CAF50; font-weight: bold;">Press ENTER to save (저장)</div>
-        <div style="color: #FF9800;">Press ESC to skip this date</div>
-      </div>
-    `;
-    
-    // Get chart bounds for vertical line height and time calculation
-    const chartPlot = document.querySelector('.highcharts-plot-background');
-    const chartBounds = chartPlot ? chartPlot.getBoundingClientRect() : { top: 300, height: 200, left: 500, width: 400 };
-    const lineTop = chartBounds.top || 300;
-    const lineHeight = chartBounds.height || 200;
-    const chartLeft = chartBounds.left || 500;
-    const chartWidth = chartBounds.width || 400;
-    
-    // Time range for the chart (typically 02:00 to 20:00 = 18 hours)
-    const startHour = 2; // 02:00
-    const endHour = 20;  // 20:00
-    const totalMinutes = (endHour - startHour) * 60; // 1080 minutes
-    
-    // Function to calculate time from X position
-    function xPositionToTime(xPos) {
-      const relativeX = xPos - chartLeft;
-      const percentage = Math.max(0, Math.min(1, relativeX / chartWidth));
-      const minutesFromStart = Math.round(percentage * totalMinutes);
-      const totalMinutesFromMidnight = startHour * 60 + minutesFromStart;
-      const hours = Math.floor(totalMinutesFromMidnight / 60);
-      const minutes = totalMinutesFromMidnight % 60;
-      return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
-    }
-    
-    // Helper function to properly update React/Chakra UI input state
-    function triggerReactUpdate(input, value) {
-      // Get React's internal value setter to bypass React's controlled input
-      const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
-        window.HTMLInputElement.prototype, 'value'
-      ).set;
-
-      // Set value using native setter
-      nativeInputValueSetter.call(input, value);
-
-      // Dispatch events that React listens to
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-      input.dispatchEvent(new Event('change', { bubbles: true }));
-
-      // Also try to trigger React's synthetic events
-      const reactEvent = new Event('input', { bubbles: true });
-      Object.defineProperty(reactEvent, 'target', { value: input, writable: false });
-      input.dispatchEvent(reactEvent);
-    }
-
-    // Function to update ALL irrigation time input fields on the page by label
-    function updateTimeInput(markerType, timeStr) {
-      // Find ALL time input fields on the page
-      const allTimeInputs = document.querySelectorAll('input[type="time"]');
-      console.log("All time input check :", allTimeInputs);
-      let updatedCount = 0;
-
-      console.log(`[BROWSER] Updating ${markerType} time input to: ${timeStr}`);
-      console.log(`[BROWSER] Found ${allTimeInputs.length} time inputs total`);
-
-      // Update ALL inputs that match the marker type based on container text
-      for (const input of allTimeInputs) {
-        // Find the container that has the label text
-        const container = input.closest('div')?.parentElement?.parentElement ||
-                          input.closest('div')?.parentElement ||
-                          input.closest('div');
-        const containerText = container?.textContent || '';
-
-        // Check for first irrigation inputs (첫 급액)
-        if (markerType === 'first' && containerText.includes('첫 급액')) {
-          triggerReactUpdate(input, timeStr);
-          updatedCount++;
-          console.log(`[BROWSER] Updated first irrigation input: ${containerText.substring(0, 30)}...`);
-        }
-        // Check for last irrigation inputs (마지막 급액)
-        else if (markerType === 'last' && containerText.includes('마지막 급액')) {
-          triggerReactUpdate(input, timeStr);
-          updatedCount++;
-          console.log(`[BROWSER] Updated last irrigation input: ${containerText.substring(0, 30)}...`);
-        }
-      }
-
-      // Store in corrected data
-      if (markerType === 'first') {
-        window.__irrigationCorrected.firstTime = timeStr;
-      } else {
-        window.__irrigationCorrected.lastTime = timeStr;
-      }
-
-      console.log(`[BROWSER] Updated ${updatedCount} ${markerType} input fields to: ${timeStr}`);
-    }
-    
-    // Helper to make a vertical line marker draggable (horizontal movement only)
-    function makeDraggable(marker, label, markerType) {
-      marker.style.cursor = 'ew-resize';
-      marker.style.pointerEvents = 'auto';
-      
-      marker.addEventListener('mousedown', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        marker.style.cursor = 'grabbing';
-        marker.style.opacity = '1';
-        
-        const startX = e.clientX;
-        const origLeft = parseFloat(marker.style.left);
-        const labelOrigLeft = parseFloat(label.style.left);
-        
-        function onMove(e) {
-          const dx = e.clientX - startX;
-          
-          // Move marker (horizontal only for vertical line)
-          const newLeft = origLeft + dx;
-          marker.style.left = newLeft + 'px';
-          
-          // Move label (horizontal only)
-          label.style.left = (labelOrigLeft + dx) + 'px';
-          
-          // Calculate time from X position
-          const newX = newLeft + 2; // +2 to get center of 4px wide line
-          const timeStr = xPositionToTime(newX);
-          const newY = pts.first?.screenY || pts.last?.screenY || 0;
-          
-          // Update label with time
-          label.textContent = `${markerType === 'first' ? 'FIRST' : 'LAST'}: ${timeStr}`;
-          
-          // Update the time input field on the page in REAL-TIME
-          updateTimeInput(markerType, timeStr);
-          
-          if (markerType === 'first') {
-            window.__irrigationCorrected.first = { screenX: newX, screenY: newY, wasDragged: true, time: timeStr };
-            document.getElementById('first-coords').textContent = `${timeStr} ✏️`;
-            document.getElementById('first-time').textContent = timeStr;
-          } else {
-            window.__irrigationCorrected.last = { screenX: newX, screenY: newY, wasDragged: true, time: timeStr };
-            document.getElementById('last-coords').textContent = `${timeStr} ✏️`;
-            document.getElementById('last-time').textContent = timeStr;
-          }
-        }
-        
-        function onUp() {
-          marker.style.cursor = 'ew-resize';
-          document.removeEventListener('mousemove', onMove);
-          document.removeEventListener('mouseup', onUp);
-
-          // Final update to time input
-          const finalX = parseFloat(marker.style.left) + 2;
-          const finalTime = xPositionToTime(finalX);
-          updateTimeInput(markerType, finalTime);
-
-          // ========== CRITICAL: Trigger Highcharts click event after drag ==========
-          // This makes dragging behave the same as manual chart clicks
-          try {
-            const chart = Highcharts.charts.find(c => c && c.renderTo);
-            if (chart) {
-              // Get the chart container position
-              const chartContainer = chart.container;
-              const chartRect = chartContainer.getBoundingClientRect();
-
-              // Convert screen X to chart plot X
-              const plotX = finalX - chartRect.left - chart.plotLeft;
-
-              // Find the nearest point in the SPLY series (irrigation series)
-              const splySeriesIndex = chart.series.findIndex(s =>
-                s.name && s.name.includes('SPLY')
-              );
-              const series = splySeriesIndex >= 0 ? chart.series[splySeriesIndex] : chart.series[0];
-
-              if (series && series.points && series.points.length > 0) {
-                // Find the point closest to our X position
-                let nearestPoint = null;
-                let minDistance = Infinity;
-
-                for (const point of series.points) {
-                  const distance = Math.abs(point.plotX - plotX);
-                  if (distance < minDistance) {
-                    minDistance = distance;
-                    nearestPoint = point;
-                  }
-                }
-
-                if (nearestPoint && minDistance < 50) {  // Within 50px tolerance
-                  console.log('[BROWSER] 🎯 Triggering Highcharts click at ' + (nearestPoint.category || nearestPoint.x) + ' (distance: ' + minDistance.toFixed(1) + 'px)');
-
-                  // Deselect any previously selected points
-                  chart.getSelectedPoints().forEach(p => p.select(false, false));
-
-                  // Select and trigger click event on the nearest point
-                  nearestPoint.select(true, false);
-                  nearestPoint.firePointEvent('click');
-
-                  console.log('[BROWSER] ✅ Highcharts click event fired for ' + markerType);
-                } else {
-                  console.log('[BROWSER] ⚠️ No Highcharts point found near dragged position (nearest: ' + minDistance.toFixed(1) + 'px)');
-                }
-              }
-            }
-          } catch (err) {
-            console.error('[BROWSER] Error triggering Highcharts event:', err);
-          }
-          // ========== END Highcharts trigger ==========
-
-          // Mark that a correction was made with final time
-          label.style.background = markerType === 'first' ? '#FF8800' : '#8888FF';
-        }
-        
-        document.addEventListener('mousemove', onMove);
-        document.addEventListener('mouseup', onUp);
-      });
-    }
-    
-    // Add FIRST click marker (RED VERTICAL LINE) - DRAGGABLE (no animation)
-    if (pts.first && pts.first.screenX && pts.first.screenY) {
-      const firstMarker = document.createElement('div');
-      firstMarker.id = 'first-marker';
-      firstMarker.style.cssText = `
-        position: fixed;
-        left: ${pts.first.screenX - 2}px;
-        top: ${lineTop}px;
-        width: 4px;
-        height: ${lineHeight}px;
-        background: rgba(255, 68, 68, 0.8);
-        border-left: 2px solid #FF4444;
-        border-right: 2px solid #FF4444;
-        cursor: ew-resize;
-        pointer-events: auto;
-      `;
-      
-      const firstLabel = document.createElement('div');
-      firstLabel.id = 'first-label';
-      firstLabel.style.cssText = `
-        position: fixed;
-        left: ${pts.first.screenX + 8}px;
-        top: ${lineTop - 25}px;
-        background: #FF4444;
-        color: white;
-        padding: 3px 8px;
-        border-radius: 4px;
-        font-size: 12px;
-        font-weight: bold;
-        font-family: sans-serif;
-        pointer-events: none;
-        white-space: nowrap;
-      `;
-      firstLabel.textContent = `FIRST: ${pts.first.time}`;
-      
-      makeDraggable(firstMarker, firstLabel, 'first');
-      
-      overlay.appendChild(firstMarker);
-      overlay.appendChild(firstLabel);
-    }
-    
-    // Add LAST click marker (BLUE VERTICAL LINE) - DRAGGABLE (no animation)
-    if (pts.last && pts.last.screenX && pts.last.screenY) {
-      const lastMarker = document.createElement('div');
-      lastMarker.id = 'last-marker';
-      lastMarker.style.cssText = `
-        position: fixed;
-        left: ${pts.last.screenX - 2}px;
-        top: ${lineTop}px;
-        width: 4px;
-        height: ${lineHeight}px;
-        background: rgba(68, 68, 255, 0.8);
-        border-left: 2px solid #4444FF;
-        border-right: 2px solid #4444FF;
-        cursor: ew-resize;
-        pointer-events: auto;
-      `;
-      
-      const lastLabel = document.createElement('div');
-      lastLabel.id = 'last-label';
-      lastLabel.style.cssText = `
-        position: fixed;
-        left: ${pts.last.screenX + 8}px;
-        top: ${lineTop - 25}px;
-        background: #4444FF;
-        color: white;
-        padding: 3px 8px;
-        border-radius: 4px;
-        font-size: 12px;
-        font-weight: bold;
-        font-family: sans-serif;
-        pointer-events: none;
-        white-space: nowrap;
-      `;
-      lastLabel.textContent = `LAST: ${pts.last.time}`;
-      
-      makeDraggable(lastMarker, lastLabel, 'last');
-      
-      overlay.appendChild(lastMarker);
-      overlay.appendChild(lastLabel);
-    }
-    
-    overlay.appendChild(infoBox);
-    document.body.appendChild(overlay);
-
-    // Sync the initial times to input fields immediately when overlay is shown
-    // This ensures the page's input fields match the overlay display from the start
-    if (pts.first?.time) {
-      updateTimeInput('first', pts.first.time);
-    }
-    if (pts.last?.time) {
-      updateTimeInput('last', pts.last.time);
-    }
-  }, { pts: points, stats: trainingStats });
-  
-  console.log('  📍 FIRST click planned at: ' + (points.first?.time || 'N/A'));
-  console.log('  📍 LAST click planned at: ' + (points.last?.time || 'N/A'));
-  console.log('\n  ⏳ Waiting for user confirmation (drag vertical lines if needed)...');
-  console.log('     → Drag vertical lines left/right to correct positions');
-  console.log('     → Drag the info panel to see the table');
-  console.log('     → Press ENTER in browser to confirm');
-  console.log('     → Press ESC in browser to skip\n');
-  
-  // Wait for user to press Enter or Escape
-  const confirmed = await waitForUserConfirmation(page);
-  return confirmed;
-}
-
-/**
- * Remove the visual overlay from the page
- */
-async function removeClickOverlay(page) {
-  await page.evaluate(() => {
-    const overlay = document.getElementById('irrigation-click-overlay');
-    if (overlay) overlay.remove();
-  });
-}
-
-/**
- * Get the corrected positions from the draggable overlay
- * @param {Page} page - Playwright page
- * @returns {Promise<{original: Object, corrected: Object, wasCorrected: boolean}>}
- */
-async function getCorrectedPositions(page) {
-  return await page.evaluate(() => {
-    const corrected = window.__irrigationCorrected || null;
-    const original = window.__irrigationOriginal || null;
-    
-    if (!corrected || !original) {
-      return { original: null, corrected: null, wasCorrected: false };
-    }
-    
-    const wasCorrected = corrected.first?.wasDragged || corrected.last?.wasDragged;
-    
-    return {
-      original,
-      corrected: {
-        first: { screenX: corrected.first?.screenX, screenY: corrected.first?.screenY },
-        last: { screenX: corrected.last?.screenX, screenY: corrected.last?.screenY }
-      },
-      wasCorrected,
-      firstWasDragged: corrected.first?.wasDragged || false,
-      lastWasDragged: corrected.last?.wasDragged || false
-    };
-  });
-}
-
-/**
- * Wait for user keyboard confirmation (Enter = confirm, Escape = skip)
- * @param {Page} page - Playwright page
- * @param {number} timeout - Max wait time in ms (default 60 seconds)
- * @returns {Promise<boolean>} - true if confirmed, false if skipped/timeout
- */
-async function waitForUserConfirmation(page, timeout = 60000) {
-  return new Promise(async (resolve) => {
-    let resolved = false;
-    
-    const keyHandler = async (key) => {
-      if (resolved) return;
-      
-      if (key.name === 'Return' || key.name === 'Enter') {
-        resolved = true;
-        console.log('  ✅ User CONFIRMED - proceeding with clicks');
-        await removeClickOverlay(page);
-        resolve(true);
-      } else if (key.name === 'Escape') {
-        resolved = true;
-        console.log('  ⏭️  User SKIPPED - moving to next date');
-        await removeClickOverlay(page);
-        resolve(false);
-      }
-    };
-    
-    // Set up keyboard listener in browser
-    await page.evaluate((timeoutMs) => {
-      return new Promise((browserResolve) => {
-        window._overlayConfirmed = null;
-        
-        const handler = (e) => {
-          if (e.key === 'Enter') {
-            window._overlayConfirmed = true;
-            document.removeEventListener('keydown', handler);
-
-            // Get nodeId from stored corrected data
-            const nodeId = window.__irrigationCorrected?.nodeId;
-            const firstTime = window.__irrigationCorrected?.firstTime;
-            const lastTime = window.__irrigationCorrected?.lastTime;
-
-            // Get current date from the date display element on page
-            // The page shows date like "2026년 01월 27일" - need to extract and format
-            let dateParam = null;
-            const allElements = document.querySelectorAll('div, span, p, button');
-            for (const el of allElements) {
-              const text = el.textContent || '';
-              const dateMatch = text.match(/(\d{4})년\s*(\d{1,2})월\s*(\d{1,2})일/);
-              if (dateMatch) {
-                const year = dateMatch[1];
-                const month = dateMatch[2].padStart(2, '0');
-                const day = dateMatch[3].padStart(2, '0');
-                dateParam = `${year}-${month}-${day}`;
-                break;
-              }
-            }
-
-            // Convert HH:MM time string to Unix timestamp (seconds)
-            function timeToUnixTimestamp(timeStr, dateStr) {
-              // timeStr = "10:08", dateStr = "2026-01-27"
-              const dateObj = new Date(dateStr + 'T' + timeStr + ':00+09:00'); // Korea timezone (UTC+9)
-              return Math.floor(dateObj.getTime() / 1000);
-            }
-
-            console.log(`[BROWSER] Saving: nodeId=${nodeId}, date=${dateParam}, first=${firstTime}, last=${lastTime}`);
-
-            // Make direct PUT API call to save irrigation times
-            if (nodeId && dateParam && firstTime && lastTime) {
-              const apiUrl = `https://newapis.iofarm.com/pipeline/manual/node/${nodeId}?category=IRRIGATION&date=${dateParam}`;
-
-              const payload = {
-                category: "IRRIGATION",
-                date: dateParam,
-                manuals: {
-                  "FirstSplyTime_1_cmp1": timeToUnixTimestamp(firstTime, dateParam),
-                  "LastSplyTime_1_cmp1": timeToUnixTimestamp(lastTime, dateParam)
-                }
-              };
-
-              console.log('[BROWSER] API URL:', apiUrl);
-              console.log('[BROWSER] API Payload:', JSON.stringify(payload));
-
-              fetch(apiUrl, {
-                method: 'PUT',
-                credentials: 'include',  // Include cookies for auth
-                headers: {
-                  'Content-Type': 'application/json'
-                },
-                body: JSON.stringify(payload)
-              }).then(async response => {
-                // Read response body for verification
-                const responseText = await response.text();
-                console.log(`[BROWSER] API Response: ${response.status} - ${responseText}`);
-
-                if (response.ok) {
-                  console.log(`[BROWSER] ✅ Save API call successful (${response.status})`);
-
-                  // Verify by reading back the saved data
-                  try {
-                    const verifyUrl = `https://newapis.iofarm.com/pipeline/manual/node/${nodeId}?category=IRRIGATION&date=${dateParam}`;
-                    const verifyResponse = await fetch(verifyUrl, { credentials: 'include' });
-                    const savedData = await verifyResponse.json();
-                    console.log('[BROWSER] 📋 Verified saved data:', JSON.stringify(savedData));
-
-                    // Check if our values are in the response
-                    if (savedData.FirstSplyTime_1_cmp1 || savedData.LastSplyTime_1_cmp1) {
-                      console.log('[BROWSER] ✅ Data verified - values persisted to backend');
-                    } else {
-                      console.log('[BROWSER] ⚠️ Warning: Saved values not found in verification response');
-                    }
-                  } catch (verifyErr) {
-                    console.log('[BROWSER] ⚠️ Could not verify saved data:', verifyErr.message);
-                  }
-                } else {
-                  console.error(`[BROWSER] ❌ Save failed: ${response.status} - ${responseText}`);
-                }
-                browserResolve(true);
-              }).catch(err => {
-                console.error('[BROWSER] ❌ Save API call failed:', err);
-                browserResolve(true);
-              });
-            } else {
-              console.log('[BROWSER] ⚠️ Missing required data for API call:');
-              console.log(`   nodeId=${nodeId}, dateParam=${dateParam}, firstTime=${firstTime}, lastTime=${lastTime}`);
-              browserResolve(true);
-            }
-            return; // Don't resolve immediately, wait for API response
-          } else if (e.key === 'Escape') {
-            window._overlayConfirmed = false;
-            document.removeEventListener('keydown', handler);
-            browserResolve(false);
-          }
-        };
-        
-        document.addEventListener('keydown', handler);
-        
-        // Timeout fallback
-        setTimeout(() => {
-          document.removeEventListener('keydown', handler);
-          if (window._overlayConfirmed === null) {
-            window._overlayConfirmed = true; // Auto-confirm on timeout
-          }
-          browserResolve(window._overlayConfirmed);
-        }, timeoutMs);
-      });
-    }, timeout).then(async (result) => {
-      if (!resolved) {
-        resolved = true;
-        await removeClickOverlay(page);
-        if (result) {
-          console.log('  ✅ Confirmed (Enter pressed or auto-confirmed)');
-          console.log('  💾 Save button clicked');
-        } else {
-          console.log('  ⏭️  Skipped (Escape pressed)');
-        }
-        resolve(result);
-      }
-    });
-  });
-}
-
-/**
- * Calculate screen coordinates for chart points using Highcharts API
- * @param {Page} page - Playwright page
- * @param {number} firstIndex - Index of first irrigation point
- * @param {number} lastIndex - Index of last irrigation point
- * @returns {Promise<{first: {screenX, screenY, x, y, time}, last: {screenX, screenY, x, y, time}}|null>}
- */
-async function calculateScreenCoordinates(page, firstIndex, lastIndex, totalDataPoints = 1000) {
-  try {
-    console.log(`  🔍 calculateScreenCoordinates called with firstIndex=${firstIndex}, lastIndex=${lastIndex}, totalDataPoints=${totalDataPoints}`);
-    
-    const coords = await page.evaluate(({ firstIdx, lastIdx, totalPoints }) => {
-      console.log(`[BROWSER] calculateScreenCoordinates: firstIdx=${firstIdx}, lastIdx=${lastIdx}`);
-      
-      const result = { first: null, last: null, debug: {}, method: 'unknown' };
-      
-      // ═══════════════════════════════════════════════════════════════
-      // METHOD 1: Try Highcharts API (most accurate)
-      // ═══════════════════════════════════════════════════════════════
-      let chart = null;
-      if (window.Highcharts && window.Highcharts.charts) {
-        chart = window.Highcharts.charts.find(c => c !== undefined);
-      }
-      
-      if (chart && chart.series && chart.series[0] && chart.series[0].data) {
-        const dataPoints = chart.series[0].data;
-        console.log(`[BROWSER] Using Highcharts API: ${dataPoints.length} data points`);
-        result.method = 'highcharts';
-        
-        const chartContainer = document.querySelector('.highcharts-container');
-        if (chartContainer) {
-          const containerRect = chartContainer.getBoundingClientRect();
-          
-          // Get first point
-          if (firstIdx >= 0 && firstIdx < dataPoints.length) {
-            const p = dataPoints[firstIdx];
-            if (p && p.plotX !== undefined && p.plotY !== undefined) {
-              result.first = {
-                screenX: containerRect.left + p.plotX + chart.plotLeft,
-                screenY: containerRect.top + p.plotY + chart.plotTop,
-                x: p.x, y: p.y,
-                time: p.category || new Date(p.x).toTimeString().slice(0, 5)
-              };
-            }
-          }
-          
-          // Get last point
-          if (lastIdx >= 0 && lastIdx < dataPoints.length) {
-            const p = dataPoints[lastIdx];
-            if (p && p.plotX !== undefined && p.plotY !== undefined) {
-              result.last = {
-                screenX: containerRect.left + p.plotX + chart.plotLeft,
-                screenY: containerRect.top + p.plotY + chart.plotTop,
-                x: p.x, y: p.y,
-                time: p.category || new Date(p.x).toTimeString().slice(0, 5)
-              };
-            }
-          }
-          
-          if (result.first && result.last) {
-            console.log(`[BROWSER] Highcharts coords: first=(${result.first.screenX}, ${result.first.screenY}), last=(${result.last.screenX}, ${result.last.screenY})`);
-            return result;
-          }
-        }
-      }
-      
-      // ═══════════════════════════════════════════════════════════════
-      // METHOD 2: SVG-based calculation (fallback)
-      // ═══════════════════════════════════════════════════════════════
-      console.log('[BROWSER] Highcharts not available, using SVG fallback');
-      result.method = 'svg-fallback';
-      
-      // Find the chart plot area
-      const plotArea = document.querySelector('.highcharts-plot-background') || 
-                       document.querySelector('.highcharts-plot-border') ||
-                       document.querySelector('.highcharts-series-group');
-      
-      const chartContainer = document.querySelector('.highcharts-container') || 
-                             document.querySelector('[data-highcharts-chart]');
-      
-      if (!chartContainer) {
-        console.error('[BROWSER] No chart container found for SVG fallback');
-        return { error: 'Chart container not found' };
-      }
-      
-      const containerRect = chartContainer.getBoundingClientRect();
-      console.log(`[BROWSER] Container: ${containerRect.width}x${containerRect.height} at (${containerRect.left}, ${containerRect.top})`);
-      
-      // Estimate plot area (typically ~80% of container with margins)
-      const plotLeft = containerRect.left + 60;  // Approximate left margin
-      const plotTop = containerRect.top + 30;    // Approximate top margin
-      const plotWidth = containerRect.width - 100;  // Subtract margins
-      const plotHeight = containerRect.height - 80; // Subtract margins
-      
-      // Calculate X positions based on index percentage
-      const firstXPercent = firstIdx / totalPoints;
-      const lastXPercent = lastIdx / totalPoints;
-      
-      // Calculate screen X positions
-      const firstScreenX = plotLeft + (plotWidth * firstXPercent);
-      const lastScreenX = plotLeft + (plotWidth * lastXPercent);
-      
-      // Use middle of plot for Y (we don't have exact Y values without Highcharts)
-      const middleY = plotTop + (plotHeight / 2);
-      
-      result.first = {
-        screenX: firstScreenX,
-        screenY: middleY,
-        time: 'N/A',
-        x: firstIdx,
-        y: 0
-      };
-      
-      result.last = {
-        screenX: lastScreenX,
-        screenY: middleY,
-        time: 'N/A',
-        x: lastIdx,
-        y: 0
-      };
-      
-      console.log(`[BROWSER] SVG fallback coords: first=(${firstScreenX.toFixed(0)}, ${middleY.toFixed(0)}), last=(${lastScreenX.toFixed(0)}, ${middleY.toFixed(0)})`);
-      
-      return result;
-    }, { firstIdx: firstIndex, lastIdx: lastIndex, totalPoints: totalDataPoints });
-    
-    if (coords && coords.error) {
-      console.log(`  ⚠️ Browser returned error: ${coords.error}`);
-      return null;
-    }
-    
-    if (coords && coords.method) {
-      console.log(`  📍 Coordinate method used: ${coords.method}`);
-    }
-    
-    if (coords && coords.debug) {
-      if (coords.debug.firstError) console.log(`  ⚠️ First point error: ${coords.debug.firstError}`);
-      if (coords.debug.lastError) console.log(`  ⚠️ Last point error: ${coords.debug.lastError}`);
-    }
-    
-    return coords;
-  } catch (error) {
-    console.log(`  ❌ calculateScreenCoordinates EXCEPTION: ${error.message}`);
-    console.log(`     Stack: ${error.stack}`);
-    return null;
-  }
-}
-
-/**
- * Check for empty cells in the report table (except rightmost column)
- * @param {Page} page - Playwright page
- * @returns {Promise<{hasEmptyCells: boolean, emptyCells: Array, totalChecked: number}>}
- */
-async function checkForEmptyCells(page) {
-  return await page.evaluate(() => {
-    const tables = Array.from(document.querySelectorAll('table'));
-    if (tables.length === 0) {
-      return { hasEmptyCells: false, emptyCells: [], totalChecked: 0, error: 'No table found' };
-    }
-    
-    // Use the last table (the data table)
-    const table = tables[tables.length - 1];
-    const rows = Array.from(table.querySelectorAll('tbody tr'));
-    
-    if (rows.length === 0) {
-      return { hasEmptyCells: false, emptyCells: [], totalChecked: 0, error: 'No rows in table' };
-    }
-    
-    const emptyCells = [];
-    let totalChecked = 0;
-    
-    rows.forEach((row, rowIdx) => {
-      const cells = Array.from(row.querySelectorAll('td'));
-      if (cells.length < 2) return;
-      
-      const rowLabel = cells[0].textContent.trim();
-      
-      // Check all cells EXCEPT the first (label) and last (rightmost/today's date)
-      // cells[0] = row label, cells[1..n-2] = date columns to check, cells[n-1] = rightmost (skip)
-      for (let colIdx = 1; colIdx < cells.length - 1; colIdx++) {
-        const cellValue = cells[colIdx].textContent.trim();
-        totalChecked++;
-        
-        // Check if cell is empty (contains "-", "—", or is blank)
-        if (cellValue === '-' || cellValue === '—' || cellValue === '') {
-          emptyCells.push({
-            row: rowIdx,
-            col: colIdx,
-            rowLabel: rowLabel,
-            value: cellValue || '(empty)'
-          });
-        }
-      }
-    });
-    
-    console.log(`[BROWSER] Checked ${totalChecked} cells, found ${emptyCells.length} empty`);
-    
-    return {
-      hasEmptyCells: emptyCells.length > 0,
-      emptyCells: emptyCells,
-      totalChecked: totalChecked
-    };
-  });
-}
-
-/**
- * Click the "표 새로고침" (Table Refresh) button and wait for table to reload
- * @param {Page} page - Playwright page
- * @returns {Promise<boolean>} - true if refresh was successful
- */
-async function clickTableRefresh(page) {
-  const timerId = logger.functionEntry('clickTableRefresh', { button: '표 새로고침' });
-  console.log('  🔄 Clicking "표 새로고침" button...');
-  logger.buttonClick('표 새로고침 (Table Refresh)', { action: 'click_attempt' });
-  
-  const clicked = await page.evaluate(() => {
-    const buttons = Array.from(document.querySelectorAll('button'));
-    const refreshButton = buttons.find(btn => 
-      btn.textContent.includes('표 새로고침') || 
-      btn.textContent.includes('표새로고침')
-    );
-    
-    if (refreshButton) {
-      console.log('[BROWSER] Found "표 새로고침" button, clicking...');
-      refreshButton.click();
-      return true;
-    }
-    
-    console.error('[BROWSER] "표 새로고침" button not found');
-    return false;
-  });
-  
-  if (clicked) {
-    console.log('  ✅ Refresh button clicked, waiting for table to reload...');
-    logger.buttonClickResult('표 새로고침 (Table Refresh)', true, { phase: 'clicked' });
-    
-    // Wait for network to settle (table data to load)
-    try {
-      const startTime = Date.now();
-      await page.waitForLoadState('networkidle', { timeout: 10000 });
-      const waitDuration = Date.now() - startTime;
-      console.log('  ✅ Table refresh complete');
-      
-      logger.tableRefresh(1, { 
-        success: true, 
-        waitDurationMs: waitDuration,
-        networkIdle: true
-      });
-      
-      // Small additional wait for UI to update
-      await page.waitForTimeout(500);
-      logger.functionExit(timerId, true, { waitDurationMs: waitDuration });
-      return true;
-    } catch (e) {
-      console.log(`  ⚠️ Network wait timeout: ${e.message}`);
-      logger.warning('Network wait timeout during table refresh', { error: e.message });
-      // Still return true since button was clicked
-      await page.waitForTimeout(1000);
-      logger.functionExit(timerId, true, { timedOut: true });
-      return true;
-    }
-  } else {
-    console.log('  ❌ Could not find "표 새로고침" button');
-    logger.buttonClickResult('표 새로고침 (Table Refresh)', false, { reason: 'Button not found' });
-    logger.functionExit(timerId, false, { error: 'Button not found' });
-    return false;
-  }
-}
-
-/**
- * Attempt to fill empty cells by refreshing the table
- * @param {Page} page - Playwright page
- * @param {number} maxRetries - Maximum number of refresh attempts
- * @returns {Promise<{success: boolean, attempts: number, remainingEmpty: number}>}
- */
-async function attemptTableRefresh(page, maxRetries = 3) {
-  const timerId = logger.functionEntry('attemptTableRefresh', { maxRetries });
-  let attempts = 0;
-  
-  while (attempts < maxRetries) {
-    // Check for empty cells
-    const emptyCheck = await checkForEmptyCells(page);
-    
-    logger.tableValidation({
-      ready: !emptyCheck.hasEmptyCells,
-      attempt: attempts + 1,
-      totalChecked: emptyCheck.totalChecked,
-      emptyCellCount: emptyCheck.emptyCells?.length || 0,
-      reason: emptyCheck.hasEmptyCells ? 'Empty cells found' : 'All cells have data'
-    });
-    
-    if (!emptyCheck.hasEmptyCells) {
-      console.log(`  ✅ All cells have data (checked ${emptyCheck.totalChecked} cells)`);
-      const result = { success: true, attempts: attempts, remainingEmpty: 0 };
-      logger.tableRefresh(attempts, { success: true, remainingEmpty: 0 });
-      logger.functionExit(timerId, result);
-      return result;
-    }
-    
-    console.log(`  ⚠️ Found ${emptyCheck.emptyCells.length} empty cells (attempt ${attempts + 1}/${maxRetries}):`);
-    emptyCheck.emptyCells.slice(0, 5).forEach(cell => {
-      console.log(`     → Row "${cell.rowLabel}", Column ${cell.col}: "${cell.value}"`);
-    });
-    if (emptyCheck.emptyCells.length > 5) {
-      console.log(`     → ... and ${emptyCheck.emptyCells.length - 5} more`);
-    }
-    
-    logger.debug('Empty cells detected', {
-      attempt: attempts + 1,
-      count: emptyCheck.emptyCells.length,
-      cells: emptyCheck.emptyCells.slice(0, 5)
-    });
-    
-    // Try to refresh the table
-    const refreshed = await clickTableRefresh(page);
-    
-    if (!refreshed) {
-      console.log('  ❌ Could not refresh table, stopping retry loop');
-      const result = { success: false, attempts: attempts + 1, remainingEmpty: emptyCheck.emptyCells.length };
-      logger.tableRefresh(attempts + 1, { success: false, reason: 'Refresh button failed' });
-      logger.functionExit(timerId, result);
-      return result;
-    }
-    
-    attempts++;
-  }
-  
-  // Final check after all retries
-  const finalCheck = await checkForEmptyCells(page);
-  
-  if (!finalCheck.hasEmptyCells) {
-    console.log(`  ✅ All cells filled after ${attempts} refresh(es)`);
-    const result = { success: true, attempts: attempts, remainingEmpty: 0 };
-    logger.tableRefresh(attempts, { success: true, remainingEmpty: 0, afterRetries: true });
-    logger.functionExit(timerId, result);
-    return result;
-  }
-  
-  console.log(`  ❌ Still ${finalCheck.emptyCells.length} empty cells after ${attempts} refresh attempts`);
-  const result = { success: false, attempts: attempts, remainingEmpty: finalCheck.emptyCells.length };
-  logger.tableRefresh(attempts, { 
-    success: false, 
-    remainingEmpty: finalCheck.emptyCells.length,
-    maxRetriesExhausted: true
-  });
-  logger.functionExit(timerId, result);
-  return result;
-}
-
-/**
- * Record a report for dates where no irrigation was detected
- * @param {Object} farmData - Farm information
- * @param {Object} dateInfo - Date information
- * @param {Object} analysisData - Analysis details
- * @returns {Promise<string>} Path to saved report
- */
-async function recordNoIrrigationReport(farmData, dateInfo, analysisData) {
-  const report = {
-    farmName: farmData.name,
-    farmId: farmData.id,
-    date: dateInfo.date,
-    dateIndex: dateInfo.index,
-    status: 'checked_no_irrigation',
-    irrigationDetected: false,
-    dataPointsAnalyzed: analysisData.pointCount,
-    yRange: {
-      min: analysisData.yRange?.min,
-      max: analysisData.yRange?.max,
-      span: analysisData.yRange?.span
-    },
-    surgeThreshold: analysisData.threshold,
-    algorithm: 'HSSP Rolling Window Valley Detection',
-    algorithmParams: {
-      surgeWindow: 5,
-      lookbackWindow: 20,
-      debounceMinutes: 30,
-      daytimeHours: '07:00-17:00'
-    },
-    timestamp: new Date().toISOString()
-  };
-  
-  // Ensure no-irrigation directory exists
-  const noIrrigationDir = path.join(CONFIG.outputDir, 'no-irrigation');
-  if (!fs.existsSync(noIrrigationDir)) {
-    fs.mkdirSync(noIrrigationDir, { recursive: true });
-  }
-  
-  // Create safe filename
-  const safeFarmName = farmData.name.replace(/[^a-zA-Z0-9가-힣]/g, '_');
-  const reportPath = path.join(noIrrigationDir, `${safeFarmName}-${dateInfo.date}.json`);
-  
-  fs.writeFileSync(reportPath, JSON.stringify(report, null, 2));
-  console.log(`     📄 No-irrigation report saved: ${reportPath}`);
-  
-  return reportPath;
-}
+// Visual confirmation functions moved to visualConfirmation.js module
 
 // Helper function to take screenshots and update dashboard
 async function takeScreenshot(page, screenshotPath) {
@@ -1625,206 +173,7 @@ function loadLearningOffsets() {
 
 // 🔤 AUTO-FONT INSTALLATION: Ensures Korean/CJK fonts are available on Linux
 // Prevents "tofu" (broken squares) when rendering Korean text
-function ensureFontsInstalled() {
-  // Only run on Linux (including WSL)
-  if (process.platform !== 'linux') {
-    return;
-  }
-  
-  console.log('🔤 Checking for CJK font support (Linux)...');
-  
-  // Check if fonts-noto-cjk is installed
-  try {
-    execSync('dpkg -s fonts-noto-cjk', { stdio: 'pipe' });
-    console.log('  ✅ Korean/CJK fonts already installed.');
-    return;
-  } catch (checkError) {
-    // Font package not found - attempt to install
-    console.log('  ⚠️ Korean fonts missing. Attempting auto-installation...');
-    
-    const installCommand = 'sudo apt-get update && sudo apt-get install -y fonts-noto-cjk fonts-noto-core fonts-liberation';
-    
-    try {
-      console.log('  📦 Installing font packages (requires sudo)...');
-      console.log(`  → Running: ${installCommand}`);
-      
-      execSync(installCommand, { 
-        stdio: 'inherit',
-        timeout: 300000 // 5 minutes timeout
-      });
-      
-      console.log('  ✅ Font packages installed successfully.');
-      
-      // Refresh font cache
-      console.log('  🔄 Refreshing font cache...');
-      try {
-        execSync('sudo fc-cache -f -v', { stdio: 'pipe' });
-        console.log('  ✅ Font cache refreshed.');
-      } catch (cacheError) {
-        console.log('  ⚠️ Font cache refresh failed (non-critical).');
-      }
-      
-    } catch (installError) {
-      console.log('\n  ❌ ═══════════════════════════════════════════════════════════');
-      console.log('  ❌ Auto-install failed (needs sudo or other issue).');
-      console.log('  ❌ ═══════════════════════════════════════════════════════════');
-      console.log('  💡 Please run this command manually:\n');
-      console.log(`     ${installCommand}`);
-      console.log('     sudo fc-cache -f -v\n');
-      console.log('  ═══════════════════════════════════════════════════════════\n');
-      // Continue anyway - browser will launch but Korean text may be broken
-    }
-  }
-}
-
-// 🌍 UNIVERSAL BROWSER LAUNCHER: Cross-platform "Write Once, Run Anywhere"
-// Handles: Windows, macOS, Linux/WSL with automatic dependency installation
-async function launchBrowser() {
-  // ═══════════════════════════════════════════════════════════════════
-  // STEP 0: PRE-FLIGHT FONT CHECK (Linux only)
-  // ═══════════════════════════════════════════════════════════════════
-  ensureFontsInstalled();
-  
-  // ═══════════════════════════════════════════════════════════════════
-  // STEP 1: OS DETECTION
-  // ═══════════════════════════════════════════════════════════════════
-  const platform = process.platform;
-  const isLinux = platform === 'linux';
-  const isMac = platform === 'darwin';
-  const isWindows = platform === 'win32';
-  
-  // Detect WSL specifically (Linux with Microsoft in kernel version)
-  const isWSL = isLinux && (() => {
-    try {
-      const release = fs.readFileSync('/proc/version', 'utf8').toLowerCase();
-      return release.includes('microsoft') || release.includes('wsl');
-    } catch { return false; }
-  })();
-
-  const osName = isWSL ? 'WSL (Linux)' : 
-                 isLinux ? 'Linux' : 
-                 isMac ? 'macOS' : 
-                 isWindows ? 'Windows' : 'Unknown';
-  
-  console.log(`🖥️  Detected Environment: ${osName}`);
-
-  // ═══════════════════════════════════════════════════════════════════
-  // STEP 2: HEADLESS MODE DECISION
-  // ═══════════════════════════════════════════════════════════════════
-  // Default: VISIBLE (headless: false) for ALL environments
-  // Override: Set $HEADLESS=true to run in invisible/headless mode
-  const forceHeadless = process.env.HEADLESS?.toLowerCase();
-  let headless;
-  
-  if (forceHeadless === 'true') {
-    headless = true;
-    console.log('🔇 Headless Mode: ENABLED (via $HEADLESS=true)');
-  } else {
-    headless = false;
-    console.log('🖼️  Headless Mode: DISABLED (default - set $HEADLESS=true to hide browser)');
-  }
-
-  const launchArgs = [
-    '--start-maximized',
-    '--window-position=0,0',
-    '--disable-blink-features=AutomationControlled' // Reduce bot detection
-  ];
-
-  // ═══════════════════════════════════════════════════════════════════
-  // STEP 3: SMART LAUNCH STRATEGY
-  // ═══════════════════════════════════════════════════════════════════
-  
-  // --- ATTEMPT 1: Try Google Chrome (preferred) ---
-  try {
-    console.log('🚀 Attempt 1: Launching Google Chrome...');
-    const browser = await chromium.launch({
-      headless,
-      channel: 'chrome',
-      args: launchArgs
-    });
-    console.log('✅ Google Chrome launched successfully.');
-    return browser;
-  } catch (chromeError) {
-    console.log(`⚠️  Chrome launch failed: ${chromeError.message.split('\n')[0]}`);
-
-    // --- PLATFORM-SPECIFIC RECOVERY ---
-    if (isLinux || isWSL) {
-      // Linux/WSL: Auto-install Chrome via Playwright
-      console.log('📦 Linux/WSL detected - attempting to install Chrome...');
-      try {
-        execSync('npx playwright install chrome', { 
-          stdio: 'inherit',
-          timeout: 180000 // 3 minutes for slow connections
-        });
-        console.log('✅ Chrome installation completed.');
-      } catch (installErr) {
-        console.log(`⚠️  Chrome install failed: ${installErr.message}`);
-      }
-    } else if (isMac) {
-      // macOS: Provide helpful guidance
-      console.log('💡 macOS: Chrome may be missing or in a non-standard location.');
-      console.log('   → Try: brew install --cask google-chrome');
-      console.log('   → Or download from: https://www.google.com/chrome/');
-    }
-    // Windows: Chrome is usually installed; skip auto-install
-
-    // --- ATTEMPT 2: Retry Chrome after install (Linux/WSL only) ---
-    if (isLinux || isWSL) {
-      try {
-        console.log('🔄 Attempt 2: Retrying Chrome after installation...');
-        const browser = await chromium.launch({
-          headless,
-          channel: 'chrome',
-          args: launchArgs
-        });
-        console.log('✅ Google Chrome launched successfully (after install).');
-        return browser;
-      } catch (retryError) {
-        console.log(`⚠️  Chrome retry failed: ${retryError.message.split('\n')[0]}`);
-      }
-    }
-
-    // --- ATTEMPT 3: Fallback to Bundled Chromium ---
-    console.log('🔄 Attempt 3: Falling back to bundled Chromium...');
-    
-    // Ensure Chromium is installed
-    try {
-      console.log('📦 Installing Playwright Chromium...');
-      execSync('npx playwright install chromium', { 
-        stdio: 'inherit',
-        timeout: 180000
-      });
-      console.log('✅ Chromium installation completed.');
-    } catch (chromiumInstallErr) {
-      console.log(`⚠️  Chromium install warning: ${chromiumInstallErr.message}`);
-      // Continue anyway - might already be installed
-    }
-
-    try {
-      const browser = await chromium.launch({
-        headless,
-        args: launchArgs
-        // No 'channel' = use bundled Chromium
-      });
-      console.log('✅ Bundled Chromium launched successfully.');
-      return browser;
-    } catch (chromiumError) {
-      // --- FINAL FAILURE ---
-      console.error('\n❌ ═══════════════════════════════════════════════════════════');
-      console.error('❌ CRITICAL: Could not launch any browser!');
-      console.error('❌ ═══════════════════════════════════════════════════════════');
-      console.error(`   Chrome error: ${chromeError.message.split('\n')[0]}`);
-      console.error(`   Chromium error: ${chromiumError.message.split('\n')[0]}`);
-      console.error('\n💡 Manual fix options:');
-      console.error('   1. Run: npx playwright install');
-      console.error('   2. Install Chrome: https://www.google.com/chrome/');
-      if (isLinux || isWSL) {
-        console.error('   3. For WSL GUI: Install an X server (VcXsrv/WSLg)');
-      }
-      throw new Error('❌ Critical: Could not launch any browser after all attempts.');
-    }
-  }
-}
+// Font installation and browser launcher moved to separate modules (browserLauncher.js, systemSetup.js)
 
 // 📤 REPORT SENDING MODE: Validate table data and click "Create Report" button
 async function runReportSending(config, dashboard, runStats) {
@@ -1845,6 +194,18 @@ async function runReportSending(config, dashboard, runStats) {
   
   const page = await context.newPage();
   
+  // 🔍 FORWARD BROWSER CONSOLE LOGS TO TERMINAL (for debugging overlay.js)
+  page.on('console', msg => {
+    const type = msg.type();
+    const text = msg.text();
+    
+    // Show DEBUG logs and BROWSER logs from overlay.js
+    if (text.includes('[DEBUG #') || text.includes('[BROWSER]')) {
+      const timestamp = new Date().toISOString().split('T')[1].split('.')[0];
+      console.log(`  🌐 [${timestamp}] [BROWSER ${type}]:`, text);
+    }
+  });
+  
   // Maximize window via CDP
   const session = await page.context().newCDPSession(page);
   const { windowId } = await session.send('Browser.getWindowForTarget');
@@ -1854,348 +215,27 @@ async function runReportSending(config, dashboard, runStats) {
   });
   
   try {
-    // Step 1: Navigate to Root & Check Auth State
+    // Step 1: Navigation & Authentication (using module)
     console.log('🔐 Step 1: Navigation & Authentication...');
     dashboard.updateStatus('🔐 Authenticating...', 'running');
     
-    const timestamp = new Date().toISOString().replace(/:/g, '-').split('.')[0];
-    
-    console.log('  → Navigating to root URL...');
-    await page.goto('https://admin.iofarm.com/', { 
-      waitUntil: 'domcontentloaded', 
-      timeout: 30000 
+    await handleAuthentication(page, {
+      username: CONFIG.username,
+      password: CONFIG.password,
+      screenshotDir: CONFIG.screenshotDir
     });
     
-    // ═══════════════════════════════════════════════════════════════════
-    // 🎯 SMART AUTHENTICATION DETECTION (Wait for React to render)
-    // ═══════════════════════════════════════════════════════════════════
-    console.log('  → Waiting for page to stabilize (networkidle)...');
-    await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {
-      console.log('  ⚠️  Network not fully idle after 15s, continuing...');
-    });
+    // Step 2: Ensure We're at Report Page (using module)
+    await ensureAtReportPage(page);
     
-    const currentUrl = page.url();
-    console.log(`  → Landed at: ${currentUrl}`);
+    // Step 3: Select Manager (using module)
+    await selectManager(page, config.manager, dashboard);
     
-    // Take screenshot to see what we're working with
-    const authScreenshot = path.join(CONFIG.screenshotDir, `auth-check-${timestamp}.png`);
-    await page.screenshot({ path: authScreenshot, fullPage: true });
-    console.log(`  → Auth state screenshot: ${authScreenshot}`);
+    // Step 4: Extract Farm List (using module)
+    const farmList = await extractFarmList(page, dashboard);
     
-    // ─────────────────────────────────────────────────────────────────────────────
-    // DUAL-PATH DETECTION: Race between Login Form vs Dashboard
-    // ─────────────────────────────────────────────────────────────────────────────
-    console.log('  🔍 Detecting page state (Login Form vs Dashboard)...');
-    
-    const DETECTION_TIMEOUT = 10000;
-    
-    // Path A: Login form selectors
-    const loginFormPromise = (async () => {
-      await Promise.race([
-        page.waitForSelector('input[name="email"]', { state: 'visible', timeout: DETECTION_TIMEOUT }),
-        page.waitForSelector('input[type="email"]', { state: 'visible', timeout: DETECTION_TIMEOUT }),
-        page.waitForSelector('input[placeholder*="이메일"]', { state: 'visible', timeout: DETECTION_TIMEOUT }),
-        page.waitForSelector('input[placeholder*="email" i]', { state: 'visible', timeout: DETECTION_TIMEOUT })
-      ]);
-      return { state: 'login_form' };
-    })();
-    
-    // Path B: Dashboard/authenticated state selectors
-    const dashboardPromise = (async () => {
-      await Promise.race([
-        page.waitForSelector('text=로그아웃', { state: 'visible', timeout: DETECTION_TIMEOUT }),
-        page.waitForSelector('text=Logout', { state: 'visible', timeout: DETECTION_TIMEOUT }),
-        page.waitForSelector('div.css-nd8svt', { state: 'visible', timeout: DETECTION_TIMEOUT }),
-        page.waitForSelector('a[href*="/report/point/"]', { state: 'visible', timeout: DETECTION_TIMEOUT })
-      ]);
-      return { state: 'dashboard' };
-    })();
-    
-    let pageState;
-    try {
-      pageState = await Promise.race([
-        loginFormPromise.catch(() => null),
-        dashboardPromise.catch(() => null)
-      ]);
-      
-      // If neither resolved quickly, wait a bit more and check manually
-      if (!pageState) {
-        await page.waitForTimeout(2000);
-        const hasLoginField = await page.locator('input[type="email"], input[name="email"], input[placeholder*="이메일"]').first().isVisible().catch(() => false);
-        const hasDashboard = await page.locator('text=로그아웃, div.css-nd8svt').first().isVisible().catch(() => false);
-        
-        if (hasLoginField) pageState = { state: 'login_form' };
-        else if (hasDashboard) pageState = { state: 'dashboard' };
-      }
-    } catch (e) {
-      pageState = null;
-    }
-    
-    console.log(`  → Detected state: ${pageState?.state || 'unknown'}`);
-    
-    // ─────────────────────────────────────────────────────────────────────────────
-    // ACTION BASED ON DETECTED STATE
-    // ─────────────────────────────────────────────────────────────────────────────
-    
-    if (pageState?.state === 'dashboard') {
-      // Already authenticated
-      console.log('  ✅ Already authenticated (Dashboard detected)');
-      
-    } else if (pageState?.state === 'login_form') {
-      // Login required
-      console.log('  → Found login form, entering credentials...');
-      
-      // Fill email (try multiple selectors)
-      const emailSelectors = [
-        'input[type="email"]',
-        'input[name="email"]',
-        'input[placeholder*="이메일"]',
-        'input[placeholder*="email" i]'
-      ];
-      
-      let emailFilled = false;
-      for (const selector of emailSelectors) {
-        try {
-          const field = page.locator(selector).first();
-          if (await field.isVisible({ timeout: 500 })) {
-            await field.fill(CONFIG.username);
-            console.log(`  → Email entered: ${CONFIG.username}`);
-            emailFilled = true;
-            break;
-          }
-        } catch (e) { continue; }
-      }
-      
-      if (!emailFilled) {
-        throw new Error('❌ Could not find email input field');
-      }
-      
-      // Fill password
-      console.log('  → Password: ********');
-      await page.fill('input[type="password"]', CONFIG.password);
-      
-      // Click login button
-      console.log('  → Clicking login button...');
-      const loginClicked = await page.locator('button[type="submit"], button:has-text("로그인"), button:has-text("Login")').first().click().then(() => true).catch(() => false);
-      if (!loginClicked) {
-        await page.keyboard.press('Enter');
-      }
-      
-      // Wait for dashboard to appear (confirms login success)
-      console.log('  → Waiting for dashboard to appear...');
-      try {
-        await Promise.race([
-          page.waitForSelector('text=로그아웃', { state: 'visible', timeout: 15000 }),
-          page.waitForSelector('div.css-nd8svt', { state: 'visible', timeout: 15000 }),
-          page.waitForSelector('a[href*="/report/point/"]', { state: 'visible', timeout: 15000 })
-        ]);
-        console.log('  ✅ Login successful! Dashboard appeared.');
-      } catch (loginError) {
-        // Check for error message
-        const hasError = await page.locator('text=/invalid|incorrect|error|실패|오류/i').first().isVisible().catch(() => false);
-        if (hasError) {
-          throw new Error('❌ Login failed: Invalid credentials');
-        }
-        throw new Error('❌ Login failed: Dashboard did not appear');
-      }
-      
-    } else {
-      // Unknown state - take debug screenshot and throw
-      const debugScreenshot = path.join(CONFIG.screenshotDir, `debug-auth-state-${timestamp}.png`);
-      await page.screenshot({ path: debugScreenshot, fullPage: true });
-      console.log(`  ❌ Unknown page state. Debug screenshot: ${debugScreenshot}`);
-      throw new Error(`❌ Unknown page state - neither login form nor dashboard detected. Check: ${debugScreenshot}`);
-    }
-    
-    // Step 2: Ensure We're at Report Page
-    const finalUrl = page.url();
-    if (!finalUrl.includes('/report')) {
-      console.log('\n  📍 Not at /report page, navigating there...');
-      await page.goto('https://admin.iofarm.com/report', { 
-        waitUntil: 'load', 
-        timeout: 20000 
-      });
-      console.log(`  ✅ Navigated to: ${page.url()}`);
-    } else {
-      console.log('\n  ✅ Already at /report page');
-    }
-    
-    // ═══════════════════════════════════════════════════════════════════════════
-    // STEP 3: SELECT MANAGER (ENFORCED SWITCHING)
-    // ═══════════════════════════════════════════════════════════════════════════
-    console.log(`\n🎯 Step 3: Selecting Manager "${config.manager}" (Enforced Switching)...`);
-    dashboard.updateStatus(`🎯 Selecting manager: ${config.manager}`, 'running');
-    
-    try {
-      // Wait for manager selector to be visible
-      console.log('  → Waiting for manager selector to appear...');
-      await page.waitForSelector('.chakra-segment-group__itemText', { 
-        state: 'visible',
-        timeout: 10000 
-      });
-      
-      // Define precise locator using Chakra UI class + exact text match
-      const managerButton = page.locator('.chakra-segment-group__itemText', { 
-        hasText: new RegExp(`^${config.manager}$`) 
-      });
-      
-      // Check if the button exists
-      const buttonCount = await managerButton.count();
-      console.log(`  → Found ${buttonCount} button(s) matching "${config.manager}"`);
-      
-      if (buttonCount > 0) {
-        // Primary: Force click on the Playwright locator
-        console.log(`  → Clicking "${config.manager}" button...`);
-        try {
-          await managerButton.first().click({ force: true, timeout: 5000 });
-          console.log(`  ✅ Playwright click successful`);
-        } catch (clickError) {
-          // Fallback: Use native JavaScript click
-          console.log(`  ⚠️  Playwright click failed, using JS fallback...`);
-          const jsClicked = await page.evaluate((targetManager) => {
-            const spans = Array.from(document.querySelectorAll('.chakra-segment-group__itemText'));
-            const targetSpan = spans.find(span => span.textContent.trim() === targetManager);
-            if (targetSpan) {
-              // Click the span itself
-              targetSpan.click();
-              // Also try clicking parent label if exists
-              const parentLabel = targetSpan.closest('label');
-              if (parentLabel) parentLabel.click();
-              return true;
-            }
-            return false;
-          }, config.manager);
-          
-          if (jsClicked) {
-            console.log(`  ✅ JavaScript fallback click successful`);
-          } else {
-            console.log(`  ❌ JavaScript fallback also failed`);
-          }
-        }
-        
-        // CRITICAL: Wait for UI state change
-        console.log(`  → Waiting for UI state confirmation...`);
-        try {
-          await page.waitForFunction((targetManager) => {
-            const spans = Array.from(document.querySelectorAll('.chakra-segment-group__itemText'));
-            const targetSpan = spans.find(span => span.textContent.trim() === targetManager);
-            if (targetSpan) {
-              const parentLabel = targetSpan.closest('label');
-              if (parentLabel) {
-                return parentLabel.getAttribute('data-state') === 'checked';
-              }
-            }
-            return false;
-          }, config.manager, { timeout: 3000 });
-          console.log(`  ✅ UI confirmed: "${config.manager}" is now selected`);
-        } catch (waitError) {
-          console.log(`  ⚠️  UI state change not detected, continuing anyway...`);
-        }
-        
-        // CRITICAL: Wait for network idle (table reload with new farm IDs)
-        console.log(`  → Waiting for network to idle (table reload)...`);
-        await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {
-          console.log('  ⚠️  Network not fully idle, continuing...');
-        });
-        
-        // Safety buffer for AJAX reload (3 seconds)
-        console.log(`  → Safety buffer (3s for farm list reload)...`);
-        await page.waitForTimeout(3000);
-        console.log(`  ✅ Manager selection complete\n`);
-        
-      } else {
-        console.log(`  ⚠️  Could not find "${config.manager}" button using .chakra-segment-group__itemText`);
-        console.log(`  → Proceeding with default manager selection...\n`);
-      }
-    } catch (error) {
-      console.log(`  ⚠️  Error selecting manager: ${error.message}`);
-      console.log(`  → Proceeding anyway...\n`);
-    }
-    
-    // Step 4: Wait for Farm List Content
-    console.log('  → Waiting for farm list to appear...');
-    await page.waitForSelector('div.css-nd8svt a', { 
-      state: 'visible',
-      timeout: 30000 
-    });
-    console.log('  ✅ Farm list loaded\n');
-    
-    // Step 5: Extract Farm List
-    console.log('🏭 Step 4: Extracting farm list...');
-    dashboard.updateStatus('📋 Loading farms...', 'running');
-    
-    const farmList = await page.evaluate(() => {
-      const farms = [];
-      const tabs = document.querySelector('[id*="tabs"][id*="content-point"]');
-      if (tabs) {
-        const farmContainer = tabs.querySelector('div > div:first-child > div:nth-child(2)');
-        if (farmContainer) {
-          const farmLinks = farmContainer.querySelectorAll('a[href*="/report/point/"]');
-          farmLinks.forEach((link, idx) => {
-            const text = link.textContent.trim();
-            if (!text || text.length < 3 || text.length > 200) return;
-            if (/\d{4}년|\d{2}월|\d{2}일/.test(text)) return;
-            if (text.includes('전체 보기') || text.includes('저장')) return;
-            farms.push({ 
-              index: idx + 1, 
-              name: text,
-              href: link.getAttribute('href')
-            });
-          });
-        }
-      }
-      return farms;
-    });
-    
-    console.log(`  ✅ Found ${farmList.length} farms\n`);
-
-    // ════════════════════════════════════════════════════════════════════
-    // DAY FILTER: Filter farms by [월수금] prefix in name
-    // ════════════════════════════════════════════════════════════════════
-    const dayFilter = config.dayFilter || '';
-    let filteredFarms = farmList;
-
-    if (dayFilter) {
-      filteredFarms = farmList.filter(farm => {
-        // Look for bracket prefix like [월수금] or [월] at start of name
-        const bracketMatch = farm.name.match(/^\[([^\]]+)\]/);
-        if (!bracketMatch) {
-          // No bracket prefix - skip this farm when filter is active
-          return false;
-        }
-        // Check if the selected day is in the bracket
-        const daysInBracket = bracketMatch[1];
-        return daysInBracket.includes(dayFilter);
-      });
-
-      console.log(`📅 Day filter: ${dayFilter}`);
-      console.log(`   Filtered: ${filteredFarms.length}/${farmList.length} farms match [${dayFilter}...]`);
-      console.log(`   Skipped: ${farmList.length - filteredFarms.length} farms (no bracket or day not matching)\n`);
-    }
-
-    // Broadcast farm count (filtered count if filter is active)
-    if (dashboard) {
-      dashboard.broadcast('update_farm_count', { count: filteredFarms.length });
-    }
-
-    // Step 3: Calculate farm range (use filteredFarms instead of farmList)
-    const totalFarms = filteredFarms.length;
-    let startIndex = (config.startFrom > 0) ? (config.startFrom - 1) : 0;
-    let maxCount = config.maxFarms || totalFarms;
-    
-    // Auto-correct if needed
-    if (startIndex >= totalFarms) {
-      startIndex = totalFarms - 1;
-      console.warn(`⚠️  Auto-corrected start index to Farm #${startIndex + 1}\n`);
-    }
-    
-    let endIndex = Math.min(startIndex + maxCount, totalFarms);
-    const farmsToProcess = filteredFarms.slice(startIndex, endIndex);
-
-    console.log(`📋 Processing Plan:`);
-    console.log(`   → Total farms: ${totalFarms}${dayFilter ? ` (filtered by [${dayFilter}])` : ''}`);
-    console.log(`   → Range: Farm #${startIndex + 1} to #${endIndex}`);
-    console.log(`   → Count: ${farmsToProcess.length}\n`);
+    // Step 5: Calculate Farm Range (using module)
+    const { farmsToProcess, startIndex, endIndex, totalFarms } = calculateFarmRange(farmList, config);
     
     // Step 4: Process each farm
     let reportsCreated = 0;
@@ -2250,20 +290,6 @@ async function runReportSending(config, dashboard, runStats) {
         // Additional safety: wait for table to exist
         await page.waitForSelector('table', { state: 'visible', timeout: 5000 });
         console.log('  ✅ Table element found\n');
-        
-        // Step 4.5: CHECK FOR EMPTY CELLS AND REFRESH IF NEEDED
-        console.log('  🔍 Checking for empty cells in table (excluding rightmost column)...');
-        
-        const refreshResult = await attemptTableRefresh(page, 3);
-        
-        if (!refreshResult.success) {
-          console.log(`  ⚠️ Table still has ${refreshResult.remainingEmpty} empty cells after ${refreshResult.attempts} refresh attempts`);
-          console.log('     → Will continue with validation (may fail due to missing data)\n');
-        } else if (refreshResult.attempts > 0) {
-          console.log(`  ✅ Table data complete after ${refreshResult.attempts} refresh(es)\n`);
-        } else {
-          console.log('  ✅ Table data already complete (no refresh needed)\n');
-        }
         
         // Step 5: PRECISE TABLE VALIDATION
         console.log('  📊 Validating table data (PRECISE MODE)...');
@@ -2372,33 +398,6 @@ async function runReportSending(config, dashboard, runStats) {
             failedChecks.push(`일출 시 must have data (got: "${checks.sunrise.actual || 'NOT FOUND'}")`);
           }
           
-          // 🆕 ADDITIONAL CHECK: Verify no empty cells in non-rightmost columns
-          let emptyCellCount = 0;
-          const emptyCellDetails = [];
-          
-          rows.forEach((row, rowIdx) => {
-            const cells = Array.from(row.querySelectorAll('td'));
-            if (cells.length < 2) return;
-            
-            const rowLabel = cells[0].textContent.trim();
-            
-            // Check all cells except first (label) and last (rightmost/today)
-            for (let colIdx = 1; colIdx < cells.length - 1; colIdx++) {
-              const cellValue = cells[colIdx].textContent.trim();
-              if (cellValue === '-' || cellValue === '—' || cellValue === '') {
-                emptyCellCount++;
-                if (emptyCellDetails.length < 3) {
-                  emptyCellDetails.push(`${rowLabel}[col ${colIdx}]`);
-                }
-              }
-            }
-          });
-          
-          if (emptyCellCount > 0) {
-            const details = emptyCellDetails.join(', ') + (emptyCellCount > 3 ? ` +${emptyCellCount - 3} more` : '');
-            failedChecks.push(`${emptyCellCount} empty cells found in non-rightmost columns: ${details}`);
-          }
-          
           const allPassed = failedChecks.length === 0;
           
           return {
@@ -2407,7 +406,6 @@ async function runReportSending(config, dashboard, runStats) {
               ? '✅ All validation checks passed' 
               : failedChecks.join(' | '),
             checks: checks,
-            emptyCellCount: emptyCellCount,
             debug: `Rows found: ${rows.length}, Data map keys: ${Object.keys(dataMap).join(', ')}`
           };
         });
@@ -2416,22 +414,9 @@ async function runReportSending(config, dashboard, runStats) {
         console.log(`     → Reason: ${validationResult.reason}`);
         console.log(`     → Debug: ${validationResult.debug}\n`);
         
-        // Log table validation result
-        logger.tableValidation({
-          ready: validationResult.ready,
-          reason: validationResult.reason,
-          checks: validationResult.checks,
-          emptyCellCount: validationResult.emptyCellCount,
-          farmName: farm.name
-        });
-        
         if (validationResult.ready) {
           // Step 6: Click "리포트 생성" button
           console.log('  📤 All checks passed! Clicking "리포트 생성" button...');
-          logger.buttonClick('리포트 생성 (Create Report)', { 
-            farmName: farm.name, 
-            validationPassed: true 
-          });
           
           const buttonClicked = await page.evaluate(() => {
             const buttons = Array.from(document.querySelectorAll('button'));
@@ -2451,11 +436,6 @@ async function runReportSending(config, dashboard, runStats) {
           
           if (buttonClicked) {
             console.log('  ✅ Report sent successfully!\n');
-            logger.buttonClickResult('리포트 생성 (Create Report)', true, { 
-              farmName: farm.name,
-              status: 'Report created successfully'
-            });
-            logger.success(`Report created for ${farm.name}`, { farmName: farm.name });
             dashboard.log(`✅ Report sent for: ${farm.name}`, 'success');
             dashboard.broadcast('report_update', { status: 'Sent', farmName: farm.name, message: 'Report created successfully' });
             reportsCreated++;
@@ -2463,20 +443,12 @@ async function runReportSending(config, dashboard, runStats) {
             await page.waitForTimeout(1500); // Brief wait for submission
           } else {
             console.log('  ⚠️  "리포트 생성" button not found on page\n');
-            logger.buttonClickResult('리포트 생성 (Create Report)', false, { 
-              farmName: farm.name,
-              reason: 'Button not found on page'
-            });
             dashboard.log(`⚠️ Button not found for: ${farm.name}`, 'warning');
             dashboard.broadcast('report_update', { status: 'Skipped', farmName: farm.name, message: 'Button not found on page' });
             reportsSkipped++;
           }
         } else {
           console.log('  ⚠️  Validation failed. Skipping report creation.\n');
-          logger.warning(`Report creation skipped for ${farm.name}`, {
-            farmName: farm.name,
-            reason: validationResult.reason
-          });
           dashboard.log(`⚠️ Skipped ${farm.name}: ${validationResult.reason}`, 'warning');
           dashboard.broadcast('report_update', { status: 'Skipped', farmName: farm.name, message: validationResult.reason });
           reportsSkipped++;
@@ -2540,8 +512,204 @@ async function runReportSending(config, dashboard, runStats) {
   }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// PROCESS SINGLE DATE - Helper function for date processing
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Process a single date for a farm
+ * @param {Page} page - Playwright page
+ * @param {object} options - Processing options
+ * @returns {Promise<object>} - Processing result with dateData
+ */
+async function processSingleDate(page, options) {
+  const {
+    farm,
+    dayOffset,
+    dateIdx,
+    today,
+    farmDateData,
+    currentFarmClickedPoints,
+    runStats,
+    dashboard,
+    config,
+    timestamp,
+    farmIdx,
+    learnedOffsets,
+    networkData
+  } = options;
+  
+  // Calculate target date
+  const { dateString, koreanDate } = calculateTargetDate(today, dayOffset);
+  
+  console.log(`\n  📅 Processing Date: ${koreanDate} (${dateString}) - T-${dayOffset}`);
+  console.log(`  ${'─'.repeat(70)}`);
+  console.log(`  📍 Date ${6 - dayOffset}/6 (Direction: T-5 → T-0, oldest to newest)`);
+  
+  try {
+    // Verify page is ready
+    console.log(`  ✅ Page ready for date: ${dateString}`);
+    await waitForPageReady(page, { waitForChart: true });
+  } catch (navError) {
+    console.log(`  ❌ Error on date ${dateString}: ${navError.message}`);
+    console.log(`  → Skipping this date...\n`);
+    
+    saveCheckpoint({
+      farmIndex: farmIdx,
+      farmName: farm.name,
+      dateIndex: 5 - dayOffset,
+      dateString: dateString,
+      totalFarms: 1,
+      totalDates: 6,
+      clickedPoints: currentFarmClickedPoints,
+      manager: config.targetName,
+      mode: config.chartLearningMode ? 'learning' : 'normal',
+      error: navError.message
+    });
+    
+    return { skipped: true, error: navError.message };
+  }
+  
+  // Get displayed date
+  const displayedDate = await getCurrentDisplayedDate(page);
+  console.log(`  📍 Displayed date on page: ${displayedDate}`);
+  
+  // Check if user pressed STOP
+  if (dashboard && dashboard.checkIfStopped()) {
+    console.log('\n⛔ STOP requested. Halting date processing...\n');
+    return { stopped: true };
+  }
+  
+  // Check table status
+  const tableStatus = await checkTableStatus(page);
+  
+  // If tables already filled, skip HSSP
+  if (!tableStatus.needsFirstClick && !tableStatus.needsLastClick) {
+    console.log(`     ✅ Tables already filled for this date - NO MODIFICATION NEEDED`);
+    console.log(`        → Existing First: ${tableStatus.firstTime}`);
+    console.log(`        → Existing Last: ${tableStatus.lastTime}`);
+    console.log(`        → Skipping HSSP algorithm (preserving existing data)\n`);
+    
+    const dateData = {
+      date: displayedDate,
+      firstIrrigationTime: tableStatus.firstTime,
+      lastIrrigationTime: tableStatus.lastTime,
+      extractedAt: new Date().toISOString(),
+      alreadyFilled: true
+    };
+    farmDateData.push(dateData);
+    
+    runStats.skipCount++;
+    runStats.datesProcessed++;
+    if (!runStats.dateRange.start) runStats.dateRange.start = displayedDate;
+    runStats.dateRange.end = displayedDate;
+    
+    // Take screenshot
+    const skipScreenshot = path.join(config.screenshotDir, `farm-${farmIdx + 1}-date-${dateIdx}-skipped-${timestamp}.png`);
+    await page.screenshot({ path: skipScreenshot, fullPage: true });
+    console.log(`     📸 Screenshot: ${skipScreenshot}\n`);
+    
+    return { skipped: true, alreadyFilled: true, dateData };
+  }
+  
+  // Tables need data - run chart analysis
+  console.log('  ⚠️  Tables need data, running HSSP chart analysis...\n');
+  
+  try {
+    // Wait for chart data
+    const chartData = await waitForChartData(networkData, 10000);
+    const dataPoints = extractDataPoints(chartData);
+    
+    if (!dataPoints || dataPoints.length < 10) {
+      console.log('  ⚠️  Insufficient data points for analysis\n');
+      return { skipped: true, insufficientData: true };
+    }
+    
+    // Run HSSP algorithm - this section stays inline as it's complex and tightly coupled
+    // It will be extracted to src/chartAnalyzer.js in a future iteration
+    const hsspResult = await runHSSPAlgorithm(page, {
+      dataPoints,
+      config,
+      learnedOffsets,
+      farmIdx,
+      dateIdx,
+      timestamp,
+      displayedDate,
+      dateString,
+      currentFarmClickedPoints,
+      runStats
+    });
+    
+    if (!hsspResult.success) {
+      console.log('  ⚠️  HSSP algorithm did not produce valid results\n');
+      return { skipped: true, hsspFailed: true };
+    }
+    
+    // Extract irrigation data from tables after clicking
+    await page.waitForTimeout(500);
+    const finalData = await extractIrrigationTimes(page);
+    
+    console.log(`  → 첫 급액시간 1: ${finalData.firstIrrigationTime || 'NOT FOUND'}`);
+    console.log(`  → 마지막 급액시간 1: ${finalData.lastIrrigationTime || 'NOT FOUND'}\n`);
+    
+    // Store date data
+    const dateData = {
+      date: displayedDate,
+      firstIrrigationTime: finalData.firstIrrigationTime || null,
+      lastIrrigationTime: finalData.lastIrrigationTime || null,
+      extractedAt: new Date().toISOString()
+    };
+    farmDateData.push(dateData);
+    
+    // Update statistics
+    runStats.datesProcessed++;
+    if (finalData.firstIrrigationTime || finalData.lastIrrigationTime) {
+      runStats.successCount++;
+      console.log(`     ✅ Data collected for ${displayedDate}\n`);
+    } else {
+      console.log(`     ⚠️  No irrigation time data found for this date\n`);
+    }
+    
+    if (!runStats.dateRange.start) runStats.dateRange.start = displayedDate;
+    runStats.dateRange.end = displayedDate;
+    
+    // Take final screenshot
+    const dateScreenshot = path.join(config.screenshotDir, `farm-${farmIdx + 1}-date-${dateIdx}-${timestamp}.png`);
+    await page.screenshot({ path: dateScreenshot, fullPage: true });
+    console.log(`     📸 Screenshot: ${dateScreenshot}\n`);
+    
+    // Save checkpoint
+    saveCheckpoint({
+      farmIndex: farmIdx,
+      farmName: farm.name,
+      dateIndex: 5 - dayOffset,
+      dateString: dateString,
+      totalFarms: 1,
+      totalDates: 6,
+      clickedPoints: currentFarmClickedPoints,
+      manager: config.targetName,
+      mode: config.chartLearningMode ? 'learning' : 'normal'
+    });
+    
+    return { success: true, dateData };
+    
+  } catch (error) {
+    console.log(`     ⚠️  Error in date processing: ${error.message}\n`);
+    runStats.errorCount++;
+    return { skipped: true, error: error.message };
+  }
+}
+
 async function main() {
+  // Initialize execution logging - saves all console output to timestamped log files
+  const logFilePath = initExecutionLog();
+  
   console.log('🚀 Starting Irrigation Report Automation (Playwright)...\n');
+  logSeparator('CONFIGURATION');
+  console.log(`Visual Confirmation Mode: ${CONFIG.visualConfirmationMode ? 'ENABLED' : 'DISABLED'}`);
+  console.log(`Training Mode: ${CONFIG.trainingMode ? 'ENABLED' : 'DISABLED'}`);
+  console.log(`Chart Learning Mode: ${CONFIG.chartLearningMode ? 'ENABLED' : 'DISABLED'}`);
+  logSeparator();
   
   // Initialize and start dashboard server
   const dashboard = new DashboardServer();
@@ -2586,7 +754,6 @@ async function main() {
     chartsClicked: 0,
     successCount: 0,
     skipCount: 0,
-    noIrrigationCount: 0,  // Dates checked but no irrigation found
     errorCount: 0,
     dateRange: { start: null, end: null },
     mode: config.mode
@@ -2648,7 +815,19 @@ async function main() {
   // Open automation page
   const page = await context.newPage();
   
-  // 🔒 AUTHENTICATION FIX: No resource blocking - allow all auth scripts to run
+  // � FORWARD BROWSER CONSOLE LOGS TO TERMINAL (for debugging overlay.js)
+  page.on('console', msg => {
+    const type = msg.type();
+    const text = msg.text();
+    
+    // Show DEBUG logs and BROWSER logs from overlay.js
+    if (text.includes('[DEBUG #') || text.includes('[BROWSER]')) {
+      const timestamp = new Date().toISOString().split('T')[1].split('.')[0];
+      console.log(`  🌐 [${timestamp}] [BROWSER ${type}]:`, text);
+    }
+  });
+  
+  // �🔒 AUTHENTICATION FIX: No resource blocking - allow all auth scripts to run
   console.log('🔒 Authentication mode: All resources enabled for stable login');
   dashboard.log('Browser launched successfully', 'success');
   dashboard.log(`Dashboard accessible at ${dashboardUrl}`, 'success');
@@ -3238,12 +1417,6 @@ async function main() {
       // Get current config (may have been updated via "Add More Farms")
       const currentConfig = dashboard.getConfig();
       
-      // 📸 CHECK FOR F9 TRIGGER (crash report request from dashboard)
-      const f9Triggered = await checkAndHandleF9Trigger(page, `Farm ${farmIdx + 1}`);
-      if (f9Triggered) {
-        console.log('📸 F9 crash report saved. Continuing automation...');
-      }
-      
       // Check if we've reached the current maxFarms limit
       if (farmIdx >= currentConfig.maxFarms) {
         console.log(`\n✅ Reached maxFarms limit (${currentConfig.maxFarms}). Stopping farm processing.\n`);
@@ -3388,67 +1561,15 @@ async function main() {
     let dateIdx = 0;
     const farmDateData = []; // Store data for all dates of this farm
     
-    // 🔙 STEP 1: Navigate to T-5 by clicking "이전 기간" (previous) 5 times
-    // URL date parameter DOES NOT WORK - must use button clicks
-    console.log(`  🔙 Navigating to T-5 (5 days ago) using button clicks...`);
-    console.log(`     ⚠️  Note: URL &date= parameter doesn't work. Using button navigation.`);
-    
-    for (let i = 0; i < 5; i++) {
-      const prevClicked = await page.evaluate(() => {
-        const prevButton = document.querySelector('button[aria-label="이전 기간"]');
-        if (prevButton) {
-          prevButton.click();
-          return true;
-        }
-        return false;
-      });
-      
-      if (prevClicked) {
-        console.log(`     ◀️  Clicked previous (${i + 1}/5)`);
-        // Wait for chart to reload after date change
-        try {
-          await page.waitForTimeout(800);
-          await waitForPageReady(page, { waitForChart: true });
-        } catch (error) {
-          console.log(`     ⚠️  Error during wait: ${error.message}`);
-          console.log(`     → Browser may have been closed. Stopping navigation.`);
-          throw error;
-        }
-      } else {
-        console.log(`     ⚠️  Previous button not found at step ${i + 1}`);
-        break;
-      }
-    }
-    
-    console.log(`  ✅ Now at T-5 (oldest date). Will process T-5 → T-0.\n`);
+    // 🔙 STEP 1: Navigate to T-5 using the dateNavigator module
+    await navigateToStartDate(page, 5);
     
     // 📅 STEP 2: Process each date from T-5 to T-0
     for (let dayOffset = 5; dayOffset >= 0; dayOffset--) {
       dateIdx++;
       
-      // 📸 CHECK FOR F9 TRIGGER (crash report request from dashboard)
-      const f9Triggered = await checkAndHandleF9Trigger(page, `Date loop T-${dayOffset}`);
-      if (f9Triggered) {
-        console.log('📸 F9 crash report saved. Continuing automation...');
-      }
-      
-      // 📅 CALCULATE TARGET DATE EXPLICITLY
-      const targetDate = new Date(today);
-      targetDate.setDate(today.getDate() - dayOffset); // Subtract days from today
-      
-      // Format date as YYYY-MM-DD for logging/checkpoints
-      const year = targetDate.getFullYear();
-      const month = String(targetDate.getMonth() + 1).padStart(2, '0');
-      const day = String(targetDate.getDate()).padStart(2, '0');
-      const dateString = `${year}-${month}-${day}`;
-      
-      // Format for Korean display
-      const koreanDate = targetDate.toLocaleDateString('ko-KR', {
-        year: 'numeric',
-        month: 'long',
-        day: 'numeric',
-        weekday: 'short'
-      });
+      // 📅 CALCULATE TARGET DATE using the dateNavigator module
+      const { dateString, koreanDate } = calculateTargetDate(today, dayOffset);
       
       console.log(`\n  📅 Processing Date: ${koreanDate} (${dateString}) - T-${dayOffset}`);
       console.log(`  ${'─'.repeat(70)}`);
@@ -3483,20 +1604,8 @@ async function main() {
         continue; // Skip to next date
       }
       
-      // Verify the date loaded correctly by reading the date picker
-      const displayedDate = await page.evaluate(() => {
-        const buttons = Array.from(document.querySelectorAll('button.chakra-button'));
-        const dateButton = buttons.find(btn => {
-          const hasSvg = btn.querySelector('svg rect[x="3"][y="4"][width="18"][height="18"]');
-          const hasDateText = btn.textContent.includes('년') && btn.textContent.includes('일');
-          return hasSvg && hasDateText;
-        });
-        
-        if (dateButton) {
-          return dateButton.textContent.trim();
-        }
-        return 'Unknown Date';
-      });
+      // Verify the date loaded correctly using the dateNavigator module
+      const displayedDate = await getCurrentDisplayedDate(page);
       
       console.log(`  📍 Displayed date on page: ${displayedDate}`);
       
@@ -3630,6 +1739,32 @@ async function main() {
         // Check if tables are already completely filled
         const tablesAlreadyFilled = !tableStatus.needsFirstClick && !tableStatus.needsLastClick;
         
+        // ═══════════════════════════════════════════════════════════════════════
+        // 👁️ VISUAL CONFIRMATION MODE: Single function call handles everything
+        // ═══════════════════════════════════════════════════════════════════════
+        console.log(`\n     🔍 DEBUG: CONFIG.visualConfirmationMode = ${CONFIG.visualConfirmationMode}`);
+        if (CONFIG.visualConfirmationMode) {
+          console.log(`     👁️ ENTERING VISUAL CONFIRMATION MODE...\n`);
+          const vcResult = await handleVisualConfirmation(page, {
+            nodeId: currentFarm.nodeId || currentFarm.name,
+            firstTime: tableStatus.firstTime,
+            lastTime: tableStatus.lastTime,
+            learnedOffsets: learnedOffsets.count > 0 ? learnedOffsets : null
+          });
+          
+          // Move to next date
+          if (dayOffset > 0) {
+            await page.evaluate(() => {
+              const btn = document.querySelector('button[aria-label="다음 기간"]');
+              if (btn) btn.click();
+            });
+            await page.waitForTimeout(300);
+          }
+          
+          continue; // Visual confirmation handled everything - proceed to next date
+        }
+        // ═══════════════════════════════════════════════════════════════════════
+        
         if (tablesAlreadyFilled) {
           console.log(`     ✅ Tables already filled for this date - NO MODIFICATION NEEDED`);
           console.log(`        → Existing First: ${tableStatus.firstTime}`);
@@ -3660,10 +1795,6 @@ async function main() {
           // Move to next date using "Next period" button (except for T-0, the last date)
           if (dayOffset > 0) {
             console.log(`     ⏭️  Moving to next date (T-${dayOffset} → T-${dayOffset - 1})...`);
-
-            // Reset captured data to allow fresh capture for new date
-            resetCapturedData(networkData);
-
             const nextClicked = await page.evaluate(() => {
               const nextButton = document.querySelector('button[aria-label="다음 기간"]');
               if (nextButton) {
@@ -3672,33 +1803,31 @@ async function main() {
               }
               return false;
             });
-
+            
             if (nextClicked) {
               console.log(`     ✅ Moved to next date`);
               // ⚡ FAST: Brief wait for date picker (unavoidable UI)
               await page.waitForTimeout(300);
             }
           }
-
+          
           continue; // Skip to next date
         }
+
+        // ══════════════════════════════════════════════════════════════════
+        console.log(`\n     🔄 DEBUG: Tables need data, entering detection block...`);
+        // ══════════════════════════════════════════════════════════════════
         
         // If either field is empty, click the chart points
         if (tableStatus.needsFirstClick || tableStatus.needsLastClick) {
         console.log('  ⚠️  Tables need data, clicking chart points...\n');
         
-        // 🎯 Track whether user made visual corrections (used to skip auto-clicking)
-        let userMadeCorrections = false;
-
         // NETWORK INTERCEPTION APPROACH (Replaces Highcharts DOM access)
         console.log('  ⏳ Waiting for chart data from network...');
-        console.log('  🔍 DEBUG: About to call waitForChartData()...');
         try {
           // Wait for the API response to be captured
           const chartData = await waitForChartData(networkData, 10000);
-          console.log('  ✅ Chart data successfully captured from network!');
-          console.log('  🔍 DEBUG: chartData keys:', chartData ? Object.keys(chartData).slice(0, 5) : 'null');
-          console.log('');
+          console.log('  ✅ Chart data successfully captured from network!\n');
           
           // 🎨 CRITICAL FIX: Wait for Highcharts to render the visual SVG graph
           console.log('  ⏳ Waiting for chart SVG to render...');
@@ -3712,18 +1841,17 @@ async function main() {
             // Small safety buffer to ensure animation completes
             await page.waitForTimeout(500);
             console.log('  ✅ Chart render animation complete\n');
+            
+            // NOTE: Visual confirmation is now handled BEFORE this point via handleVisualConfirmation()
+            // at line ~1728 - the single entry point handles everything
+            
           } catch (svgWaitError) {
             console.log(`  ⚠️  Chart SVG wait timeout: ${svgWaitError.message}`);
             console.log('  → Will attempt to continue anyway...\n');
           }
           
-          // Extract normalized data points and nodeId
-          console.log('  🔍 DEBUG: About to extract data points from chart data...');
-          const extractResult = extractDataPoints(chartData);
-          // Handle both new format {dataPoints, nodeId} and legacy format (just array)
-          const dataPoints = extractResult?.dataPoints || extractResult;
-          const nodeId = extractResult?.nodeId || null;
-          console.log(`  🔍 DEBUG: extractDataPoints returned ${dataPoints?.length || 0} points, nodeId=${nodeId}`);
+          // Extract normalized data points
+          const dataPoints = extractDataPoints(chartData);
           
           if (!dataPoints || dataPoints.length < 10) {
             console.log('  ⚠️  Insufficient data points for analysis');
@@ -3733,10 +1861,6 @@ async function main() {
             // Skip to next date (only if not at T-0)
             if (dayOffset > 0) {
               console.log(`     ⏭️  Moving to next date (T-${dayOffset} → T-${dayOffset - 1})...`);
-
-              // Reset captured data to allow fresh capture for new date
-              resetCapturedData(networkData);
-
               const nextClicked = await page.evaluate(() => {
                 const nextButton = document.querySelector('button[aria-label="다음 기간"]');
                 if (nextButton) {
@@ -3745,7 +1869,7 @@ async function main() {
                 }
                 return false;
               });
-
+              
               if (nextClicked) {
                 // ⚡ FAST: Brief wait for date picker UI
                 await page.waitForTimeout(300);
@@ -3755,7 +1879,6 @@ async function main() {
           }
           
           console.log(`  📊 Analyzing ${dataPoints.length} data points for irrigation events...`);
-          console.log('  🔍 DEBUG: Starting irrigation detection algorithm...');
           
           // 🔬 ROLLING WINDOW & LOCAL MINIMUM Algorithm
           // Purpose: Catch gentle sustained rises + Find absolute valley bottom
@@ -3864,38 +1987,10 @@ async function main() {
           console.log(`  ✅ Found ${uniqueEvents.length} irrigation events`);
           
           if (uniqueEvents.length === 0) {
-            console.log('     → No irrigation detected for this date');
-            console.log('     → Overlay will NOT appear (nothing to review)');
-            console.log('     → Creating "no irrigation" report...\n');
-            
-            // Create report for "checked but found no irrigation"
-            await recordNoIrrigationReport(
-              { 
-                name: currentFarm.name, 
-                id: currentFarm.farmId 
-              },
-              { 
-                date: dateString,
-                index: dateIdx
-              },
-              {
-                pointCount: dataPoints.length,
-                yRange: { min: minY, max: maxY, span: yRange },
-                threshold: SURGE_THRESHOLD
-              }
-            );
-            
-            // Update statistics
-            runStats.noIrrigationCount++;
-            runStats.datesProcessed++;
-            
+            console.log('     → No irrigation detected for this date\n');
             // Skip to next date (only if not at T-0)
             if (dayOffset > 0) {
               console.log(`     ⏭️  Moving to next date (T-${dayOffset} → T-${dayOffset - 1})...`);
-
-              // Reset captured data to allow fresh capture for new date
-              resetCapturedData(networkData);
-
               const nextClicked = await page.evaluate(() => {
                 const nextButton = document.querySelector('button[aria-label="다음 기간"]');
                 if (nextButton) {
@@ -3904,7 +1999,7 @@ async function main() {
                 }
                 return false;
               });
-
+              
               if (nextClicked) {
                 // ⚡ FAST: Brief wait for date picker UI
                 await page.waitForTimeout(300);
@@ -3955,161 +2050,10 @@ async function main() {
           console.log(`     → Last event at index ${lastEvent.index}`);
           console.log(`  🎯 Now attempting to click chart at these positions...\n`);
           
-          // ═══════════════════════════════════════════════════════════════════
-          // VISUAL CONFIRMATION MODE - Show overlay and wait for user input
-          // ═══════════════════════════════════════════════════════════════════
-          console.log('\n');
-          console.log('  ╔════════════════════════════════════════════════════════════════════╗');
-          console.log('  ║                                                                    ║');
-          console.log('  ║   👁️  VISUAL CONFIRMATION MODE - LOOK AT THE BROWSER WINDOW!      ║');
-          console.log('  ║                                                                    ║');
-          console.log('  ║   🔴 RED circle  = FIRST irrigation point (start)                 ║');
-          console.log('  ║   🔵 BLUE circle = LAST irrigation point (end)                    ║');
-          console.log('  ║                                                                    ║');
-          console.log('  ║   ➤ Press ENTER in browser to CONFIRM clicks                      ║');
-          console.log('  ║   ➤ Press ESC in browser to SKIP this date                        ║');
-          console.log('  ║                                                                    ║');
-          console.log('  ╚════════════════════════════════════════════════════════════════════╝');
-          console.log('\n');
-          
-          console.log(`  CONFIG.visualConfirmationMode = ${CONFIG.visualConfirmationMode}`);
-          
-          if (CONFIG.visualConfirmationMode) {
-            console.log('  ✅ Visual confirmation mode is ENABLED - showing overlay now...');
-            
-            // Calculate screen coordinates for the overlay
-            console.log(`  🔍 Calculating screen coords for indices ${firstEvent.index} and ${lastEvent.index}...`);
-            
-            let screenCoords = null;
-            try {
-              // Pass total data points for SVG fallback calculation
-              const totalPoints = dataPoints ? dataPoints.length : 1000;
-              screenCoords = await calculateScreenCoordinates(page, firstEvent.index, lastEvent.index, totalPoints);
-              console.log('  📍 Screen coords result:', JSON.stringify(screenCoords, null, 2));
-            } catch (coordError) {
-              console.log(`  ❌ ERROR calculating coordinates: ${coordError.message}`);
-            }
-            
-            if (screenCoords && screenCoords.first && screenCoords.last) {
-              console.log('  ✅ Screen coordinates calculated successfully!');
-              
-              // Apply learned adjustments from training data
-              const adjustedFirst = applyLearnedAdjustments(
-                screenCoords.first.screenX, 
-                screenCoords.last.screenX
-              );
-              
-              // Prepare overlay data with adjusted screen positions
-              const overlayData = {
-                first: {
-                  ...screenCoords.first,
-                  screenX: adjustedFirst.firstScreenX, // Use adjusted X
-                  time: firstEvent.time || 'N/A'
-                },
-                last: {
-                  ...screenCoords.last,
-                  screenX: adjustedFirst.lastScreenX, // Use adjusted X
-                  time: lastEvent.time || 'N/A'
-                },
-                nodeId: nodeId // Pass nodeId for API call
-              };
-              
-              console.log('  👁️  SHOWING OVERLAY NOW - Check the browser window!');
-              console.log(`     → FIRST point: ${overlayData.first.time} at (${Math.round(overlayData.first.screenX)}, ${Math.round(overlayData.first.screenY)})`);
-              console.log(`     → LAST point: ${overlayData.last.time} at (${Math.round(overlayData.last.screenX)}, ${Math.round(overlayData.last.screenY)})`);
-              if (adjustedFirst.adjustmentsApplied) {
-                console.log(`     → 🧠 Learned adjustments applied: first${adjustedFirst.bias.firstIndexBias >= 0 ? '+' : ''}${adjustedFirst.bias.firstIndexBias}px, last${adjustedFirst.bias.lastIndexBias >= 0 ? '+' : ''}${adjustedFirst.bias.lastIndexBias}px`);
-              }
-              
-              // Get training stats to display in overlay
-              const trainingStats = getTrainingStats();
-              
-              // Show overlay and wait for user confirmation
-              let userConfirmed = false;
-              try {
-                userConfirmed = await showClickOverlay(page, overlayData, trainingStats);
-                console.log(`  🔍 User confirmation result: ${userConfirmed ? 'CONFIRMED' : 'SKIPPED'}`);
-              } catch (overlayError) {
-                console.log(`  ❌ ERROR showing overlay: ${overlayError.message}`);
-                console.log('     → Proceeding without visual confirmation');
-              }
-              
-              // If user confirmed, check for corrections and save them
-              if (userConfirmed) {
-                try {
-                  const corrections = await getCorrectedPositions(page);
-
-                  if (corrections.wasCorrected) {
-                    userMadeCorrections = true;
-                    console.log('  🎯 User made corrections - saving to training data...');
-
-                    // Save the correction
-                    saveCorrection(
-                      {
-                        firstScreenX: corrections.original.first?.screenX,
-                        lastScreenX: corrections.original.last?.screenX,
-                        firstIndex: firstEvent.index,
-                        lastIndex: lastEvent.index
-                      },
-                      {
-                        firstScreenX: corrections.corrected.first?.screenX,
-                        lastScreenX: corrections.corrected.last?.screenX
-                      },
-                      {
-                        totalDataPoints: dataPoints ? dataPoints.length : 0,
-                        chartWidth: screenCoords.first?.screenX && screenCoords.last?.screenX
-                          ? Math.abs(screenCoords.last.screenX - screenCoords.first.screenX)
-                          : 0
-                      }
-                    );
-                  } else {
-                    console.log('  ✓ No corrections made - prediction was accurate');
-                  }
-                } catch (corrError) {
-                  console.log(`  ⚠️ Could not save correction: ${corrError.message}`);
-                }
-              }
-
-              if (!userConfirmed) {
-                console.log('  ⏭️  User skipped this date, moving to next...\n');
-
-                // Skip to next date (only if not at T-0)
-                if (dayOffset > 0) {
-                  // Reset captured data to allow fresh capture for new date
-                  resetCapturedData(networkData);
-
-                  const nextClicked = await page.evaluate(() => {
-                    const nextButton = document.querySelector('button[aria-label="다음 기간"]');
-                    if (nextButton) {
-                      nextButton.click();
-                      return true;
-                    }
-                    return false;
-                  });
-
-                  if (nextClicked) {
-                    await page.waitForTimeout(300);
-                  }
-                }
-                continue; // Skip to next iteration
-              }
-
-              // 🎯 CRITICAL FIX: If user made visual corrections, skip auto-clicking!
-              // The user's manually dragged times are already saved - don't overwrite them
-              if (userMadeCorrections) {
-                console.log('  ✅ User confirmed WITH manual corrections');
-                console.log('  ⏭️  Skipping auto-click (using corrected times from visual overlay)\n');
-              } else {
-                console.log('  ✅ User confirmed WITHOUT corrections, proceeding with auto-click...\n');
-              }
-            } else {
-              console.log('  ⚠️ Could not calculate screen coordinates for overlay');
-              console.log('     → screenCoords:', JSON.stringify(screenCoords));
-              console.log('     → Proceeding without visual confirmation (will auto-click)\n');
-            }
-          } else {
-            console.log('  ⏭️  Visual confirmation mode is DISABLED, auto-clicking...\n');
-          }
+          // TODO: Actually click the chart points using the indices
+          // For now, we've successfully analyzed the data!
+          // The clicking logic using Highcharts API can be kept if it works,
+          // or we can implement coordinate-based clicking
           
         } catch (timeoutError) {
           console.log('  ⚠️  Network data capture timed out after 10 seconds');
@@ -4120,10 +2064,6 @@ async function main() {
           // Skip to next date if data unavailable (only if not at T-0)
           if (dayOffset > 0) {
             console.log(`     ⏭️  Moving to next date (T-${dayOffset} → T-${dayOffset - 1})...`);
-
-            // Reset captured data to allow fresh capture for new date
-            resetCapturedData(networkData);
-
             const nextClicked = await page.evaluate(() => {
               const nextButton = document.querySelector('button[aria-label="다음 기간"]');
               if (nextButton) {
@@ -4132,7 +2072,7 @@ async function main() {
               }
               return false;
             });
-
+            
             if (nextClicked) {
               // ⚡ FAST: Brief wait for date picker UI
               await page.waitForTimeout(300);
@@ -4141,16 +2081,9 @@ async function main() {
           continue; // Skip to next date
         }
 
-        // 🎯 CRITICAL FIX: Skip chart auto-clicking if user made visual corrections
-        // The user's manually dragged times are already saved in window.__irrigationCorrected
-        // Auto-clicking would overwrite those correct values with predicted (wrong) values
-        if (!userMadeCorrections) {
-          // User either didn't use visual confirmation OR confirmed without making changes
-          // Proceed with normal auto-clicking flow
-
         const clickResults = await page.evaluate((needs) => {
           const results = [];
-
+          
           // Log to browser console for debugging
           console.log('🔍 [BROWSER] Starting irrigation point detection...');
           console.log('🔍 [BROWSER] Needs first click:', needs.needsFirstClick);
@@ -4160,23 +2093,8 @@ async function main() {
           // METHOD 1: Try Highcharts API (Most Accurate)
           // ============================================
           let chart = null;
-          
-          // Debug: Check what's available
-          console.log('🔬 [DEBUG] window.Highcharts exists:', !!window.Highcharts);
-          console.log('🔬 [DEBUG] window.Highcharts.charts exists:', !!(window.Highcharts && window.Highcharts.charts));
           if (window.Highcharts && window.Highcharts.charts) {
-            console.log('🔬 [DEBUG] Highcharts.charts array length:', window.Highcharts.charts.length);
-            console.log('🔬 [DEBUG] Highcharts.charts contents:', window.Highcharts.charts.map((c, i) => `[${i}]: ${c ? 'chart' : 'undefined'}`).join(', '));
             chart = window.Highcharts.charts.find(c => c !== undefined);
-          }
-          
-          if (chart) {
-            console.log('🔬 [DEBUG] chart found:', !!chart);
-            console.log('🔬 [DEBUG] chart.series exists:', !!(chart && chart.series));
-            console.log('🔬 [DEBUG] chart.series[0] exists:', !!(chart && chart.series && chart.series[0]));
-            if (chart.series && chart.series[0]) {
-              console.log('🔬 [DEBUG] series[0].data.length:', chart.series[0].data.length);
-            }
           }
           
           if (chart && chart.series && chart.series[0]) {
@@ -4187,227 +2105,64 @@ async function main() {
           const dataPoints = series.data;
           
             if (dataPoints.length > 0) {
-              // ═══════════════════════════════════════════════════════════════
-              // HSSP ALGORITHM - Rolling Window Valley Detection
-              // This replaces the simple "drop > 5" detection with proper:
-              // 1. Rolling window analysis (compare with N points ago)
-              // 2. Valley traceback (find lowest point before rise)
-              // 3. Time filtering (only 07:00-17:00)
-              // 4. Debouncing (minimum separation between events)
-              // ═══════════════════════════════════════════════════════════════
-              
-              console.log('🔬 [HSSP] Starting HSSP Algorithm (Improved)...');
-              
-              // HSSP PARAMETERS - TUNED FOR REAL IRRIGATION DETECTION
-              // The algorithm looks for RISES in moisture (irrigation adding water)
-              // and traces back to find the VALLEY (lowest point before rise)
-              const HSSP = {
-                SURGE_WINDOW: 10,             // Compare with 10 data points ago (more stable)
-                SURGE_THRESHOLD_PERCENT: 0.05, // 5% of Y range (was 1.5% - too sensitive)
-                SURGE_THRESHOLD_MIN: 0.1,     // Absolute minimum threshold (was 0.02 - caught noise)
-                MIN_RISE_ABSOLUTE: 0.05,      // Minimum absolute rise to consider (NEW)
-                LOOKBACK_WINDOW: 30,          // Look back 30 points for valley (was 20)
-                DEBOUNCE_POINTS: 60,          // Min 60 points between events (was 30 - ~1 hour)
-                DAYTIME_START: 7,             // Only 7:00 AM onwards
-                DAYTIME_END: 17,              // Only until 5:00 PM
-                MIN_VALLEY_DEPTH: 0.03        // Valley must be at least this much lower than surge (NEW)
-              };
-              
-              // Step 1: Calculate Y range for adaptive threshold
-              const yValues = dataPoints.map(p => p.y);
-              const maxY = Math.max(...yValues);
-              const minY = Math.min(...yValues);
-              const yRange = maxY - minY;
-              
-              // Use higher threshold: max of (5% of range) or (absolute minimum)
-              const surgeThreshold = Math.max(
-                HSSP.SURGE_THRESHOLD_MIN, 
-                yRange * HSSP.SURGE_THRESHOLD_PERCENT,
-                HSSP.MIN_RISE_ABSOLUTE
-              );
-              
-              // DEBUG: Log threshold calculation details
-              console.log(`🔬 [HSSP-DEBUG] Threshold calc: MIN=${HSSP.SURGE_THRESHOLD_MIN}, 5%ofRange=${(yRange * HSSP.SURGE_THRESHOLD_PERCENT).toFixed(4)}, absMin=${HSSP.MIN_RISE_ABSOLUTE}`);
-              console.log(`🔬 [HSSP-DEBUG] Final threshold=${surgeThreshold.toFixed(4)} - This might be TOO HIGH if range is small!`);
-              
-              // Check a sample of rises to see what values exist
-              let maxRiseFound = 0;
-              for (let i = HSSP.SURGE_WINDOW; i < Math.min(dataPoints.length, 200); i++) {
-                const rise = dataPoints[i].y - dataPoints[i - HSSP.SURGE_WINDOW].y;
-                if (rise > maxRiseFound) maxRiseFound = rise;
-              }
-              console.log(`🔬 [HSSP-DEBUG] Max rise in first 200 points: ${maxRiseFound.toFixed(4)} (threshold is ${surgeThreshold.toFixed(4)})`);
-              console.log(`🔬 [HSSP-DEBUG] Would any rise pass? ${maxRiseFound > surgeThreshold ? 'YES' : 'NO - THRESHOLD TOO HIGH!'}`);
-              
-              console.log(`🔬 [HSSP] Y range: ${minY.toFixed(2)} to ${maxY.toFixed(2)} (span: ${yRange.toFixed(2)})`);
-              console.log(`🔬 [HSSP] Surge threshold: ${surgeThreshold.toFixed(4)} (5% of range or min 0.1)`);
-              console.log(`🔬 [HSSP] Data points: ${dataPoints.length}`);
-              console.log(`🔬 [HSSP] Time filter: ${HSSP.DAYTIME_START}:00 - ${HSSP.DAYTIME_END}:00`);
-              
-              results.push({ message: `HSSP: Y range ${minY.toFixed(1)}-${maxY.toFixed(1)}, threshold ${surgeThreshold.toFixed(4)}` });
-              
-              // Step 2: Rolling window + valley traceback
-              const allEvents = [];
-              let lastEventIndex = -HSSP.DEBOUNCE_POINTS;
-              let surgesChecked = 0;
-              let surgesRejectedTime = 0;
-              let surgesRejectedRise = 0;
-              
-              for (let i = HSSP.SURGE_WINDOW; i < dataPoints.length - 5; i++) {
-                const currentVal = dataPoints[i].y;
-                const pastVal = dataPoints[i - HSSP.SURGE_WINDOW].y;
-                const rise = currentVal - pastVal;
+              // Find irrigation spikes (Y-value drops)
+          const spikes = [];
+          for (let i = 1; i < dataPoints.length; i++) {
+            const prevY = dataPoints[i - 1].y;
+            const currY = dataPoints[i].y;
+            const drop = prevY - currY;
+            
+                // Significant drop = irrigation event
+            if (drop > 5) {
+              spikes.push({
+                index: i,
+                    point: dataPoints[i],
+                    x: dataPoints[i].x,
+                    y: currY,
+                    plotX: dataPoints[i].plotX + chart.plotLeft,
+                    plotY: dataPoints[i].plotY + chart.plotTop,
+                drop: drop,
+                    time: dataPoints[i].category || dataPoints[i].x
+              });
+            }
+          }
+          
+              if (spikes.length > 0) {
+                results.push({ message: `Found ${spikes.length} irrigation spikes via API` });
                 
-                // Detect sustained rise (moisture going UP = irrigation)
-                if (rise > surgeThreshold && i > lastEventIndex + HSSP.DEBOUNCE_POINTS) {
-                  surgesChecked++;
-                  
-                  // VALLEY TRACEBACK: Find lowest point in lookback window
-                  let valleyIndex = i;
-                  let minVal = currentVal;
-                  const startSearch = Math.max(0, i - HSSP.LOOKBACK_WINDOW);
-                  
-                  for (let j = i; j >= startSearch; j--) {
-                    if (dataPoints[j].y <= minVal) {
-                      minVal = dataPoints[j].y;
-                      valleyIndex = j;
-                    }
-                  }
-                  
-                  // Calculate total rise from valley to current point
-                  const totalRise = currentVal - minVal;
-                  
-                  // TIME FILTER: Only 07:00-17:00
-                  const timestamp = dataPoints[valleyIndex].x;
-                  const eventDate = new Date(timestamp);
-                  const hour = eventDate.getHours();
-                  const minute = eventDate.getMinutes();
-                  const timeStr = `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
-                  
-                  // Check if time is within valid range
-                  const isValidTime = hour >= HSSP.DAYTIME_START && hour <= HSSP.DAYTIME_END;
-                  
-                  // Check if rise is significant enough
-                  const isSignificantRise = totalRise >= HSSP.MIN_VALLEY_DEPTH;
-                  
-                  console.log(`🔬 [HSSP] Checking surge at index ${i}: rise=${rise.toFixed(4)}, valley at ${timeStr}, totalRise=${totalRise.toFixed(4)}`);
-                  
-                  if (!isValidTime) {
-                    console.log(`🔬 [HSSP] ⏭️ REJECTED: ${timeStr} is outside ${HSSP.DAYTIME_START}:00-${HSSP.DAYTIME_END}:00`);
-                    surgesRejectedTime++;
-                    continue;
-                  }
-                  
-                  if (!isSignificantRise) {
-                    console.log(`🔬 [HSSP] ⏭️ REJECTED: totalRise ${totalRise.toFixed(4)} < min ${HSSP.MIN_VALLEY_DEPTH}`);
-                    surgesRejectedRise++;
-                    continue;
-                  }
-                  
-                  console.log(`🔬 [HSSP] ✅ ACCEPTED: Valley at ${timeStr} (index ${valleyIndex}), totalRise: ${totalRise.toFixed(4)}`);
-                  
-                  allEvents.push({
-                    index: valleyIndex,
-                    point: dataPoints[valleyIndex],
-                    x: dataPoints[valleyIndex].x,
-                    y: dataPoints[valleyIndex].y,
-                    plotX: dataPoints[valleyIndex].plotX + chart.plotLeft,
-                    plotY: dataPoints[valleyIndex].plotY + chart.plotTop,
-                    rise: totalRise,
-                    hour: hour,
-                    minute: minute,
-                    time: timeStr
-                  });
-                  
-                  lastEventIndex = valleyIndex;
-                  i = Math.max(i, valleyIndex + 15); // Skip forward to avoid double-detection
-                }
-              }
-              
-              console.log(`🔬 [HSSP] Surge check summary: ${surgesChecked} checked, ${surgesRejectedTime} rejected (time), ${surgesRejectedRise} rejected (rise too small)`);
-              results.push({ message: `HSSP: Checked ${surgesChecked} surges, rejected ${surgesRejectedTime} (time) + ${surgesRejectedRise} (rise)` });
-              
-              console.log(`🔬 [HSSP] Raw detections: ${allEvents.length} events`);
-              results.push({ message: `HSSP: ${allEvents.length} raw irrigation events detected` });
-              
-              // Step 3: De-duplicate events that are too close together
-              const uniqueEvents = [];
-              const minSeparation = dataPoints.length * 0.05; // 5% of data apart
-              
-              for (const event of allEvents) {
-                let isDuplicate = false;
+                const firstSpike = spikes[0];
+                const lastSpike = spikes[spikes.length - 1];
                 
-                for (let j = 0; j < uniqueEvents.length; j++) {
-                  const existing = uniqueEvents[j];
-                  
-                  if (Math.abs(event.index - existing.index) < minSeparation) {
-                    isDuplicate = true;
-                    // Keep the one with larger rise (more significant irrigation)
-                    if (event.rise > existing.rise) {
-                      uniqueEvents[j] = event;
-                      console.log(`🔬 [HSSP] Replaced duplicate: kept event at ${event.time} (larger rise)`);
-                    }
-                    break;
-                  }
-                }
-                
-                if (!isDuplicate) {
-                  uniqueEvents.push(event);
-                }
-              }
-              
-              // Sort by index (chronological order)
-              uniqueEvents.sort((a, b) => a.index - b.index);
-              
-              console.log(`🔬 [HSSP] Final events after de-duplication: ${uniqueEvents.length}`);
-              results.push({ message: `HSSP: ${uniqueEvents.length} final irrigation events (after de-dup)` });
-              
-              if (uniqueEvents.length > 0) {
-                // Log all detected events
-                uniqueEvents.forEach((evt, idx) => {
-                  console.log(`🔬 [HSSP] Event ${idx + 1}: ${evt.time} (index ${evt.index}, rise: ${evt.rise.toFixed(4)})`);
+              // Click first spike
+              if (needs.needsFirstClick) {
+                firstSpike.point.select(true, false);
+                firstSpike.point.firePointEvent('click');
+          results.push({ 
+                  action: '✅ API: Clicked FIRST spike', 
+                  x: Math.round(firstSpike.plotX), 
+                  y: Math.round(firstSpike.plotY),
+                  time: firstSpike.time
                 });
-                
-                const firstEvent = uniqueEvents[0];
-                const lastEvent = uniqueEvents[uniqueEvents.length - 1];
-                
-                results.push({ message: `HSSP: First=${firstEvent.time}, Last=${lastEvent.time}` });
-                
-                // Click first event (valley = irrigation START)
+              }
+              
+              // Click last spike (use a different approach to ensure it registers)
+              if (needs.needsLastClick) {
+                // Deselect first spike first
                 if (needs.needsFirstClick) {
-                  firstEvent.point.select(true, false);
-                  firstEvent.point.firePointEvent('click');
-                  results.push({ 
-                    action: '✅ HSSP: Clicked FIRST irrigation (valley)', 
-                    x: Math.round(firstEvent.plotX), 
-                    y: Math.round(firstEvent.plotY),
-                    time: firstEvent.time
-                  });
-                  console.log(`✅ [HSSP] Clicked FIRST irrigation at ${firstEvent.time}`);
+                  firstSpike.point.select(false, false);
                 }
                 
-                // Click last event
-                if (needs.needsLastClick) {
-                  // Deselect first event first
-                  if (needs.needsFirstClick) {
-                    firstEvent.point.select(false, false);
-                  }
-                  
-                  lastEvent.point.select(true, false);
-                  lastEvent.point.firePointEvent('click');
-                  results.push({
-                    action: '✅ HSSP: Clicked LAST irrigation (valley)', 
-                    x: Math.round(lastEvent.plotX), 
-                    y: Math.round(lastEvent.plotY),
-                    time: lastEvent.time
-                  });
-                  console.log(`✅ [HSSP] Clicked LAST irrigation at ${lastEvent.time}`);
-                }
+                lastSpike.point.select(true, false);
+                lastSpike.point.firePointEvent('click');
+          results.push({
+                  action: '✅ API: Clicked LAST spike', 
+                  x: Math.round(lastSpike.plotX), 
+                  y: Math.round(lastSpike.plotY),
+                  time: lastSpike.time
+                });
+              }
                 
                 return results;
-              } else {
-                console.log('🔬 [HSSP] No irrigation events found in valid time range (07:00-17:00)');
-                results.push({ message: 'HSSP: No irrigation events in valid time range' });
               }
             }
           }
@@ -4593,38 +2348,16 @@ async function main() {
             }
             
             // 2. Find END: Look forward to find where water level RECOVERS (after irrigation)
-            // First, find the LOWEST point (deepest drop) after the irrigation starts
             let endIndex = dropIndex;
-            let lowestYAfter = drop.y;  // Track the lowest point (highest Y value in screen coords)
-            let lowestIndex = dropIndex;
-
-            // Phase 1: Find the lowest point (deepest part of irrigation drop)
+            let highestYAfter = drop.y;
+            
             for (let j = dropIndex + 1; j < Math.min(finalCoords.length, dropIndex + 30); j++) {
               const currentY = smoothedY[j];
-              // In screen coordinates: higher Y = lower water level
-              if (currentY > lowestYAfter) {
-                lowestYAfter = currentY;
-                lowestIndex = j;
-              }
-            }
-
-            // Phase 2: From the lowest point, find where water level starts RECOVERING
-            // (Y value decreases = water level rises)
-            const recoveryThreshold = (lowestYAfter - drop.y) * 0.3; // 30% recovery
-            endIndex = lowestIndex; // Default to lowest point if no clear recovery
-
-            for (let j = lowestIndex + 1; j < Math.min(finalCoords.length, lowestIndex + 20); j++) {
-              const currentY = smoothedY[j];
-              // Check if water level has recovered significantly (Y decreased from lowest)
-              if (lowestYAfter - currentY > recoveryThreshold) {
+              // Find where water level is high again (recovered from irrigation)
+              if (currentY < highestYAfter) {
+                highestYAfter = currentY;
                 endIndex = j;
-                break;
               }
-            }
-
-            // If no clear recovery found, use the lowest point as end
-            if (endIndex === lowestIndex) {
-              endIndex = lowestIndex;
             }
             
             // Validate
@@ -4730,6 +2463,26 @@ async function main() {
           console.log(`   → FIRST (START): idx=${firstPoint.index} Screen(${Math.round(firstX)}, ${Math.round(firstY)}) SVG(${Math.round(firstPoint.x)}, ${Math.round(firstPoint.y)})`);
           console.log(`   → LAST (END): idx=${lastPoint.index} Screen(${Math.round(lastX)}, ${Math.round(lastY)}) SVG(${Math.round(lastPoint.x)}, ${Math.round(lastPoint.y)})`);
           
+          // Calculate time from X position (chart is typically 02:00 to 20:00)
+          const chartWidth = finalCoords[finalCoords.length - 1].x - finalCoords[0].x;
+          const startHour = 2; // 02:00
+          const endHour = 20;  // 20:00
+          const totalMinutes = (endHour - startHour) * 60; // 1080 minutes
+          
+          function calculateTimeFromX(svgX) {
+            const relativeX = svgX / chartWidth;
+            const minutesFromStart = Math.round(relativeX * totalMinutes);
+            const totalMinutesFromMidnight = startHour * 60 + minutesFromStart;
+            const hours = Math.floor(totalMinutesFromMidnight / 60);
+            const minutes = totalMinutesFromMidnight % 60;
+            return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
+          }
+          
+          const firstTime = calculateTimeFromX(firstPoint.x);
+          const lastTime = calculateTimeFromX(lastPoint.x);
+          
+          console.log(`   ⏰ Calculated times: FIRST=${firstTime}, LAST=${lastTime}`);
+          
           // Return coordinates for Playwright to click
           // ALWAYS click both points - they are different (START vs END)
           return {
@@ -4741,7 +2494,8 @@ async function main() {
               svgX: Math.round(firstPoint.x), 
               svgY: Math.round(firstPoint.y), 
               drop: firstPoint.dropAmount,
-              type: 'START'
+              type: 'START',
+              time: firstTime
             } : null,
             lastCoords: needs.needsLastClick ? { 
               x: Math.round(lastX), 
@@ -4749,7 +2503,8 @@ async function main() {
               svgX: Math.round(lastPoint.x), 
               svgY: Math.round(lastPoint.y), 
               drop: lastPoint.dropAmount,
-              type: 'END'
+              type: 'END',
+              time: lastTime
             } : null,
             singleEvent: false, // Never single - we have START and END
             separationPercent: Math.round(separationPercent),
@@ -4759,8 +2514,8 @@ async function main() {
             return results;
           }, tableStatus);
           
-        // Check if HSSP detection failed
-        if (clickResults.error) {
+        // Check if HSSP detection failed - but DON'T skip if visual confirmation is enabled!
+        if (clickResults.error && !CONFIG.visualConfirmationMode) {
           console.log(`     ⚠️  HSSP detection failed: ${clickResults.error}`);
           console.log(`        → No irrigation points found for this date`);
           console.log(`        → Tables will remain empty\n`);
@@ -4783,10 +2538,6 @@ async function main() {
           // Move to next date (only if not at T-0)
           if (dayOffset > 0) {
             console.log(`     ⏭️  Moving to next date (T-${dayOffset} → T-${dayOffset - 1})...`);
-
-            // Reset captured data to allow fresh capture for new date
-            resetCapturedData(networkData);
-
             const nextClicked = await page.evaluate(() => {
               const nextButton = document.querySelector('button[aria-label="다음 기간"]');
               if (nextButton) { nextButton.click(); return true; }
@@ -4801,6 +2552,12 @@ async function main() {
           continue; // Skip to next date
         }
         
+        // If detection failed BUT visual confirmation is enabled, log it and continue to overlay
+        if (clickResults.error && CONFIG.visualConfirmationMode) {
+          console.log(`     ⚠️  HSSP detection failed: ${clickResults.error}`);
+          console.log(`     👁️  But VISUAL CONFIRMATION is ON - showing overlay for manual input!`);
+        }
+        
         // Display debug info
         if (clickResults.debug) {
           clickResults.debug.forEach(msg => {
@@ -4812,6 +2569,9 @@ async function main() {
         if (clickResults.separationPercent !== undefined) {
           console.log(`     ✅ First (START) and Last (END) separated by ${clickResults.separationPercent}% of chart`);
         }
+        
+        // NOTE: Visual confirmation is now handled BEFORE detection via handleVisualConfirmation()
+        // at line ~1728 - the single entry point handles everything
         
         // ═══════════════════════════════════════════════════════════════════════
         // 🎓 F8 TRAINING MODE: Pause and allow manual point correction
@@ -5206,24 +2966,13 @@ async function main() {
         
         // ⚡ FAST: Brief wait for UI update
         await page.waitForTimeout(500);
-
+        
         // Take screenshot after clicking
         const step6Screenshot = path.join(CONFIG.screenshotDir, `farm-${farmIdx + 1}-date-${dateIdx}-after-clicks-${timestamp}.png`);
         await page.screenshot({ path: step6Screenshot, fullPage: true });
         console.log(`     📸 Screenshot: ${step6Screenshot}\n`);
-
-        } else {
-          // User made visual corrections - skip auto-clicking
-          console.log('     ⏭️  Chart auto-clicking SKIPPED (user made visual corrections)');
-          console.log('     ✅ Using corrected times from visual overlay instead\n');
-
-          // Take screenshot showing the corrected state
-          const step6Screenshot = path.join(CONFIG.screenshotDir, `farm-${farmIdx + 1}-date-${dateIdx}-after-visual-correction-${timestamp}.png`);
-          await page.screenshot({ path: step6Screenshot, fullPage: true });
-          console.log(`     📸 Screenshot: ${step6Screenshot}\n`);
-        }
-
-        // Extract final table values (happens whether auto-clicked or manually corrected)
+        
+        // Extract final table values
         console.log('     📊 Extracting irrigation data from tables...');
       
       // ⚡ FAST: Extract data immediately
@@ -5231,70 +2980,43 @@ async function main() {
         const results = {
           firstIrrigationTime: null,
           lastIrrigationTime: null,
-          debug: [],
-          source: 'unknown'
+          debug: []
         };
-
+        
         console.log('📊 [BROWSER] Extracting irrigation time data from tables...');
-
-        // ⭐ PRIORITY: Check if visual confirmation overlay set corrected times
-        if (window.__irrigationCorrected) {
-          console.log('🔍 [BROWSER] Found visual confirmation corrected times');
-
-          if (window.__irrigationCorrected.firstTime) {
-            results.firstIrrigationTime = window.__irrigationCorrected.firstTime;
-            results.source = 'visual-overlay-first';
-            results.debug.push(`✅ Using corrected FIRST time from overlay: "${results.firstIrrigationTime}"`);
-            console.log(`✅ [BROWSER] Using corrected FIRST time from overlay: "${results.firstIrrigationTime}"`);
-          }
-
-          if (window.__irrigationCorrected.lastTime) {
-            results.lastIrrigationTime = window.__irrigationCorrected.lastTime;
-            results.source = results.source === 'visual-overlay-first' ? 'visual-overlay-both' : 'visual-overlay-last';
-            results.debug.push(`✅ Using corrected LAST time from overlay: "${results.lastIrrigationTime}"`);
-            console.log(`✅ [BROWSER] Using corrected LAST time from overlay: "${results.lastIrrigationTime}"`);
-          }
-        } else {
-          console.log('ℹ️ [BROWSER] No visual confirmation data found, using fallback strategies');
-        }
-
-        // 📝 FALLBACK: If no corrected times from overlay, read from input fields
-        if (!results.firstIrrigationTime || !results.lastIrrigationTime) {
-          // Strategy 1: Look for time input fields (type="time")
-          const timeInputs = Array.from(document.querySelectorAll('input[type="time"]'));
-          results.debug.push(`Found ${timeInputs.length} time input fields`);
-          console.log(`📊 [BROWSER] Found ${timeInputs.length} time input fields`);
-
-          // For each time input, look backwards in the DOM to find its label
-          timeInputs.forEach((input, idx) => {
-            const value = input.value;
-            results.debug.push(`Time input ${idx + 1}: value="${value || 'EMPTY'}"`);
-
-            // Find the parent container
-            let container = input.closest('div');
-            if (container) {
-              // Look for text content in the same container or its siblings
-              const containerText = container.textContent || '';
-              results.debug.push(`Container text: "${containerText.substring(0, 50)}..."`);
-
-              // Check if this is the "first irrigation time" field and not already set
-              if ((containerText.includes('첫 급액') || containerText.includes('첫급액')) && !results.firstIrrigationTime) {
-                results.firstIrrigationTime = value;
-                results.source = results.source === 'unknown' ? 'input-first' : results.source + '+input-first';
-                results.debug.push(`📝 Fallback FIRST time from input: "${value}"`);
-                console.log(`📝 [BROWSER] Fallback FIRST time from input: "${value}"`);
-              }
-              // Check if this is the "last irrigation time" field and not already set
-              else if ((containerText.includes('마지막 급액') || containerText.includes('마지막급액')) && !results.lastIrrigationTime) {
-                results.lastIrrigationTime = value;
-                results.source = results.source === 'unknown' ? 'input-last' : results.source + '+input-last';
-                results.debug.push(`📝 Fallback LAST time from input: "${value}"`);
-                console.log(`📝 [BROWSER] Fallback LAST time from input: "${value}"`);
-              }
+        
+        // Strategy 1: Look for time input fields (type="time")
+        const timeInputs = Array.from(document.querySelectorAll('input[type="time"]'));
+        results.debug.push(`Found ${timeInputs.length} time input fields`);
+        console.log(`📊 [BROWSER] Found ${timeInputs.length} time input fields`);
+        
+        // For each time input, look backwards in the DOM to find its label
+        timeInputs.forEach((input, idx) => {
+          const value = input.value;
+          results.debug.push(`Time input ${idx + 1}: value="${value || 'EMPTY'}"`);
+          
+          // Find the parent container
+          let container = input.closest('div');
+          if (container) {
+            // Look for text content in the same container or its siblings
+            const containerText = container.textContent || '';
+            results.debug.push(`Container text: "${containerText.substring(0, 50)}..."`);
+            
+            // Check if this is the "first irrigation time" field
+            if (containerText.includes('첫 급액') || containerText.includes('첫급액')) {
+              results.firstIrrigationTime = value;
+              results.debug.push(`✅ Matched FIRST time: "${value}"`);
+              console.log(`✅ [BROWSER] Found FIRST irrigation time: "${value}"`);
             }
-          });
-        }
-
+            // Check if this is the "last irrigation time" field
+            else if (containerText.includes('마지막 급액') || containerText.includes('마지막급액')) {
+              results.lastIrrigationTime = value;
+              results.debug.push(`✅ Matched LAST time: "${value}"`);
+              console.log(`✅ [BROWSER] Found LAST irrigation time: "${value}"`);
+            }
+          }
+        });
+        
         // If still not found, fallback to generic search
         if (!results.firstIrrigationTime || !results.lastIrrigationTime) {
           results.debug.push('Trying fallback strategy...');
@@ -5302,11 +3024,11 @@ async function main() {
           const allText = Array.from(document.querySelectorAll('td, div, span, p'));
           allText.forEach((elem, idx) => {
           const text = elem.textContent.trim();
-
+          
           // If we find the label
           if (text.includes('구역 1 첫 급액') && text.includes('시간')) {
             results.debug.push(`Found first label: "${text}"`);
-
+            
             // Look in siblings, parent, or nearby elements
             const parent = elem.parentElement;
             if (parent) {
@@ -5314,56 +3036,52 @@ async function main() {
               siblings.forEach(sib => {
                 const sibText = sib.textContent.trim();
                 if (sibText.match(/\d{2}:\d{2}/) && !sibText.includes('급액')) {
-                  if (!results.firstIrrigationTime) {
-                    results.firstIrrigationTime = sibText;
-                    results.debug.push(`Found first time in sibling: "${sibText}"`);
-                  }
+                  results.firstIrrigationTime = sibText;
+                  results.debug.push(`Found first time in sibling: "${sibText}"`);
                 }
               });
             }
-
+            
             // Try next element
             const next = allText[idx + 1];
-            if (next && next.textContent.match(/\d{2}:\d{2}/) && !results.firstIrrigationTime) {
+            if (next && next.textContent.match(/\d{2}:\d{2}/)) {
               results.firstIrrigationTime = next.textContent.trim();
               results.debug.push(`Found first time in next element: "${next.textContent.trim()}"`);
             }
           }
-
+          
           if (text.includes('구역 1 마지막 급액') && text.includes('시간')) {
             results.debug.push(`Found last label: "${text}"`);
-
+            
             const parent = elem.parentElement;
             if (parent) {
               const siblings = Array.from(parent.children);
               siblings.forEach(sib => {
                 const sibText = sib.textContent.trim();
                 if (sibText.match(/\d{2}:\d{2}/) && !sibText.includes('급액')) {
-                  if (!results.lastIrrigationTime) {
-                    results.lastIrrigationTime = sibText;
-                    results.debug.push(`Found last time in sibling: "${sibText}"`);
-                  }
+                  results.lastIrrigationTime = sibText;
+                  results.debug.push(`Found last time in sibling: "${sibText}"`);
                 }
               });
             }
-
+            
             const next = allText[idx + 1];
-            if (next && next.textContent.match(/\d{2}:\d{2}/) && !results.lastIrrigationTime) {
+            if (next && next.textContent.match(/\d{2}:\d{2}/)) {
               results.lastIrrigationTime = next.textContent.trim();
               results.debug.push(`Found last time in next element: "${next.textContent.trim()}"`);
             }
           }
           }); // End forEach
-
+          
           // Strategy 3: If still not found, look for ANY elements with time format in the right panel
           if (!results.firstIrrigationTime || !results.lastIrrigationTime) {
             const timeElements = allText.filter(elem => {
               const text = elem.textContent.trim();
               return text.match(/^\d{2}:\d{2}$/);
             });
-
+            
             results.debug.push(`Found ${timeElements.length} elements with time format`);
-
+            
             if (timeElements.length >= 2) {
               // Assume first time-format element is "첫 급액시간"
               if (!results.firstIrrigationTime) {
@@ -5378,37 +3096,18 @@ async function main() {
             }
           } // End Strategy 3 if block
         } // End fallback if block
-
+        
         console.log('📋 [BROWSER] Extraction complete:');
-        console.log(`   → Source: ${results.source}`);
         console.log(`   → First time: ${results.firstIrrigationTime || 'NOT FOUND'}`);
         console.log(`   → Last time: ${results.lastIrrigationTime || 'NOT FOUND'}`);
-
+        
         return results;
       });
       
         console.log(`  → Debug info: ${finalData.debug.join(' | ')}`);
-        console.log(`  → Data source: ${finalData.source || 'unknown'}`);
         console.log(`  → 첫 급액시간 1: ${finalData.firstIrrigationTime || 'NOT FOUND'}`);
-        console.log(`  → 마지막 급액시간 1: ${finalData.lastIrrigationTime || 'NOT FOUND'}`);
-
-        // 🔍 Verification: Log data source and warn if unexpected
-        if (finalData.source && finalData.source.includes('visual-overlay')) {
-          console.log(`  ✅ Using corrected times from visual confirmation overlay`);
-        } else if (finalData.source && finalData.source.includes('input')) {
-          if (userMadeCorrections) {
-            console.log(`  ⚠️  WARNING: Expected visual overlay data but got input fields!`);
-            console.log(`  → User made corrections but overlay data was not found`);
-            console.log(`  → This may indicate the corrections were not saved properly`);
-          } else {
-            console.log(`  ✅ Using times from input fields (auto-click or pre-filled)`);
-          }
-        } else {
-          console.log(`  ❌ WARNING: Data source unknown! Times may be incorrect.`);
-          console.log(`  → source value: "${finalData.source}"`);
-        }
-        console.log('');
-
+        console.log(`  → 마지막 급액시간 1: ${finalData.lastIrrigationTime || 'NOT FOUND'}\n`);
+        
         // Add this date's data to collection
         const dateData = {
           date: displayedDate,
@@ -5453,30 +3152,9 @@ async function main() {
         mode: CONFIG.chartLearningMode ? 'learning' : 'normal'
       });
       
-      // ⏭️ Move to next date using button (T-5 → T-4 → ... → T-0)
-      // URL date parameter does NOT work - must use button clicks
+      // ⏭️ Move to next date using the dateNavigator module
       if (dayOffset > 0) {
-        console.log(`     ⏭️  Moving to next date (T-${dayOffset} → T-${dayOffset - 1})...`);
-
-        // Reset captured data to allow fresh capture for new date
-        resetCapturedData(networkData);
-
-        const nextClicked = await page.evaluate(() => {
-          const nextButton = document.querySelector('button[aria-label="다음 기간"]');
-          if (nextButton) {
-            nextButton.click();
-            return true;
-          }
-          return false;
-        });
-
-        if (nextClicked) {
-          await page.waitForTimeout(800);
-          await waitForPageReady(page, { waitForChart: true });
-          console.log(`     ✅ Advanced to next date`);
-        } else {
-          console.log(`     ⚠️  Next button not found - may already be at T-0`);
-        }
+        await advanceToNextDate(page);
       } else {
         console.log(`     ✅ Completed T-0 (today) - all dates done for this farm`);
       }
@@ -5510,7 +3188,7 @@ async function main() {
       manager: CONFIG.targetName,
       dateRange: {
         description: '5 days ago to today',
-        totalDays: 6, // Fixed: was using undefined totalDaysToCheck
+        totalDays: totalDaysToCheck,
         method: 'Previous/Next period buttons'
       },
       totalFarms: allFarmData.length,
@@ -5596,14 +3274,7 @@ async function main() {
       console.log(`   → Farms: ${runStats.farmsCompleted}/${runStats.totalFarmsTargeted}`);
       console.log(`   → Charts Clicked: ${runStats.chartsClicked}`);
       console.log(`   → Success Rate: ${runStats.successRate}%`);
-      console.log(`   → Duration: ${runStats.duration}s`);
-      console.log(``);
-      console.log(`   📊 Processing Results:`);
-      console.log(`      ✅ Irrigation detected: ${runStats.successCount} dates`);
-      console.log(`      ⚠️  No irrigation found: ${runStats.noIrrigationCount} dates`);
-      console.log(`      ⏭️  Skipped/Already sent: ${runStats.skipCount} dates`);
-      console.log(`      ❌ Errors: ${runStats.errorCount} dates`);
-      console.log(`      📁 Total dates checked: ${runStats.datesProcessed} dates\n`);
+      console.log(`   → Duration: ${runStats.duration}s\n`);
       
       if (dashboard) {
         dashboard.log(`Run stats: ${runStats.farmsCompleted} farms, ${runStats.chartsClicked} clicks, ${runStats.successRate}% success`, 'success');
@@ -5663,6 +3334,20 @@ main().catch(error => {
     globalDashboard.log(`Fatal error: ${error.message}`, 'error');
     globalDashboard.updateStatus('❌ Fatal Error', 'error');
   }
+  closeExecutionLog();
   process.exit(1);
+});
+
+// Handle graceful shutdown
+process.on('SIGINT', () => {
+  console.log('\n\n⚠️ Received SIGINT - Closing execution log...');
+  closeExecutionLog();
+  process.exit(0);
+});
+
+process.on('SIGTERM', () => {
+  console.log('\n\n⚠️ Received SIGTERM - Closing execution log...');
+  closeExecutionLog();
+  process.exit(0);
 });
 

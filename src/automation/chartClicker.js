@@ -5,7 +5,7 @@
  * Focuses input fields and performs precise chart clicks
  */
 
-import { log } from './utils.js';
+import { log } from '../utils.js';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // 🖱️ CHART CLICKING OPERATIONS

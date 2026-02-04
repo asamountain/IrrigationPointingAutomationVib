@@ -438,22 +438,20 @@ function triggerHighchartsClick(finalX, markerType) {
  * Input 1 = 마지막 급액 시간 (Last irrigation time) -> BLUE bar
  */
 function updateTimeInput(markerType, timeStr) {
-  debugLog('updateTimeInput', `CALLED with markerType="${markerType}", timeStr="${timeStr}"`);
+  console.log(`%c[BROWSER] 🎯 updateTimeInput() INDEX-BASED VERSION 2.0`, 'color: #00FF00; font-weight: bold; font-size: 14px;');
+  console.log(`[DEBUG] [updateTimeInput] ═══════════════════════════════════════`);
+  console.log(`[DEBUG] [updateTimeInput] CALLED with markerType="${markerType}", timeStr="${timeStr}"`);
   
   // Get ALL time inputs on the page
   const allTimeInputs = document.querySelectorAll('input[type="time"]');
   
-  debugLog('updateTimeInput', `Found ${allTimeInputs.length} time inputs`, {
-    inputs: Array.from(allTimeInputs).map((input, i) => ({
-      index: i,
-      currentValue: input.value,
-      className: input.className,
-      parentText: input.parentElement?.textContent?.substring(0, 50)
-    }))
-  });
+  const inputsInfo = Array.from(allTimeInputs).map((input, i) => 
+    `input[${i}]: value="${input.value}", class="${input.className}"`
+  ).join(' | ');
+  console.log(`[DEBUG] [updateTimeInput] Found ${allTimeInputs.length} time inputs: ${inputsInfo}`);
   
   if (allTimeInputs.length < 2) {
-    debugLog('updateTimeInput', `ERROR: Expected 2 inputs, found ${allTimeInputs.length}`);
+    console.log(`[DEBUG] [updateTimeInput] ❌ ERROR: Expected 2 inputs, found ${allTimeInputs.length}`);
     return;
   }
   
@@ -464,23 +462,23 @@ function updateTimeInput(markerType, timeStr) {
   if (markerType === 'first') {
     targetInput = allTimeInputs[0];
     targetIndex = 0;
-    debugLog('updateTimeInput', `🔴 RED bar -> Will update input[0] ONLY`);
+    console.log(`[DEBUG] [updateTimeInput] 🔴 RED bar -> Will update input[0] ONLY`);
   }
   // BLUE bar (last) -> ONLY update input index 1 (마지막 급액 시간)
   else if (markerType === 'last') {
     targetInput = allTimeInputs[1];
     targetIndex = 1;
-    debugLog('updateTimeInput', `🔵 BLUE bar -> Will update input[1] ONLY`);
+    console.log(`[DEBUG] [updateTimeInput] 🔵 BLUE bar -> Will update input[1] ONLY`);
   }
   
   if (targetInput) {
     const oldValue = targetInput.value;
-    debugLog('updateTimeInput', `BEFORE triggerReactUpdate: input[${targetIndex}] value = "${oldValue}"`);
+    console.log(`[DEBUG] [updateTimeInput] BEFORE: input[${targetIndex}] = "${oldValue}"`);
     
     // Log the other input's value to check if it changes
     const otherIndex = targetIndex === 0 ? 1 : 0;
     const otherValueBefore = allTimeInputs[otherIndex]?.value;
-    debugLog('updateTimeInput', `OTHER input[${otherIndex}] value BEFORE = "${otherValueBefore}" (should NOT change)`);
+    console.log(`[DEBUG] [updateTimeInput] OTHER input[${otherIndex}] BEFORE = "${otherValueBefore}" (should NOT change)`);
     
     triggerReactUpdate(targetInput, timeStr);
     
@@ -488,18 +486,20 @@ function updateTimeInput(markerType, timeStr) {
     const newValue = targetInput.value;
     const otherValueAfter = allTimeInputs[otherIndex]?.value;
     
-    debugLog('updateTimeInput', `AFTER triggerReactUpdate:`, {
-      targetInput: { index: targetIndex, before: oldValue, after: newValue },
-      otherInput: { index: otherIndex, before: otherValueBefore, after: otherValueAfter },
-      otherChanged: otherValueBefore !== otherValueAfter ? '⚠️ OTHER INPUT CHANGED!' : '✅ OK'
-    });
+    console.log(`[DEBUG] [updateTimeInput] AFTER: input[${targetIndex}] = "${newValue}" (was "${oldValue}")`);
+    console.log(`[DEBUG] [updateTimeInput] OTHER input[${otherIndex}] AFTER = "${otherValueAfter}" (was "${otherValueBefore}")`);
     
+    // Check if other input changed
     if (otherValueBefore !== otherValueAfter) {
-      debugLog('updateTimeInput', `🚨🚨🚨 BUG DETECTED: OTHER INPUT CHANGED FROM "${otherValueBefore}" TO "${otherValueAfter}" 🚨🚨🚨`);
+      console.log(`%c[BROWSER] 🚨 BUG DETECTED: OTHER INPUT CHANGED FROM "${otherValueBefore}" TO "${otherValueAfter}"`, 'color: #FF0000; font-weight: bold; font-size: 16px;');
+      console.log(`[DEBUG] [updateTimeInput] 🚨🚨🚨 BUG DETECTED: OTHER INPUT CHANGED FROM "${otherValueBefore}" TO "${otherValueAfter}" 🚨🚨🚨`);
+    } else {
+      console.log(`%c[BROWSER] ✅ SUCCESS: Only input[${targetIndex}] updated to "${newValue}", input[${otherIndex}] unchanged`, 'color: #00FF00; font-weight: bold;');
+      console.log(`[DEBUG] [updateTimeInput] ✅ SUCCESS: Other input[${otherIndex}] unchanged (still "${otherValueAfter}")`);
     }
     
   } else {
-    debugLog('updateTimeInput', `ERROR: Could not find target input for ${markerType}`);
+    console.log(`[DEBUG] [updateTimeInput] ❌ ERROR: Could not find target input for ${markerType}`);
   }
 
   // Store in corrected data
@@ -509,7 +509,8 @@ function updateTimeInput(markerType, timeStr) {
     window.__irrigationCorrected.lastTime = timeStr;
   }
   
-  debugLog('updateTimeInput', `COMPLETE for ${markerType}`);
+  console.log(`[DEBUG] [updateTimeInput] COMPLETE for ${markerType}`);
+  console.log(`[DEBUG] [updateTimeInput] ═══════════════════════════════════════`);
 }
 
 /**

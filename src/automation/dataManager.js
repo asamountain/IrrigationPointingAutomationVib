@@ -7,7 +7,7 @@
 
 import fs from 'fs';
 import path from 'path';
-import { log } from './utils.js';
+import { log } from '../utils.js';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // 💾 DATA SAVING OPERATIONS

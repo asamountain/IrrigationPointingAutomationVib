@@ -8,7 +8,7 @@
  * Pattern: Always process T-5 → T-0 (oldest to newest)
  */
 
-import { log } from './utils.js';
+import { log } from '../utils.js';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // 📅 DATE NAVIGATION - BUTTON BASED ONLY

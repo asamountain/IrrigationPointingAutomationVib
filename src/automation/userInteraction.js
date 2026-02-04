@@ -8,7 +8,7 @@
 
 import fs from 'fs';
 import path from 'path';
-import { log } from './utils.js';
+import { log } from '../utils.js';
 
 const TRAINING_FILE = path.join(process.cwd(), 'training', 'training-data.json');
 
