@@ -1,0 +1,16 @@
+{
+  "savedAt": "2026-02-04T01:13:54.899Z",
+  "farmIndex": 0,
+  "farmName": "화순김구필0101",
+  "dateIndex": 0,
+  "dateString": "2026-01-30",
+  "totalFarms": 3,
+  "totalDates": 6,
+  "lastClickedPoints": [],
+  "resumeInfo": {
+    "nextFarm": 0,
+    "nextDate": 1
+  },
+  "manager": "승진",
+  "mode": "normal"
+}

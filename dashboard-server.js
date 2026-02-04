@@ -7,9 +7,11 @@ import http from 'http';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import logger from './src/logger.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const LOG_DIR = path.join(__dirname, 'logs');
 
 class DashboardServer {
   constructor(port = 3456) {
@@ -26,6 +28,9 @@ class DashboardServer {
       maxFarms: 3,
       dayFilter: ''  // Day filter: '', '월', '화', '수', '목', '금', '토', '일'
     };
+    
+    // Connect logger to dashboard server for SSE broadcasts
+    logger.setDashboardServer(this);
   }
 
   start() {
@@ -36,7 +41,7 @@ class DashboardServer {
 
       this.server.listen(this.port, async () => {
         const url = `http://localhost:${this.port}`;
-        console.log(`📊 Dashboard server started at ${url}`);
+        logger.info(`Dashboard server started at ${url}`, { port: this.port, url });
         console.log(`📊 Dashboard ready at: ${url}`);
         console.log(`   → Open this URL to configure and start automation`);
         
@@ -44,9 +49,9 @@ class DashboardServer {
         try {
           const { default: open } = await import('open');
           await open(url);
-          console.log('✨ Browser launched automatically!');
+          logger.success('Browser launched automatically');
         } catch (err) {
-          console.log('⚠️  Could not open browser automatically (Manual open required)');
+          logger.warning('Could not open browser automatically', { error: err.message });
         }
         
         resolve(url);
@@ -54,10 +59,11 @@ class DashboardServer {
 
       this.server.on('error', (error) => {
         if (error.code === 'EADDRINUSE') {
-          console.log(`⚠️  Port ${this.port} is busy, trying ${this.port + 1}...`);
+          logger.warning(`Port ${this.port} is busy, trying ${this.port + 1}`, { port: this.port });
           this.port++;
           this.server.listen(this.port);
         } else {
+          logger.error('Server error', error);
           reject(error);
         }
       });
@@ -105,102 +111,169 @@ class DashboardServer {
     }
     // Control endpoints
     else if (url.pathname === '/control/start' && req.method === 'POST') {
+      const timerId = logger.functionEntry('handleControlStart', { endpoint: '/control/start' });
       let body = '';
       req.on('data', chunk => { body += chunk; });
       req.on('end', () => {
         try {
           const config = JSON.parse(body);
+          logger.apiRequest('POST', '/control/start', config);
           this.config = { ...this.config, ...config };
           this.isStarted = true;
+          const response = { success: true, config: this.config };
           res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ success: true, config: this.config }));
-          console.log(`✅ Configuration received from dashboard:`, this.config);
+          res.end(JSON.stringify(response));
+          logger.apiResponse('POST', '/control/start', response, 200);
+          logger.success('Automation started', { 
+            manager: this.config.manager, 
+            mode: this.config.mode, 
+            maxFarms: this.config.maxFarms,
+            startFrom: this.config.startFrom
+          });
+          logger.functionExit(timerId, response);
         } catch (error) {
+          const response = { success: false, error: error.message };
           res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ success: false, error: error.message }));
+          res.end(JSON.stringify(response));
+          logger.apiResponse('POST', '/control/start', response, 400);
+          logger.functionError(timerId, error);
         }
       });
     }
     else if (url.pathname === '/control/start-report-sending' && req.method === 'POST') {
+      const timerId = logger.functionEntry('handleControlStartReportSending', { endpoint: '/control/start-report-sending' });
       let body = '';
       req.on('data', chunk => { body += chunk; });
       req.on('end', () => {
         try {
           const config = JSON.parse(body);
+          logger.apiRequest('POST', '/control/start-report-sending', config);
           this.config = { ...this.config, ...config, mode: 'report-sending' };
           this.isStarted = true;
+          const response = { success: true, config: this.config };
           res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ success: true, config: this.config }));
-          console.log(`📤 Report Sending Mode activated:`, this.config);
+          res.end(JSON.stringify(response));
+          logger.apiResponse('POST', '/control/start-report-sending', response, 200);
+          logger.success('Report Sending Mode activated', {
+            manager: this.config.manager,
+            maxFarms: this.config.maxFarms,
+            startFrom: this.config.startFrom,
+            dayFilter: this.config.dayFilter || 'none'
+          });
           if (this.config.dayFilter) {
-            console.log(`📅 Day filter: ${this.config.dayFilter} (only farms with [${this.config.dayFilter}...] in name)`);
+            logger.info(`Day filter active: ${this.config.dayFilter}`, { dayFilter: this.config.dayFilter });
           }
+          logger.functionExit(timerId, response);
         } catch (error) {
+          const response = { success: false, error: error.message };
           res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ success: false, error: error.message }));
+          res.end(JSON.stringify(response));
+          logger.apiResponse('POST', '/control/start-report-sending', response, 400);
+          logger.functionError(timerId, error);
         }
       });
     }
     else if (url.pathname === '/control/stop' && req.method === 'POST') {
+      logger.buttonClick('Stop Automation', { source: 'dashboard' });
       this.shouldStop = true;
+      const response = { success: true, stopped: true };
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ success: true, stopped: true }));
+      res.end(JSON.stringify(response));
+      logger.apiResponse('POST', '/control/stop', response, 200);
+      logger.warning('Automation stopped by user');
     }
     else if (url.pathname === '/control/trigger-f9' && req.method === 'POST') {
       // F9 global hotkey trigger - allows dashboard to trigger crash report
-      console.log('🔴 F9 triggered from Dashboard - Saving crash report...');
+      logger.buttonClick('F9 Crash Report', { source: 'dashboard' });
+      logger.warning('F9 triggered from Dashboard - Saving crash report');
       this.f9Triggered = true;  // Flag that will be checked by the Playwright worker
       this.broadcast({
         type: 'log',
         message: '📸 F9 triggered! Crash report being saved...',
         level: 'warning'
       });
+      const response = { success: true, triggered: true };
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ success: true, triggered: true }));
+      res.end(JSON.stringify(response));
+      logger.apiResponse('POST', '/control/trigger-f9', response, 200);
     }
     else if (url.pathname === '/control/check-f9' && req.method === 'GET') {
       // Playwright worker polls this to check if F9 was triggered
       const triggered = this.f9Triggered || false;
       this.f9Triggered = false;  // Reset after reading
+      const response = { triggered };
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ triggered }));
+      res.end(JSON.stringify(response));
+      // Only log if triggered to avoid log spam
+      if (triggered) {
+        logger.debug('F9 check - triggered flag was set', { triggered });
+      }
     }
     else if (url.pathname === '/control/mode' && req.method === 'POST') {
+      const timerId = logger.functionEntry('handleControlMode', { endpoint: '/control/mode' });
       let body = '';
       req.on('data', chunk => { body += chunk; });
       req.on('end', () => {
         try {
           const { mode } = JSON.parse(body);
+          logger.apiRequest('POST', '/control/mode', { mode });
+          const previousMode = this.config.mode;
           this.config.mode = mode;
-          console.log(`✅ Mode changed to: ${mode}`);
+          const response = { success: true, mode };
           res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ success: true, mode }));
+          res.end(JSON.stringify(response));
+          logger.apiResponse('POST', '/control/mode', response, 200);
+          logger.success(`Mode changed: ${previousMode} → ${mode}`, { previousMode, newMode: mode });
+          logger.functionExit(timerId, response);
         } catch (error) {
+          const response = { success: false, error: error.message };
           res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ success: false, error: error.message }));
+          res.end(JSON.stringify(response));
+          logger.apiResponse('POST', '/control/mode', response, 400);
+          logger.functionError(timerId, error);
         }
       });
     }
     else if (url.pathname === '/control/add-farms' && req.method === 'POST') {
+      const timerId = logger.functionEntry('handleControlAddFarms', { endpoint: '/control/add-farms' });
       let body = '';
       req.on('data', chunk => { body += chunk; });
       req.on('end', () => {
         try {
           const { additionalFarms } = JSON.parse(body);
+          logger.apiRequest('POST', '/control/add-farms', { additionalFarms });
+          const previousMax = this.config.maxFarms;
           this.config.maxFarms += additionalFarms;
-          console.log(`✅ Added ${additionalFarms} more farms. New total: ${this.config.maxFarms}`);
+          logger.success(`Added ${additionalFarms} more farms`, { 
+            previousMax, 
+            newMax: this.config.maxFarms, 
+            additionalFarms 
+          });
           this.broadcast({
             type: 'log',
             message: `Extended automation by ${additionalFarms} farms (now processing up to ${this.config.maxFarms} farms)`,
             level: 'success'
           });
+          const response = { success: true, newMaxFarms: this.config.maxFarms };
           res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ success: true, newMaxFarms: this.config.maxFarms }));
+          res.end(JSON.stringify(response));
+          logger.apiResponse('POST', '/control/add-farms', response, 200);
+          logger.functionExit(timerId, response);
         } catch (error) {
+          const response = { success: false, error: error.message };
           res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ success: false, error: error.message }));
+          res.end(JSON.stringify(response));
+          logger.apiResponse('POST', '/control/add-farms', response, 400);
+          logger.functionError(timerId, error);
         }
       });
+    }
+    // API endpoints for log retrieval
+    else if (url.pathname === '/api/logs' && req.method === 'GET') {
+      this.serveLogsAPI(url, res);
+    }
+    else if (url.pathname === '/api/log-client' && req.method === 'POST') {
+      this.handleClientLog(req, res);
     }
     // 404
     else {
@@ -456,8 +529,103 @@ class DashboardServer {
     return this.config;
   }
 
+  /**
+   * Serve logs API endpoint
+   * @param {URL} url - Request URL with query params
+   * @param {ServerResponse} res - HTTP response
+   */
+  serveLogsAPI(url, res) {
+    const filters = {
+      level: url.searchParams.get('level') || undefined,
+      type: url.searchParams.get('type') || undefined,
+      function: url.searchParams.get('function') || undefined,
+      since: url.searchParams.get('since') || undefined,
+      limit: url.searchParams.get('limit') ? parseInt(url.searchParams.get('limit')) : 100,
+      format: url.searchParams.get('format') || 'json',
+      date: url.searchParams.get('date') || undefined,
+      category: url.searchParams.get('category') || 'server'
+    };
+    
+    logger.debug('Logs API request', filters);
+    
+    try {
+      let logs;
+      if (filters.date) {
+        // Get logs from file for specific date
+        logs = logger.getLogsFromFile(filters.date, filters.category);
+      } else {
+        // Get logs from memory
+        logs = logger.getLogs(filters);
+      }
+      
+      if (filters.format === 'csv') {
+        res.writeHead(200, { 
+          'Content-Type': 'text/csv',
+          'Content-Disposition': 'attachment; filename="logs.csv"'
+        });
+        res.end(logger.exportLogsCSV(filters));
+      } else {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(logs, null, 2));
+      }
+    } catch (error) {
+      logger.error('Failed to retrieve logs', error);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: error.message }));
+    }
+  }
+
+  /**
+   * Handle client-side log submissions
+   * @param {IncomingMessage} req - HTTP request
+   * @param {ServerResponse} res - HTTP response
+   */
+  handleClientLog(req, res) {
+    let body = '';
+    req.on('data', chunk => { body += chunk; });
+    req.on('end', () => {
+      try {
+        const logEntry = JSON.parse(body);
+        
+        // Process client log based on type
+        switch (logEntry.type) {
+          case 'chartInteraction':
+            logger.chartInteraction(logEntry.eventType, logEntry.data);
+            break;
+          case 'apiCall':
+            logger.apiCall(
+              logEntry.method, 
+              logEntry.url, 
+              logEntry.payload, 
+              logEntry.response, 
+              logEntry.statusCode
+            );
+            break;
+          case 'buttonClick':
+            logger.buttonClick(logEntry.button, logEntry.context);
+            break;
+          default:
+            // General log
+            const level = logEntry.level || 'info';
+            logger.log(level, 'clientLog', logEntry.message, { 
+              source: 'browser', 
+              ...logEntry.data 
+            });
+        }
+        
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true }));
+      } catch (error) {
+        logger.error('Failed to process client log', error);
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: false, error: error.message }));
+      }
+    });
+  }
+
   stop() {
     if (this.server) {
+      logger.info('Shutting down dashboard server');
       this.clients.forEach(client => {
         try {
           client.end();
@@ -467,7 +635,7 @@ class DashboardServer {
       });
       this.clients = [];
       this.server.close();
-      console.log('📊 Dashboard server stopped');
+      logger.success('Dashboard server stopped');
     }
   }
 }

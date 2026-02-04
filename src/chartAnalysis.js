@@ -9,6 +9,7 @@
  */
 
 import { log, logSubsection, delay } from './utils.js';
+import logger from './logger.js';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // 📊 ALGORITHM PARAMETERS
@@ -38,10 +39,27 @@ const HSSP_PARAMS = {
  * @returns {Array<{index: number, x: number, y: number, time: string, rise: number}>}
  */
 export function detectIrrigationEvents(dataPoints) {
+  const timerId = logger.functionEntry('detectIrrigationEvents', {
+    dataPointCount: dataPoints?.length || 0,
+    params: HSSP_PARAMS
+  });
+  
   logSubsection('HSSP Algorithm - Rolling Window Valley Detection');
+  
+  // Log algorithm run
+  logger.chartInteraction('algorithmRun', {
+    dataPoints: dataPoints?.length || 0,
+    algorithm: 'HSSP',
+    params: HSSP_PARAMS
+  });
   
   if (!dataPoints || dataPoints.length < HSSP_PARAMS.MIN_DATA_POINTS) {
     log(`Insufficient data points: ${dataPoints?.length || 0} (need ${HSSP_PARAMS.MIN_DATA_POINTS})`, 'warning');
+    logger.warning('Insufficient data points for analysis', {
+      received: dataPoints?.length || 0,
+      required: HSSP_PARAMS.MIN_DATA_POINTS
+    });
+    logger.functionExit(timerId, []);
     return [];
   }
   
@@ -65,6 +83,13 @@ export function detectIrrigationEvents(dataPoints) {
   log(`Surge threshold: ${surgeThreshold.toFixed(4)} (5% of range or min 0.1)`, 'info');
   log(`Lookback window: ${HSSP_PARAMS.LOOKBACK_WINDOW} minutes`, 'info');
   log(`Time filter: ${HSSP_PARAMS.DAYTIME_START}:00 - ${HSSP_PARAMS.DAYTIME_END}:00`, 'info');
+  
+  logger.debug('Algorithm parameters calculated', {
+    yRange: { min: minY, max: maxY, span: yRange },
+    surgeThreshold,
+    lookbackWindow: HSSP_PARAMS.LOOKBACK_WINDOW,
+    timeFilter: { start: HSSP_PARAMS.DAYTIME_START, end: HSSP_PARAMS.DAYTIME_END }
+  });
   
   const allEvents = [];
   let lastEventIndex = -HSSP_PARAMS.DEBOUNCE_MINUTES;
@@ -112,10 +137,20 @@ export function detectIrrigationEvents(dataPoints) {
       
       if (!isDaytime) {
         log(`⏭️ REJECTED: ${timeStr} is outside ${HSSP_PARAMS.DAYTIME_START}:00-${HSSP_PARAMS.DAYTIME_END}:00`, 'warning');
+        logger.debug('Event rejected: outside daytime hours', {
+          time: timeStr,
+          hour: eventHour,
+          allowedHours: { start: HSSP_PARAMS.DAYTIME_START, end: HSSP_PARAMS.DAYTIME_END }
+        });
       } else if (!isSignificantRise) {
         log(`⏭️ REJECTED: totalRise ${totalRise.toFixed(4)} < min ${HSSP_PARAMS.MIN_VALLEY_DEPTH}`, 'warning');
+        logger.debug('Event rejected: insufficient rise', {
+          time: timeStr,
+          totalRise,
+          minRequired: HSSP_PARAMS.MIN_VALLEY_DEPTH
+        });
       } else {
-        allEvents.push({
+        const event = {
           index: valleyIndex,
           x: dataPoints[valleyIndex].x,
           y: dataPoints[valleyIndex].y,
@@ -124,11 +159,20 @@ export function detectIrrigationEvents(dataPoints) {
           time: timeStr,
           hour: eventHour,
           minute: eventMinute
-        });
+        };
+        allEvents.push(event);
         
         lastEventIndex = valleyIndex;
         i = Math.max(i, valleyIndex + 15); // Skip forward to avoid double-detection
         log(`✅ ACCEPTED: Valley at ${timeStr} (index ${valleyIndex}), rise: ${totalRise.toFixed(4)}`, 'success');
+        
+        logger.chartInteraction('detection', {
+          accepted: true,
+          time: timeStr,
+          index: valleyIndex,
+          rise: totalRise,
+          eventNumber: allEvents.length
+        });
       }
     }
   }
@@ -169,6 +213,21 @@ export function detectIrrigationEvents(dataPoints) {
   uniqueEvents.sort((a, b) => a.index - b.index);
   
   log(`Final events: ${uniqueEvents.length} irrigation detections`, 'success');
+  
+  // Log final detection summary
+  const detectionSummary = {
+    totalDataPoints: dataPoints.length,
+    rawDetections: allEvents.length,
+    uniqueEvents: uniqueEvents.length,
+    events: uniqueEvents.map(e => ({ time: e.time, index: e.index, rise: e.rise }))
+  };
+  
+  logger.chartInteraction('detection', {
+    count: uniqueEvents.length,
+    summary: detectionSummary
+  });
+  
+  logger.functionExit(timerId, detectionSummary);
   
   return uniqueEvents;
 }
@@ -294,6 +353,13 @@ export async function waitForChartRender(page, timeout = 5000) {
  * @returns {Promise<{firstClicked: boolean, lastClicked: boolean}>}
  */
 export async function clickIrrigationPoints(page, dataPoints, firstEvent, lastEvent, options = {}) {
+  const timerId = logger.functionEntry('clickIrrigationPoints', {
+    totalPoints: dataPoints?.length || 0,
+    firstEventTime: firstEvent?.time,
+    lastEventTime: lastEvent?.time,
+    options
+  });
+  
   const { needsFirst = true, needsLast = true } = options;
   const result = { firstClicked: false, lastClicked: false };
   
@@ -303,15 +369,30 @@ export async function clickIrrigationPoints(page, dataPoints, firstEvent, lastEv
   const chartBounds = await getChartBounds(page);
   if (!chartBounds) {
     log('Could not find chart container', 'error');
+    logger.error('Could not find chart container for clicking');
+    logger.functionExit(timerId, result, { error: 'No chart container' });
     return result;
   }
   
   log(`Chart bounds: ${chartBounds.width}x${chartBounds.height} at (${chartBounds.x}, ${chartBounds.y})`, 'info');
+  logger.debug('Chart bounds acquired', chartBounds);
   
   // Click first event
   if (needsFirst && firstEvent) {
     log(`Clicking FIRST irrigation point: ${firstEvent.time}`, 'step');
     result.firstClicked = await clickChartPoint(page, firstEvent.index, chartBounds, dataPoints.length);
+    
+    logger.chartInteraction('pointClick', {
+      type: 'first',
+      index: firstEvent.index,
+      time: firstEvent.time,
+      success: result.firstClicked,
+      coordinates: {
+        x: chartBounds.x + (chartBounds.width * (firstEvent.index / dataPoints.length)),
+        y: chartBounds.y + (chartBounds.height / 2)
+      }
+    });
+    
     await delay(500);
   }
   
@@ -319,9 +400,22 @@ export async function clickIrrigationPoints(page, dataPoints, firstEvent, lastEv
   if (needsLast && lastEvent) {
     log(`Clicking LAST irrigation point: ${lastEvent.time}`, 'step');
     result.lastClicked = await clickChartPoint(page, lastEvent.index, chartBounds, dataPoints.length);
+    
+    logger.chartInteraction('pointClick', {
+      type: 'last',
+      index: lastEvent.index,
+      time: lastEvent.time,
+      success: result.lastClicked,
+      coordinates: {
+        x: chartBounds.x + (chartBounds.width * (lastEvent.index / dataPoints.length)),
+        y: chartBounds.y + (chartBounds.height / 2)
+      }
+    });
+    
     await delay(500);
   }
   
+  logger.functionExit(timerId, result);
   return result;
 }
 
@@ -338,14 +432,21 @@ export async function clickIrrigationPoints(page, dataPoints, firstEvent, lastEv
  * @returns {Promise<{firstClicked: boolean, lastClicked: boolean}>}
  */
 export async function clickViaHighchartsAPI(page, firstIndex, lastIndex, options = {}) {
+  const timerId = logger.functionEntry('clickViaHighchartsAPI', {
+    firstIndex,
+    lastIndex,
+    options
+  });
+  
   const { needsFirst = true, needsLast = true } = options;
   
-  return await page.evaluate(({ firstIdx, lastIdx, clickFirst, clickLast }) => {
-    const results = { firstClicked: false, lastClicked: false };
+  const results = await page.evaluate(({ firstIdx, lastIdx, clickFirst, clickLast }) => {
+    const results = { firstClicked: false, lastClicked: false, error: null };
     
     // Access Highcharts global
     if (!window.Highcharts || !window.Highcharts.charts) {
       console.error('[Browser] Highcharts not available');
+      results.error = 'Highcharts not available';
       return results;
     }
     
@@ -353,10 +454,12 @@ export async function clickViaHighchartsAPI(page, firstIndex, lastIndex, options
     const chart = window.Highcharts.charts.find(c => c !== undefined);
     if (!chart || !chart.series || !chart.series[0]) {
       console.error('[Browser] Chart series not found');
+      results.error = 'Chart series not found';
       return results;
     }
     
     const dataPoints = chart.series[0].data;
+    results.totalPoints = dataPoints.length;
     
     // Click first point
     if (clickFirst && firstIdx >= 0 && firstIdx < dataPoints.length) {
@@ -365,6 +468,7 @@ export async function clickViaHighchartsAPI(page, firstIndex, lastIndex, options
         point.select(true, false);
         point.firePointEvent('click');
         results.firstClicked = true;
+        results.firstPointData = { x: point.x, y: point.y };
         console.log(`[Browser] Clicked first point at index ${firstIdx}`);
       }
     }
@@ -380,6 +484,7 @@ export async function clickViaHighchartsAPI(page, firstIndex, lastIndex, options
         point.select(true, false);
         point.firePointEvent('click');
         results.lastClicked = true;
+        results.lastPointData = { x: point.x, y: point.y };
         console.log(`[Browser] Clicked last point at index ${lastIdx}`);
       }
     }
@@ -391,6 +496,34 @@ export async function clickViaHighchartsAPI(page, firstIndex, lastIndex, options
     clickFirst: needsFirst, 
     clickLast: needsLast 
   });
+  
+  // Log the Highcharts API click results
+  if (results.error) {
+    logger.error('Highcharts API click failed', { error: results.error });
+  } else {
+    if (results.firstClicked) {
+      logger.chartInteraction('pointClick', {
+        type: 'first',
+        method: 'HighchartsAPI',
+        index: firstIndex,
+        success: true,
+        pointData: results.firstPointData
+      });
+    }
+    if (results.lastClicked) {
+      logger.chartInteraction('pointClick', {
+        type: 'last',
+        method: 'HighchartsAPI',
+        index: lastIndex,
+        success: true,
+        pointData: results.lastPointData
+      });
+    }
+  }
+  
+  logger.functionExit(timerId, { firstClicked: results.firstClicked, lastClicked: results.lastClicked });
+  
+  return { firstClicked: results.firstClicked, lastClicked: results.lastClicked };
 }
 
 export default {

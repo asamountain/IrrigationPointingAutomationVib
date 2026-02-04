@@ -441,6 +441,161 @@
                 grid-template-columns: 1fr;
             }
         }
+
+        /* Log Viewer Styles */
+        .log-viewer-panel {
+            background: white;
+            border-radius: 10px;
+            padding: 20px;
+            margin-top: 20px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+
+        .log-viewer-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+
+        .log-viewer-filters {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+
+        .log-viewer-filters select,
+        .log-viewer-filters input {
+            padding: 8px 12px;
+            border: 2px solid #e5e7eb;
+            border-radius: 6px;
+            font-size: 0.9em;
+            background: white;
+        }
+
+        .log-viewer-filters select:focus,
+        .log-viewer-filters input:focus {
+            border-color: #4a9b3c;
+            outline: none;
+        }
+
+        .log-viewer-actions {
+            display: flex;
+            gap: 8px;
+        }
+
+        .btn-small {
+            padding: 8px 14px;
+            border: none;
+            border-radius: 6px;
+            font-size: 0.85em;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .btn-export {
+            background: #3b82f6;
+            color: white;
+        }
+
+        .btn-export:hover {
+            background: #2563eb;
+        }
+
+        .btn-refresh-logs {
+            background: #10b981;
+            color: white;
+        }
+
+        .btn-refresh-logs:hover {
+            background: #059669;
+        }
+
+        .log-viewer-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.9em;
+        }
+
+        .log-viewer-table th,
+        .log-viewer-table td {
+            padding: 10px 12px;
+            text-align: left;
+            border-bottom: 1px solid #e5e7eb;
+        }
+
+        .log-viewer-table th {
+            background: #f9fafb;
+            font-weight: 600;
+            color: #374151;
+            position: sticky;
+            top: 0;
+        }
+
+        .log-viewer-table tr:hover {
+            background: #f9fafb;
+        }
+
+        .log-viewer-container {
+            max-height: 400px;
+            overflow-y: auto;
+            border: 1px solid #e5e7eb;
+            border-radius: 6px;
+        }
+
+        .log-level-badge {
+            padding: 3px 8px;
+            border-radius: 4px;
+            font-size: 0.8em;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+
+        .log-level-debug { background: #e5e7eb; color: #6b7280; }
+        .log-level-info { background: #dbeafe; color: #1d4ed8; }
+        .log-level-success { background: #dcfce7; color: #16a34a; }
+        .log-level-warning { background: #fef3c7; color: #d97706; }
+        .log-level-error { background: #fee2e2; color: #dc2626; }
+
+        .log-type-badge {
+            padding: 3px 8px;
+            border-radius: 4px;
+            font-size: 0.75em;
+            background: #f3f4f6;
+            color: #4b5563;
+        }
+
+        .log-data-preview {
+            max-width: 300px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            font-family: monospace;
+            font-size: 0.85em;
+            color: #6b7280;
+        }
+
+        .log-viewer-stats {
+            display: flex;
+            gap: 15px;
+            margin-bottom: 15px;
+            font-size: 0.9em;
+            color: #6b7280;
+        }
+
+        .log-stat {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+
+        .log-stat-count {
+            font-weight: 600;
+            color: #374151;
+        }
     </style>
 </head>
 <body>
@@ -643,6 +798,74 @@
                 💡 Press F9 key anywhere on this page to capture crash report
             </div>
         </div>
+
+        <!-- Structured Log Viewer Panel -->
+        <div class="log-viewer-panel hidden" id="log-viewer-panel">
+            <h2 style="margin-bottom: 15px; color: #2d5016;">📊 Structured Logs</h2>
+            
+            <div class="log-viewer-header">
+                <div class="log-viewer-filters">
+                    <select id="log-filter-level">
+                        <option value="">All Levels</option>
+                        <option value="debug">Debug</option>
+                        <option value="info">Info</option>
+                        <option value="success">Success</option>
+                        <option value="warning">Warning</option>
+                        <option value="error">Error</option>
+                    </select>
+                    <select id="log-filter-type">
+                        <option value="">All Types</option>
+                        <option value="general">General</option>
+                        <option value="functionCall">Function Calls</option>
+                        <option value="chartInteraction">Chart Interactions</option>
+                        <option value="apiCall">API Calls</option>
+                        <option value="buttonClick">Button Clicks</option>
+                        <option value="tableOperation">Table Operations</option>
+                    </select>
+                    <input type="text" id="log-filter-search" placeholder="Search logs..." style="width: 200px;">
+                    <select id="log-filter-limit">
+                        <option value="50">Last 50</option>
+                        <option value="100" selected>Last 100</option>
+                        <option value="200">Last 200</option>
+                        <option value="500">Last 500</option>
+                    </select>
+                </div>
+                <div class="log-viewer-actions">
+                    <button class="btn-small btn-refresh-logs" onclick="loadStructuredLogs()">🔄 Refresh</button>
+                    <button class="btn-small btn-export" onclick="exportLogs('json')">📥 JSON</button>
+                    <button class="btn-small btn-export" onclick="exportLogs('csv')">📥 CSV</button>
+                </div>
+            </div>
+            
+            <div class="log-viewer-stats" id="log-viewer-stats">
+                <div class="log-stat">Total: <span class="log-stat-count" id="log-count-total">0</span></div>
+                <div class="log-stat">Errors: <span class="log-stat-count" style="color: #dc2626;" id="log-count-errors">0</span></div>
+                <div class="log-stat">Warnings: <span class="log-stat-count" style="color: #d97706;" id="log-count-warnings">0</span></div>
+                <div class="log-stat">API Calls: <span class="log-stat-count" style="color: #1d4ed8;" id="log-count-api">0</span></div>
+            </div>
+            
+            <div class="log-viewer-container">
+                <table class="log-viewer-table">
+                    <thead>
+                        <tr>
+                            <th style="width: 140px;">Time</th>
+                            <th style="width: 80px;">Level</th>
+                            <th style="width: 100px;">Type</th>
+                            <th>Message</th>
+                            <th style="width: 120px;">Function</th>
+                            <th style="width: 200px;">Data</th>
+                        </tr>
+                    </thead>
+                    <tbody id="log-viewer-body">
+                        <tr>
+                            <td colspan="6" style="text-align: center; padding: 40px; color: #9ca3af;">
+                                Click "Refresh" to load structured logs
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
     </div>
 
     <script>
@@ -689,6 +912,7 @@
                     document.getElementById('status-bar').classList.remove('hidden');
                     document.getElementById('dashboard-grid').classList.remove('hidden');
                     document.getElementById('controls-panel').classList.remove('hidden');
+                    showLogViewerPanel(); // Show structured log viewer
                     
                     // Update manager display
                     document.getElementById('manager').textContent = manager;
@@ -734,6 +958,7 @@
                     document.getElementById('status-bar').classList.remove('hidden');
                     document.getElementById('dashboard-grid').classList.remove('hidden');
                     document.getElementById('controls-panel').classList.remove('hidden');
+                    showLogViewerPanel(); // Show structured log viewer
 
                     // Update manager display
                     document.getElementById('manager').textContent = manager;
@@ -1060,6 +1285,174 @@
                 console.error('Failed to load learning data:', error);
             }
         }
+
+        // ═══════════════════════════════════════════════════════════════
+        // STRUCTURED LOG VIEWER
+        // ═══════════════════════════════════════════════════════════════
+
+        let structuredLogs = [];
+
+        async function loadStructuredLogs() {
+            const level = document.getElementById('log-filter-level').value;
+            const type = document.getElementById('log-filter-type').value;
+            const limit = document.getElementById('log-filter-limit').value;
+            const search = document.getElementById('log-filter-search').value;
+
+            try {
+                let url = `http://localhost:3456/api/logs?limit=${limit}`;
+                if (level) url += `&level=${level}`;
+                if (type) url += `&type=${type}`;
+
+                const response = await fetch(url);
+                structuredLogs = await response.json();
+
+                // Apply client-side search filter
+                let filteredLogs = structuredLogs;
+                if (search) {
+                    const searchLower = search.toLowerCase();
+                    filteredLogs = structuredLogs.filter(log => 
+                        log.message?.toLowerCase().includes(searchLower) ||
+                        log.function?.toLowerCase().includes(searchLower) ||
+                        JSON.stringify(log.data || {}).toLowerCase().includes(searchLower)
+                    );
+                }
+
+                renderLogs(filteredLogs);
+                updateLogStats(structuredLogs);
+            } catch (error) {
+                console.error('Failed to load structured logs:', error);
+                document.getElementById('log-viewer-body').innerHTML = `
+                    <tr>
+                        <td colspan="6" style="text-align: center; padding: 40px; color: #dc2626;">
+                            Failed to load logs: ${error.message}
+                        </td>
+                    </tr>
+                `;
+            }
+        }
+
+        function renderLogs(logs) {
+            const tbody = document.getElementById('log-viewer-body');
+
+            if (!logs || logs.length === 0) {
+                tbody.innerHTML = `
+                    <tr>
+                        <td colspan="6" style="text-align: center; padding: 40px; color: #9ca3af;">
+                            No logs found matching your filters
+                        </td>
+                    </tr>
+                `;
+                return;
+            }
+
+            // Sort by timestamp descending (newest first)
+            const sortedLogs = [...logs].sort((a, b) => 
+                new Date(b.timestamp) - new Date(a.timestamp)
+            );
+
+            tbody.innerHTML = sortedLogs.map(log => {
+                const time = log.timestamp ? new Date(log.timestamp).toLocaleTimeString() : '';
+                const date = log.timestamp ? new Date(log.timestamp).toLocaleDateString() : '';
+                const level = log.level || 'info';
+                const type = log.type || 'general';
+                const message = escapeHtml(log.message || '');
+                const func = log.function || log.data?.function || '-';
+                const dataPreview = log.data ? JSON.stringify(log.data).substring(0, 100) : '';
+
+                return `
+                    <tr>
+                        <td style="font-size: 0.85em; color: #6b7280;">
+                            <div>${time}</div>
+                            <div style="font-size: 0.8em; color: #9ca3af;">${date}</div>
+                        </td>
+                        <td><span class="log-level-badge log-level-${level}">${level}</span></td>
+                        <td><span class="log-type-badge">${type}</span></td>
+                        <td style="max-width: 300px; word-break: break-word;">${message}</td>
+                        <td style="font-family: monospace; font-size: 0.85em; color: #6b7280;">${escapeHtml(func)}</td>
+                        <td class="log-data-preview" title="${escapeHtml(JSON.stringify(log.data || {}, null, 2))}">${escapeHtml(dataPreview)}</td>
+                    </tr>
+                `;
+            }).join('');
+        }
+
+        function updateLogStats(logs) {
+            document.getElementById('log-count-total').textContent = logs.length;
+            document.getElementById('log-count-errors').textContent = logs.filter(l => l.level === 'error').length;
+            document.getElementById('log-count-warnings').textContent = logs.filter(l => l.level === 'warning').length;
+            document.getElementById('log-count-api').textContent = logs.filter(l => l.type === 'apiCall').length;
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        async function exportLogs(format) {
+            const level = document.getElementById('log-filter-level').value;
+            const type = document.getElementById('log-filter-type').value;
+            const limit = document.getElementById('log-filter-limit').value;
+
+            try {
+                let url = `http://localhost:3456/api/logs?limit=${limit}&format=${format}`;
+                if (level) url += `&level=${level}`;
+                if (type) url += `&type=${type}`;
+
+                const response = await fetch(url);
+                const content = await response.text();
+
+                // Create download
+                const blob = new Blob([content], { 
+                    type: format === 'csv' ? 'text/csv' : 'application/json' 
+                });
+                const downloadUrl = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = downloadUrl;
+                a.download = `irrigation-logs-${new Date().toISOString().split('T')[0]}.${format}`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(downloadUrl);
+
+                addLog(`Exported logs as ${format.toUpperCase()}`, 'success');
+            } catch (error) {
+                addLog(`Failed to export logs: ${error.message}`, 'error');
+            }
+        }
+
+        // Add event listeners for filter changes
+        document.addEventListener('DOMContentLoaded', () => {
+            const filterElements = ['log-filter-level', 'log-filter-type', 'log-filter-limit'];
+            filterElements.forEach(id => {
+                const el = document.getElementById(id);
+                if (el) {
+                    el.addEventListener('change', loadStructuredLogs);
+                }
+            });
+
+            // Search with debounce
+            let searchTimeout;
+            const searchInput = document.getElementById('log-filter-search');
+            if (searchInput) {
+                searchInput.addEventListener('input', () => {
+                    clearTimeout(searchTimeout);
+                    searchTimeout = setTimeout(loadStructuredLogs, 300);
+                });
+            }
+        });
+
+        // Show log viewer panel when dashboard becomes visible
+        function showLogViewerPanel() {
+            const panel = document.getElementById('log-viewer-panel');
+            if (panel) {
+                panel.classList.remove('hidden');
+                loadStructuredLogs();
+            }
+        }
+
+        // ═══════════════════════════════════════════════════════════════
+        // INITIALIZATION
+        // ═══════════════════════════════════════════════════════════════
 
         // Initialize connection when page loads
         console.log('Dashboard: Starting initialization...');

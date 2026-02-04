@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Irrigation Report Automation - Playwright Version
  * Purpose: Automate data extraction from admin.iocrops.com 관수리포트 menu
  * 
@@ -14,6 +14,7 @@ import { execSync } from 'child_process';
 import DashboardServer from './dashboard-server.js';
 import { setupNetworkInterception, waitForChartData, extractDataPoints, resetCapturedData } from './network-interceptor.js';
 import { trainAlgorithm } from './trainAlgorithm.js';
+import logger from './src/logger.js';
 
 // Configuration (move to config.js later)
 const CONFIG = {
@@ -709,6 +710,7 @@ async function showClickOverlay(page, points, trainingStats = null) {
     function updateTimeInput(markerType, timeStr) {
       // Find ALL time input fields on the page
       const allTimeInputs = document.querySelectorAll('input[type="time"]');
+      console.log("All time input check :", allTimeInputs);
       let updatedCount = 0;
 
       console.log(`[BROWSER] Updating ${markerType} time input to: ${timeStr}`);
@@ -1383,7 +1385,9 @@ async function checkForEmptyCells(page) {
  * @returns {Promise<boolean>} - true if refresh was successful
  */
 async function clickTableRefresh(page) {
+  const timerId = logger.functionEntry('clickTableRefresh', { button: '표 새로고침' });
   console.log('  🔄 Clicking "표 새로고침" button...');
+  logger.buttonClick('표 새로고침 (Table Refresh)', { action: 'click_attempt' });
   
   const clicked = await page.evaluate(() => {
     const buttons = Array.from(document.querySelectorAll('button'));
@@ -1404,23 +1408,37 @@ async function clickTableRefresh(page) {
   
   if (clicked) {
     console.log('  ✅ Refresh button clicked, waiting for table to reload...');
+    logger.buttonClickResult('표 새로고침 (Table Refresh)', true, { phase: 'clicked' });
     
     // Wait for network to settle (table data to load)
     try {
+      const startTime = Date.now();
       await page.waitForLoadState('networkidle', { timeout: 10000 });
+      const waitDuration = Date.now() - startTime;
       console.log('  ✅ Table refresh complete');
+      
+      logger.tableRefresh(1, { 
+        success: true, 
+        waitDurationMs: waitDuration,
+        networkIdle: true
+      });
       
       // Small additional wait for UI to update
       await page.waitForTimeout(500);
+      logger.functionExit(timerId, true, { waitDurationMs: waitDuration });
       return true;
     } catch (e) {
       console.log(`  ⚠️ Network wait timeout: ${e.message}`);
+      logger.warning('Network wait timeout during table refresh', { error: e.message });
       // Still return true since button was clicked
       await page.waitForTimeout(1000);
+      logger.functionExit(timerId, true, { timedOut: true });
       return true;
     }
   } else {
     console.log('  ❌ Could not find "표 새로고침" button');
+    logger.buttonClickResult('표 새로고침 (Table Refresh)', false, { reason: 'Button not found' });
+    logger.functionExit(timerId, false, { error: 'Button not found' });
     return false;
   }
 }
@@ -1432,15 +1450,27 @@ async function clickTableRefresh(page) {
  * @returns {Promise<{success: boolean, attempts: number, remainingEmpty: number}>}
  */
 async function attemptTableRefresh(page, maxRetries = 3) {
+  const timerId = logger.functionEntry('attemptTableRefresh', { maxRetries });
   let attempts = 0;
   
   while (attempts < maxRetries) {
     // Check for empty cells
     const emptyCheck = await checkForEmptyCells(page);
     
+    logger.tableValidation({
+      ready: !emptyCheck.hasEmptyCells,
+      attempt: attempts + 1,
+      totalChecked: emptyCheck.totalChecked,
+      emptyCellCount: emptyCheck.emptyCells?.length || 0,
+      reason: emptyCheck.hasEmptyCells ? 'Empty cells found' : 'All cells have data'
+    });
+    
     if (!emptyCheck.hasEmptyCells) {
       console.log(`  ✅ All cells have data (checked ${emptyCheck.totalChecked} cells)`);
-      return { success: true, attempts: attempts, remainingEmpty: 0 };
+      const result = { success: true, attempts: attempts, remainingEmpty: 0 };
+      logger.tableRefresh(attempts, { success: true, remainingEmpty: 0 });
+      logger.functionExit(timerId, result);
+      return result;
     }
     
     console.log(`  ⚠️ Found ${emptyCheck.emptyCells.length} empty cells (attempt ${attempts + 1}/${maxRetries}):`);
@@ -1451,12 +1481,21 @@ async function attemptTableRefresh(page, maxRetries = 3) {
       console.log(`     → ... and ${emptyCheck.emptyCells.length - 5} more`);
     }
     
+    logger.debug('Empty cells detected', {
+      attempt: attempts + 1,
+      count: emptyCheck.emptyCells.length,
+      cells: emptyCheck.emptyCells.slice(0, 5)
+    });
+    
     // Try to refresh the table
     const refreshed = await clickTableRefresh(page);
     
     if (!refreshed) {
       console.log('  ❌ Could not refresh table, stopping retry loop');
-      return { success: false, attempts: attempts + 1, remainingEmpty: emptyCheck.emptyCells.length };
+      const result = { success: false, attempts: attempts + 1, remainingEmpty: emptyCheck.emptyCells.length };
+      logger.tableRefresh(attempts + 1, { success: false, reason: 'Refresh button failed' });
+      logger.functionExit(timerId, result);
+      return result;
     }
     
     attempts++;
@@ -1467,11 +1506,21 @@ async function attemptTableRefresh(page, maxRetries = 3) {
   
   if (!finalCheck.hasEmptyCells) {
     console.log(`  ✅ All cells filled after ${attempts} refresh(es)`);
-    return { success: true, attempts: attempts, remainingEmpty: 0 };
+    const result = { success: true, attempts: attempts, remainingEmpty: 0 };
+    logger.tableRefresh(attempts, { success: true, remainingEmpty: 0, afterRetries: true });
+    logger.functionExit(timerId, result);
+    return result;
   }
   
   console.log(`  ❌ Still ${finalCheck.emptyCells.length} empty cells after ${attempts} refresh attempts`);
-  return { success: false, attempts: attempts, remainingEmpty: finalCheck.emptyCells.length };
+  const result = { success: false, attempts: attempts, remainingEmpty: finalCheck.emptyCells.length };
+  logger.tableRefresh(attempts, { 
+    success: false, 
+    remainingEmpty: finalCheck.emptyCells.length,
+    maxRetriesExhausted: true
+  });
+  logger.functionExit(timerId, result);
+  return result;
 }
 
 /**
@@ -2367,9 +2416,22 @@ async function runReportSending(config, dashboard, runStats) {
         console.log(`     → Reason: ${validationResult.reason}`);
         console.log(`     → Debug: ${validationResult.debug}\n`);
         
+        // Log table validation result
+        logger.tableValidation({
+          ready: validationResult.ready,
+          reason: validationResult.reason,
+          checks: validationResult.checks,
+          emptyCellCount: validationResult.emptyCellCount,
+          farmName: farm.name
+        });
+        
         if (validationResult.ready) {
           // Step 6: Click "리포트 생성" button
           console.log('  📤 All checks passed! Clicking "리포트 생성" button...');
+          logger.buttonClick('리포트 생성 (Create Report)', { 
+            farmName: farm.name, 
+            validationPassed: true 
+          });
           
           const buttonClicked = await page.evaluate(() => {
             const buttons = Array.from(document.querySelectorAll('button'));
@@ -2389,6 +2451,11 @@ async function runReportSending(config, dashboard, runStats) {
           
           if (buttonClicked) {
             console.log('  ✅ Report sent successfully!\n');
+            logger.buttonClickResult('리포트 생성 (Create Report)', true, { 
+              farmName: farm.name,
+              status: 'Report created successfully'
+            });
+            logger.success(`Report created for ${farm.name}`, { farmName: farm.name });
             dashboard.log(`✅ Report sent for: ${farm.name}`, 'success');
             dashboard.broadcast('report_update', { status: 'Sent', farmName: farm.name, message: 'Report created successfully' });
             reportsCreated++;
@@ -2396,12 +2463,20 @@ async function runReportSending(config, dashboard, runStats) {
             await page.waitForTimeout(1500); // Brief wait for submission
           } else {
             console.log('  ⚠️  "리포트 생성" button not found on page\n');
+            logger.buttonClickResult('리포트 생성 (Create Report)', false, { 
+              farmName: farm.name,
+              reason: 'Button not found on page'
+            });
             dashboard.log(`⚠️ Button not found for: ${farm.name}`, 'warning');
             dashboard.broadcast('report_update', { status: 'Skipped', farmName: farm.name, message: 'Button not found on page' });
             reportsSkipped++;
           }
         } else {
           console.log('  ⚠️  Validation failed. Skipping report creation.\n');
+          logger.warning(`Report creation skipped for ${farm.name}`, {
+            farmName: farm.name,
+            reason: validationResult.reason
+          });
           dashboard.log(`⚠️ Skipped ${farm.name}: ${validationResult.reason}`, 'warning');
           dashboard.broadcast('report_update', { status: 'Skipped', farmName: farm.name, message: validationResult.reason });
           reportsSkipped++;

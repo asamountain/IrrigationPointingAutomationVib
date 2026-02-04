@@ -1,0 +1,24 @@
+[
+  {
+    "timestamp": "2026-02-03T23:55:58.393Z",
+    "startTime": 1770162958393,
+    "manager": "승진",
+    "totalFarmsTargeted": 3,
+    "startFromFarm": 1,
+    "farmsCompleted": 3,
+    "datesProcessed": 5,
+    "chartsClicked": 0,
+    "successCount": 3,
+    "skipCount": 0,
+    "noIrrigationCount": 2,
+    "errorCount": 0,
+    "dateRange": {
+      "start": "2026년 01월 30일",
+      "end": "2026년 01월 30일"
+    },
+    "mode": "normal",
+    "endTime": 1770163208274,
+    "duration": 250,
+    "successRate": 60
+  }
+]
