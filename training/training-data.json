@@ -3360,17 +3360,38 @@
         "totalDataPoints": 1080,
         "chartWidth": 119.92037037037039
       }
+    },
+    {
+      "timestamp": "2026-02-04T02:23:54.979Z",
+      "predicted": {
+        "firstScreenX": 529.6915052160954,
+        "lastScreenX": 701.8748137108793,
+        "firstIndex": 97,
+        "lastIndex": 370
+      },
+      "corrected": {
+        "firstScreenX": 529.6915052160954,
+        "lastScreenX": 765.875
+      },
+      "delta": {
+        "firstOffsetX": 0,
+        "lastOffsetX": 64
+      },
+      "metadata": {
+        "totalDataPoints": 671,
+        "chartWidth": 165.1833084947839
+      }
     }
   ],
   "statistics": {
-    "totalCorrections": 160,
-    "avgFirstOffset": -10.9,
-    "avgLastOffset": -4.1,
+    "totalCorrections": 161,
+    "avgFirstOffset": -10.8,
+    "avgLastOffset": -3.5,
     "avgOffset": 7,
-    "lastUpdated": "2026-02-04T02:19:02.069Z"
+    "lastUpdated": "2026-02-04T02:23:54.979Z"
   },
   "learnedAdjustments": {
     "firstIndexBias": -11,
-    "lastIndexBias": -4
+    "lastIndexBias": -3
   }
 }
