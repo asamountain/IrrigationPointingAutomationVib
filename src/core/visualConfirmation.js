@@ -97,7 +97,7 @@ export async function showClickOverlay(page, points, stats = null) {
     console.log('  📍 LAST (BLUE) line at: ' + (points.last?.time || 'N/A'));
     console.log('\n  🖱️  DRAG vertical lines to adjust times');
     console.log('  ⏳ Waiting for user confirmation...');
-    console.log('     → Press ENTER to save (저장)');
+    console.log('     → Press ENTER or SPACE to save (저장)');
     console.log('     → Press ESC to skip this date\n');
     
     return true;
@@ -167,7 +167,7 @@ export async function waitForUserConfirmation(page, timeout = 300000) {
   });
   
   return new Promise((resolve) => {
-    console.log('  👁️  WAITING FOR USER INPUT (ENTER=confirm, ESC=skip)...');
+    console.log('  👁️  WAITING FOR USER INPUT (ENTER/SPACE=confirm, ESC=skip)...');
     
     // Set up keyboard listener in browser
     page.evaluate((timeoutMs) => {
@@ -176,9 +176,17 @@ export async function waitForUserConfirmation(page, timeout = 300000) {
         window._overlayConfirmed = null;
         
         const handler = (e) => {
-          console.log('[BROWSER] Key pressed:', e.key);
-          if (e.key === 'Enter') {
-            console.log('[BROWSER] ENTER pressed - confirming');
+          console.log('[BROWSER] Key pressed:', e.key, 'Code:', e.code);
+          // ═══════════════════════════════════════════════════════════════════════════
+          // 🔒 CRITICAL: ENTER/SPACE KEY SAVE FUNCTIONALITY - DO NOT MODIFY
+          // This keyboard handler is essential for saving timestamps after bar dragging.
+          // Both Enter and Space keys trigger the save/confirm operation.
+          // See claude.md for documentation on why this must not be changed.
+          // ═══════════════════════════════════════════════════════════════════════════
+          if (e.key === 'Enter' || e.key === ' ' || e.code === 'Space') {
+            console.log('[BROWSER] ENTER/SPACE pressed - confirming');
+            e.preventDefault(); // Prevent Space from scrolling page
+            e.stopPropagation();
             window._overlayConfirmed = true;
             document.removeEventListener('keydown', handler);
             browserResolve(true);

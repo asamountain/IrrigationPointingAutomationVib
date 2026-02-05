@@ -208,7 +208,7 @@ function createInfoBox(pts, stats) {
     </div>
     <div style="border-top: 1px solid #444; padding-top: 10px; margin-top: 5px;">
       <div style="color: #FFD700; font-size: 12px; margin-bottom: 5px;">🖱️ Drag vertical lines to set time</div>
-      <div style="color: #4CAF50; font-weight: bold;">Press ENTER to save (저장)</div>
+      <div style="color: #4CAF50; font-weight: bold;">Press ENTER or SPACE to save (저장)</div>
       <div style="color: #FF9800;">Press ESC to skip this date</div>
     </div>
   `;
@@ -588,11 +588,21 @@ function setupConfirmationListener(timeoutMs) {
     window._overlayConfirmed = null;
 
     const handler = (e) => {
-      if (e.key === 'Enter') {
+      // ═══════════════════════════════════════════════════════════════════════════
+      // 🔒 CRITICAL: ENTER/SPACE KEY SAVE FUNCTIONALITY - DO NOT MODIFY
+      // This keyboard handler is essential for saving timestamps after bar dragging.
+      // Both Enter and Space keys trigger the save operation.
+      // See claude.md for documentation on why this must not be changed.
+      // ═══════════════════════════════════════════════════════════════════════════
+      if (e.key === 'Enter' || e.key === ' ' || e.code === 'Space') {
+        console.log('[BROWSER] ENTER/SPACE pressed - saving and confirming');
+        e.preventDefault(); // Prevent Space from scrolling page
+        e.stopPropagation();
         window._overlayConfirmed = true;
         document.removeEventListener('keydown', handler);
         saveIrrigationData().then(() => resolve(true));
       } else if (e.key === 'Escape') {
+        console.log('[BROWSER] ESC pressed - skipping');
         window._overlayConfirmed = false;
         document.removeEventListener('keydown', handler);
         resolve(false);
