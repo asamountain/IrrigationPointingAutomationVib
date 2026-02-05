@@ -96,35 +96,7 @@ function createOverlay(pts, stats) {
     pointer-events: none; z-index: 99999;
   `;
   
-  // Create a BLOCKING layer over the chart area to intercept clicks
-  const chartBlocker = document.createElement('div');
-  chartBlocker.id = 'chart-click-blocker';
-  const chartRect = chartContainer.getBoundingClientRect();
-  chartBlocker.style.cssText = `
-    position: fixed;
-    top: ${chartRect.top}px;
-    left: ${chartRect.left}px;
-    width: ${chartRect.width}px;
-    height: ${chartRect.height}px;
-    pointer-events: auto;
-    z-index: 99998;
-    background: transparent;
-    cursor: default;
-  `;
-  // Block all events on the chart
-  chartBlocker.addEventListener('click', (e) => { 
-    debugLog('chartBlocker', 'BLOCKED click event on chart');
-    e.stopPropagation(); e.preventDefault(); 
-  });
-  chartBlocker.addEventListener('mousedown', (e) => { 
-    debugLog('chartBlocker', 'BLOCKED mousedown event on chart');
-    e.stopPropagation(); e.preventDefault(); 
-  });
-  chartBlocker.addEventListener('mouseup', (e) => { 
-    debugLog('chartBlocker', 'BLOCKED mouseup event on chart');
-    e.stopPropagation(); e.preventDefault(); 
-  });
-  overlay.appendChild(chartBlocker);
+  debugLog('createOverlay', 'Overlay container created, Highcharts handlers already disabled');
 
   // Create info box
   const infoBox = createInfoBox(pts, stats);
