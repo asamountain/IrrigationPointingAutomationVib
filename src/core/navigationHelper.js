@@ -101,9 +101,19 @@ export async function waitForPageReady(page, options = {}) {
   const checks = [];
   
   if (waitForChart) {
-    // Wait for Highcharts SVG to be visible
+    // Wait for Highcharts SVG to be visible and have size
     checks.push(
-      page.waitForSelector('.highcharts-root, .highcharts-container', { 
+      page.waitForFunction(() => {
+        const chart = document.querySelector('.highcharts-root, .highcharts-container');
+        if (!chart) return false;
+        const rect = chart.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      }, { timeout }).catch(() => null)
+    );
+    
+    // Also wait for the plot background which we use for bounds
+    checks.push(
+      page.waitForSelector('.highcharts-plot-background', { 
         state: 'visible', 
         timeout 
       }).catch(() => null)
@@ -121,6 +131,7 @@ export async function waitForPageReady(page, options = {}) {
   }
   
   // Always wait for loading spinners to disappear
+  // Improved: Wait for them to appear FIRST (briefly) or just wait for them to be hidden if already there
   checks.push(
     page.waitForSelector('.chakra-spinner, [class*="loading"], [class*="spinner"]', {
       state: 'hidden',

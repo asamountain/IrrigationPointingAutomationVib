@@ -66,31 +66,44 @@ export async function showClickOverlay(page, points, stats = null) {
     // Call createOverlay with points and stats - wrapped in single object for page.evaluate
     console.log('  ⏳ Calling createOverlay() in browser...');
     const evalArg = { pts: points, learningStats: stats };
-    const createResult = await page.evaluate((arg) => {
-      const { pts, learningStats } = arg;
-      console.log('[BROWSER] createOverlay called with:', JSON.stringify(pts));
-      if (typeof createOverlay === 'function') {
-        try {
-          createOverlay(pts, learningStats);
-          console.log('[BROWSER] ✅ Draggable overlay created successfully');
-          // Check if overlay was actually created
-          const overlay = document.getElementById('irrigation-click-overlay');
-          console.log('[BROWSER] Overlay element exists:', !!overlay);
-          return { success: true, overlayExists: !!overlay };
-        } catch (createError) {
-          console.error('[BROWSER] ❌ createOverlay threw error:', createError.message);
-          return { success: false, error: createError.message };
+    
+    // Retry logic for overlay creation (in case chart was still re-rendering)
+    let createResult = { success: false, overlayExists: false };
+    for (let retry = 0; retry < 3; retry++) {
+      createResult = await page.evaluate((arg) => {
+        const { pts, learningStats } = arg;
+        if (typeof createOverlay === 'function') {
+          try {
+            createOverlay(pts, learningStats);
+            const overlay = document.getElementById('irrigation-click-overlay');
+            const markers = document.querySelectorAll('[id$="-marker"]');
+            return { 
+              success: true, 
+              overlayExists: !!overlay, 
+              markerCount: markers.length,
+              error: null 
+            };
+          } catch (createError) {
+            return { success: false, error: createError.message };
+          }
+        } else {
+          return { success: false, error: 'createOverlay function not defined' };
         }
-      } else {
-        console.error('[BROWSER] ❌ createOverlay function not found! typeof:', typeof createOverlay);
-        return { success: false, error: 'createOverlay function not defined' };
+      }, evalArg);
+      
+      if (createResult.success && createResult.overlayExists && createResult.markerCount > 0) {
+        break;
       }
-    }, evalArg);
+      
+      console.log(`  ⚠️  Overlay creation retry ${retry + 1}/3... (Success: ${createResult.success}, Exists: ${createResult.overlayExists}, Markers: ${createResult.markerCount})`);
+      await page.waitForTimeout(500);
+    }
     
-    console.log('  📋 createOverlay result:', JSON.stringify(createResult));
+    console.log('  📋 createOverlay final result:', JSON.stringify(createResult));
     
-    if (!createResult.success) {
-      console.log('  ❌ createOverlay FAILED:', createResult.error);
+    if (!createResult.success || !createResult.overlayExists) {
+      console.log('  ❌ createOverlay FAILED or overlay missing after retries');
+      throw new Error(createResult.error || 'Overlay element not found after creation');
     }
     
     console.log('  📍 FIRST (RED) line at: ' + (points.first?.time || 'N/A'));
@@ -269,14 +282,23 @@ export async function handleVisualConfirmation(page, options = {}) {
   
   try {
     // Step 1: Wait for chart to be visible - THIS IS CRITICAL
-    console.log(`  ⏳ Step 1/5: Waiting for chart to render...`);
+    console.log(`  ⏳ Step 1/5: Waiting for chart to render and stabilize...`);
     try {
       // Wait for highcharts container first
       await page.waitForSelector('.highcharts-container', { 
         state: 'visible', 
         timeout: 10000 
       });
-      console.log(`  ✅ Highcharts container found`);
+      
+      // CRITICAL: Wait for chart to have ACTUAL SIZE
+      await page.waitForFunction(() => {
+        const chart = document.querySelector('.highcharts-container');
+        if (!chart) return false;
+        const rect = chart.getBoundingClientRect();
+        return rect.width > 50 && rect.height > 50; // Use a minimum size
+      }, { timeout: 10000 });
+      
+      console.log(`  ✅ Highcharts container found and has size`);
       
       // Then wait for the plot background
       await page.waitForSelector('.highcharts-plot-background', { 

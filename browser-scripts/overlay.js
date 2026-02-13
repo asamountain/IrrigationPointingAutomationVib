@@ -144,6 +144,69 @@ function createOverlay(pts, stats) {
   overlay.appendChild(infoBox);
   document.body.appendChild(overlay);
 
+  // START REALIGNMENT LOOP
+  // This ensures markers stay aligned with the chart even if it moves, scrolls, or re-renders
+  let lastRect = { top: 0, height: 0, left: 0, width: 0 };
+  
+  function realignWithChart() {
+    const overlay = document.getElementById('irrigation-click-overlay');
+    if (!overlay) return; // Stop loop if overlay removed
+    
+    const chartPlot = document.querySelector('.highcharts-plot-background');
+    if (!chartPlot) {
+      requestAnimationFrame(realignWithChart);
+      return;
+    }
+    
+    const rect = chartPlot.getBoundingClientRect();
+    
+    // Only update if dimensions changed significantly
+    if (Math.abs(rect.top - lastRect.top) > 1 || 
+        Math.abs(rect.height - lastRect.height) > 1 ||
+        Math.abs(rect.left - lastRect.left) > 1 ||
+        Math.abs(rect.width - lastRect.width) > 1) {
+      
+      debugLog('realignWithChart', 'Chart moved or resized, updating markers', { 
+        old: lastRect, 
+        new: rect 
+      });
+      
+      const firstMarker = document.getElementById('first-marker');
+      const firstLabel = document.getElementById('first-label');
+      const lastMarker = document.getElementById('last-marker');
+      const lastLabel = document.getElementById('last-label');
+      
+      if (firstMarker) {
+        firstMarker.style.top = rect.top + 'px';
+        firstMarker.style.height = rect.height + 'px';
+        if (firstLabel) firstLabel.style.top = (rect.top - 25) + 'px';
+      }
+      
+      if (lastMarker) {
+        lastMarker.style.top = rect.top + 'px';
+        lastMarker.style.height = rect.height + 'px';
+        if (lastLabel) lastLabel.style.top = (rect.top - 25) + 'px';
+      }
+      
+      lastRect = { top: rect.top, height: rect.height, left: rect.left, width: rect.width };
+      
+      // Also ensure chart pointer events are still disabled (in case of re-render)
+      const charts = window.Highcharts?.charts || [];
+      charts.forEach(chart => {
+        if (chart && chart.container && chart.container.style.pointerEvents !== 'none') {
+          chart.container.style.pointerEvents = 'none';
+          if (chart.options?.plotOptions?.series?.point?.events) {
+            chart.options.plotOptions.series.point.events.click = null;
+          }
+        }
+      });
+    }
+    
+    requestAnimationFrame(realignWithChart);
+  }
+  
+  requestAnimationFrame(realignWithChart);
+
   // DO NOT sync initial times - let user drag to set them
   // The website already has its own values, we only update when user drags
   console.log('[BROWSER] Overlay created - chart clicks BLOCKED, drag vertical lines to set times');
@@ -486,8 +549,11 @@ function updateTimeInput(markerType, timeStr) {
 }
 
 /**
- * Trigger React state update for controlled inputs
- * CRITICAL: Use bubbles:false to prevent website handlers from catching these events
+ * Trigger React state update for controlled inputs (React 19 + Chakra UI v3)
+ * 
+ * Strategy 1: Call React's onChange directly via __reactProps$ (most reliable)
+ * Strategy 2: nativeInputValueSetter + _valueTracker + bubbling InputEvent (classic)
+ * Strategy 3: Force-enable the 저장 button if React state didn't update
  */
 function triggerReactUpdate(input, value) {
   debugLog('triggerReactUpdate', `CALLED`, { 
@@ -497,39 +563,86 @@ function triggerReactUpdate(input, value) {
     newValue: value
   });
   
-  // Store old value for comparison
   const oldValue = input.value;
+  let reactHandlerCalled = false;
   
-  // Method 1: Direct value setter (bypasses React but sets the value)
-  debugLog('triggerReactUpdate', 'Step 1: Using nativeInputValueSetter');
-  const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
-    window.HTMLInputElement.prototype, 'value'
-  ).set;
-  nativeInputValueSetter.call(input, value);
-  debugLog('triggerReactUpdate', `After nativeInputValueSetter: input.value = "${input.value}"`);
-  
-  // Method 2: Dispatch events WITHOUT bubbling to avoid website handlers
-  // The website's handlers listen for bubbling events and update BOTH fields
-  debugLog('triggerReactUpdate', 'Step 2: Dispatching events with bubbles=false');
-  const inputEvent = new Event('input', { bubbles: false, cancelable: true });
-  const changeEvent = new Event('change', { bubbles: false, cancelable: true });
-  
-  input.dispatchEvent(inputEvent);
-  input.dispatchEvent(changeEvent);
-  debugLog('triggerReactUpdate', 'Dispatched input and change events (bubbles=false)');
-  
-  // Method 3: Also try React's internal value tracker if available
-  const tracker = input._valueTracker;
-  if (tracker) {
-    tracker.setValue(oldValue); // Set to old value first
+  // ── Strategy 1: Call React's onChange directly via __reactProps$ ──
+  // React 18/19 attaches component props to DOM nodes with this key prefix.
+  // Calling onChange directly updates React's component state, which is
+  // what controls the 저장 button's disabled attribute.
+  try {
+    const reactPropsKey = Object.keys(input).find(k => k.startsWith('__reactProps$'));
+    if (reactPropsKey) {
+      const reactProps = input[reactPropsKey];
+      const handler = reactProps?.onChange || reactProps?.onInput;
+      if (handler) {
+        debugLog('triggerReactUpdate', `Strategy 1: Found React handler via ${reactPropsKey}`);
+        // Set DOM value first so event.target.value returns the new value
+        const nativeSetter = Object.getOwnPropertyDescriptor(
+          window.HTMLInputElement.prototype, 'value'
+        ).set;
+        nativeSetter.call(input, value);
+        // Call React's handler with a synthetic-like event
+        handler({
+          target: input,
+          currentTarget: input,
+          type: 'change',
+          preventDefault: () => {},
+          stopPropagation: () => {},
+          nativeEvent: new Event('change'),
+          bubbles: true,
+          cancelable: true,
+        });
+        reactHandlerCalled = true;
+        debugLog('triggerReactUpdate', `✅ Strategy 1 success: React handler called, value="${input.value}"`);
+        console.log(`[BROWSER] triggerReactUpdate: React onChange called, value="${value}" (was "${oldValue}")`);
+      }
+    }
+    if (!reactHandlerCalled) {
+      debugLog('triggerReactUpdate', 'Strategy 1: No __reactProps$ handler found, falling back');
+    }
+  } catch (err) {
+    debugLog('triggerReactUpdate', `Strategy 1 error: ${err.message}`);
   }
   
-  // Force a React-compatible input event
-  const reactEvent = new Event('input', { bubbles: false });
-  Object.defineProperty(reactEvent, 'target', { value: input, writable: false });
-  input.dispatchEvent(reactEvent);
+  // ── Strategy 2: Classic nativeInputValueSetter + events (fallback) ──
+  if (!reactHandlerCalled) {
+    debugLog('triggerReactUpdate', 'Strategy 2: nativeInputValueSetter + bubbling events');
+    const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
+      window.HTMLInputElement.prototype, 'value'
+    ).set;
+    nativeInputValueSetter.call(input, value);
+    
+    // Reset _valueTracker so React sees old→new difference
+    const tracker = input._valueTracker;
+    if (tracker) {
+      tracker.setValue(oldValue);
+      debugLog('triggerReactUpdate', 'Reset _valueTracker to old value');
+    }
+    
+    // Use InputEvent (not generic Event) — React 19 checks the event prototype
+    input.dispatchEvent(new InputEvent('input', { 
+      bubbles: true, cancelable: true, inputType: 'insertText', data: value 
+    }));
+    input.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));
+    debugLog('triggerReactUpdate', 'Dispatched InputEvent + change (bubbles=true)');
+    console.log(`[BROWSER] triggerReactUpdate: Set input value to "${value}" (was "${oldValue}")`);
+  }
   
-  console.log(`[BROWSER] triggerReactUpdate: Set input value to "${value}" (was "${oldValue}")`);
+  // ── Strategy 3: Force-enable 저장 button after a short delay ──
+  // Even if React state didn't update, this ensures the button is clickable.
+  // Combined with saveIrrigationData() direct API call, data is always saved.
+  setTimeout(() => {
+    const allButtons = document.querySelectorAll('button');
+    for (const btn of allButtons) {
+      if (btn.textContent.trim() === '저장' && btn.disabled) {
+        btn.disabled = false;
+        btn.removeAttribute('disabled');
+        btn.setAttribute('data-force-enabled', 'true');
+        console.log('[BROWSER] ✅ Strategy 3: 저장 button force-enabled');
+      }
+    }
+  }, 300);
 }
 
 /**

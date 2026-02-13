@@ -526,7 +526,13 @@ class DashboardServer {
     }
     
     console.log('✅ Start command received from dashboard');
-    return this.config;
+    const finalConfig = { ...this.config };
+    
+    // Reset for next run
+    this.isStarted = false;
+    this.shouldStop = false;
+    
+    return finalConfig;
   }
 
   /**

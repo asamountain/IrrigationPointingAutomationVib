@@ -39,11 +39,12 @@ export async function navigateToStartDate(page, daysBack = 5) {
         return false;
       }
       
-      // Brief wait for date picker UI (unavoidable)
-      await page.waitForTimeout(300);
+      // Wait for date to actually change in UI before next click
+      // We don't know the exact date yet, so we just wait for the button text to change or a brief timeout
+      await page.waitForTimeout(500);
     }
     
-    log(`✅ Reached T-${daysBack} (${daysBack} clicks back)`, 'success');
+    log(`✅ Reached target start date (${daysBack} clicks back)`, 'success');
     return true;
     
   } catch (error) {
@@ -109,6 +110,32 @@ export async function getCurrentDisplayedDate(page) {
   } catch (error) {
     log(`Error reading displayed date: ${error.message}`, 'error');
     return 'Unknown Date';
+  }
+}
+
+/**
+ * Wait for the displayed date text to contain a specific string
+ * @param {Page} page - Playwright page
+ * @param {string} targetDatePart - String to look for (e.g., "1월 20일")
+ * @param {number} timeout - Max wait time in ms
+ */
+export async function waitForDateText(page, targetDatePart, timeout = 10000) {
+  log(`⏳ Waiting for date to reflect: ${targetDatePart}...`, 'info');
+  try {
+    await page.waitForFunction((target) => {
+      const buttons = Array.from(document.querySelectorAll('button.chakra-button'));
+      const dateButton = buttons.find(btn => {
+        const hasSvg = btn.querySelector('svg rect[x="3"][y="4"][width="18"][height="18"]');
+        const hasDateText = btn.textContent.includes('년') && btn.textContent.includes('일');
+        return hasSvg && hasDateText;
+      });
+      return dateButton && dateButton.textContent.includes(target);
+    }, targetDatePart, { timeout });
+    log(`✅ Date UI updated to: ${targetDatePart}`, 'success');
+    return true;
+  } catch (error) {
+    log(`⚠️ Date UI did not update to ${targetDatePart} within ${timeout}ms`, 'warning');
+    return false;
   }
 }
 
