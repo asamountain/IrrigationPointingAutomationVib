@@ -379,34 +379,32 @@ export async function handleVisualConfirmation(page, options = {}) {
     });
     
     result.positions = correctedPositions;
-    
-    // Remove overlay before clicking
+
+    // Remove overlay before clicking the save button
     await removeClickOverlay(page);
-    
-    // Perform clicks at user-confirmed positions
-    if (correctedPositions && (correctedPositions.first || correctedPositions.last)) {
-      console.log(`  🖱️  Clicking confirmed positions...`);
-      
-      if (correctedPositions.first) {
-        const fx = correctedPositions.first.x;
-        const fy = correctedPositions.first.y;
-        console.log(`     → Clicking FIRST (RED) at (${Math.round(fx)}, ${Math.round(fy)})`);
-        await page.mouse.click(fx, fy);
-        await page.waitForTimeout(500);
+
+    // Click the website's own save button so its React handlers fire
+    // and the success tooltips appear.
+    // The drag already updated the input fields; clicking the button triggers the website's save flow.
+    console.log(`  Clicking 저장 button to save...`);
+    try {
+      // Wait briefly for React to enable the button after our input updates
+      await page.waitForTimeout(300);
+
+      const saveBtn = page.locator('button.chakra-button', { hasText: '저장' }).first();
+      const isEnabled = await saveBtn.isEnabled().catch(() => false);
+
+      if (isEnabled) {
+        await saveBtn.click();
+        console.log(`  ✅ 저장 button clicked - waiting for success tooltip...`);
+        // Wait for tooltip to appear
+        await page.waitForTimeout(2000);
+        result.clicked = true;
+      } else {
+        console.log(`  ⚠️  저장 button is still disabled - input update may not have reached React`);
       }
-      
-      if (correctedPositions.last) {
-        const lx = correctedPositions.last.x;
-        const ly = correctedPositions.last.y;
-        console.log(`     → Clicking LAST (BLUE) at (${Math.round(lx)}, ${Math.round(ly)})`);
-        await page.mouse.click(lx, ly);
-        await page.waitForTimeout(500);
-      }
-      
-      result.clicked = true;
-      console.log(`  ✅ Clicks completed!`);
-    } else {
-      console.log(`  ⚠️  No positions to click (bars not moved)`);
+    } catch (btnErr) {
+      console.log(`  ❌  Could not click 저장 button: ${btnErr.message}`);
     }
     
     return result;

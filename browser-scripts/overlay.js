@@ -499,36 +499,30 @@ function triggerReactUpdate(input, value) {
   
   // Store old value for comparison
   const oldValue = input.value;
-  
-  // Method 1: Direct value setter (bypasses React but sets the value)
+
+  // Step 1: Prime the React value tracker BEFORE changing the native value.
+  // This tells React "the previous value was X" so it detects the transition X -> newValue.
+  const tracker = input._valueTracker;
+  if (tracker) {
+    tracker.setValue(oldValue);
+  }
+
+  // Step 2: Set the native DOM value (bypasses React's setter)
   debugLog('triggerReactUpdate', 'Step 1: Using nativeInputValueSetter');
   const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
     window.HTMLInputElement.prototype, 'value'
   ).set;
   nativeInputValueSetter.call(input, value);
   debugLog('triggerReactUpdate', `After nativeInputValueSetter: input.value = "${input.value}"`);
-  
-  // Method 2: Dispatch events WITHOUT bubbling to avoid website handlers
-  // The website's handlers listen for bubbling events and update BOTH fields
-  debugLog('triggerReactUpdate', 'Step 2: Dispatching events with bubbles=false');
-  const inputEvent = new Event('input', { bubbles: false, cancelable: true });
-  const changeEvent = new Event('change', { bubbles: false, cancelable: true });
-  
-  input.dispatchEvent(inputEvent);
-  input.dispatchEvent(changeEvent);
-  debugLog('triggerReactUpdate', 'Dispatched input and change events (bubbles=false)');
-  
-  // Method 3: Also try React's internal value tracker if available
-  const tracker = input._valueTracker;
-  if (tracker) {
-    tracker.setValue(oldValue); // Set to old value first
-  }
-  
-  // Force a React-compatible input event
-  const reactEvent = new Event('input', { bubbles: false });
-  Object.defineProperty(reactEvent, 'target', { value: input, writable: false });
-  input.dispatchEvent(reactEvent);
-  
+
+  // Step 3: Dispatch with bubbles:true so React's document-level delegation catches it.
+  // Highcharts handlers are already disabled (chart.container.style.pointerEvents = 'none'
+  // and chart click handlers nulled out in createOverlay), so bubbling is safe here.
+  debugLog('triggerReactUpdate', 'Step 2: Dispatching events with bubbles=true for React delegation');
+  input.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
+  input.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));
+  debugLog('triggerReactUpdate', 'Dispatched input and change events (bubbles=true)');
+
   console.log(`[BROWSER] triggerReactUpdate: Set input value to "${value}" (was "${oldValue}")`);
 }
 
