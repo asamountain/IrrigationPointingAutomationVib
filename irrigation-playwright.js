@@ -235,8 +235,19 @@ async function runReportSending(config, dashboard, runStats) {
     const farmList = await extractFarmList(page, dashboard);
     
     // Step 5: Calculate Farm Range (using module)
-    const { farmsToProcess, startIndex, endIndex, totalFarms } = calculateFarmRange(farmList, config);
-    
+    let { farmsToProcess, startIndex, endIndex, totalFarms } = calculateFarmRange(farmList, config);
+
+    // Apply day filter (same logic as normal automation)
+    const filterDay = dashboard.getConfig().dayFilter;
+    if (filterDay) {
+      const before = farmsToProcess.length;
+      farmsToProcess = farmsToProcess.filter(farm => {
+        const bracketMatch = farm.name.match(/\[(.*?)\]/);
+        return bracketMatch ? bracketMatch[1].includes(filterDay) : false;
+      });
+      console.log(`📅 Day filter '${filterDay}': ${before} → ${farmsToProcess.length} farms`);
+    }
+
     // Step 4: Process each farm
     let reportsCreated = 0;
     let reportsSkipped = 0;
@@ -290,133 +301,175 @@ async function runReportSending(config, dashboard, runStats) {
         // Additional safety: wait for table to exist
         await page.waitForSelector('table', { state: 'visible', timeout: 5000 });
         console.log('  ✅ Table element found\n');
-        
-        // Step 5: PRECISE TABLE VALIDATION
-        console.log('  📊 Validating table data (PRECISE MODE)...');
-        
-        const validationResult = await page.evaluate(() => {
-          // Find all tables on the page
+
+        // 📋 ROBUST: CHECK IF REPORT ALREADY SENT (리포트 수 > 0)
+        const reportCount = await page.evaluate((targetFarmName) => {
           const tables = Array.from(document.querySelectorAll('table'));
           
-          if (tables.length === 0) {
-            return { 
-              ready: false, 
-              reason: 'No table found on page',
-              debug: 'No <table> elements detected'
-            };
-          }
-          
-          // Use the last table (most likely the data table)
-          const table = tables[tables.length - 1];
-          const rows = Array.from(table.querySelectorAll('tbody tr'));
-          
-          if (rows.length === 0) {
-            return { 
-              ready: false, 
-              reason: 'Table body is empty',
-              debug: `Found ${tables.length} tables but tbody has no rows`
-            };
-          }
-          
-          console.log(`[BROWSER] Found table with ${rows.length} rows`);
-          
-          // Build a map of row labels to their last column value
-          const dataMap = {};
-          
-          rows.forEach((row, idx) => {
-            const cells = Array.from(row.querySelectorAll('td'));
-            if (cells.length < 2) return; // Skip rows without enough cells
+          for (const table of tables) {
+            const headers = Array.from(table.querySelectorAll('thead th, thead td')).map(h => h.textContent.trim());
+            const reportCountIdx = headers.findIndex(h => h.includes('리포트 수'));
             
-            const label = cells[0].textContent.trim();
-            const lastCellValue = cells[cells.length - 1].textContent.trim();
-            
-            dataMap[label] = lastCellValue;
-            console.log(`[BROWSER] Row ${idx + 1}: "${label}" = "${lastCellValue}"`);
-          });
-          
-          // 🎯 PRECISE VALIDATION RULES
-          const checks = {
-            nightMoisture: { 
-              key: '야간 함수율 편차', 
-              mustBe: '-', 
-              actual: null, 
-              pass: false 
-            },
-            lastIrrigationTime: { 
-              key: '마지막 급액 시간', 
-              mustBe: '-', 
-              actual: null, 
-              pass: false 
-            },
-            firstIrrigationTime: { 
-              key: '첫 급액 시간', 
-              mustNotBe: '-', 
-              actual: null, 
-              pass: false 
-            },
-            sunrise: { 
-              key: '일출 시', 
-              mustNotBe: '-', 
-              actual: null, 
-              pass: false 
+            if (reportCountIdx !== -1) {
+              const rows = Array.from(table.querySelectorAll('tbody tr'));
+              const farmRow = rows.find(row => {
+                const cells = Array.from(row.querySelectorAll('td'));
+                // Use includes for matching farm name to handle potential whitespace/prefix issues
+                return cells.some(td => td.textContent.trim().includes(targetFarmName));
+              });
+              
+              if (farmRow) {
+                const cells = Array.from(farmRow.querySelectorAll('td'));
+                const countText = cells[reportCountIdx]?.textContent.trim();
+                const count = parseInt(countText);
+                return isNaN(count) ? 0 : count;
+              }
             }
-          };
-          
-          // Find matching rows (partial match on key)
-          Object.keys(dataMap).forEach(label => {
-            if (label.includes('야간 함수율 편차') || label.includes('야간함수율편차')) {
-              checks.nightMoisture.actual = dataMap[label];
-              checks.nightMoisture.pass = (dataMap[label] === '-' || dataMap[label] === '—');
-            }
-            if (label.includes('마지막 급액 시간') || label.includes('마지막급액시간')) {
-              checks.lastIrrigationTime.actual = dataMap[label];
-              checks.lastIrrigationTime.pass = (dataMap[label] === '-' || dataMap[label] === '—');
-            }
-            if (label.includes('첫 급액 시간') || label.includes('첫급액시간')) {
-              checks.firstIrrigationTime.actual = dataMap[label];
-              checks.firstIrrigationTime.pass = (dataMap[label] !== '-' && dataMap[label] !== '—' && dataMap[label] !== '');
-            }
-            if (label.includes('일출 시')) {
-              checks.sunrise.actual = dataMap[label];
-              checks.sunrise.pass = (dataMap[label] !== '-' && dataMap[label] !== '—' && dataMap[label] !== '');
-            }
-          });
-          
-          // Check if all conditions are met
-          const failedChecks = [];
-          
-          if (!checks.nightMoisture.pass) {
-            failedChecks.push(`야간 함수율 편차 must be "-" (got: "${checks.nightMoisture.actual || 'NOT FOUND'}")`);
           }
-          if (!checks.lastIrrigationTime.pass) {
-            failedChecks.push(`마지막 급액 시간 must be "-" (got: "${checks.lastIrrigationTime.actual || 'NOT FOUND'}")`);
-          }
-          if (!checks.firstIrrigationTime.pass) {
-            failedChecks.push(`첫 급액 시간 must have data (got: "${checks.firstIrrigationTime.actual || 'NOT FOUND'}")`);
-          }
-          if (!checks.sunrise.pass) {
-            failedChecks.push(`일출 시 must have data (got: "${checks.sunrise.actual || 'NOT FOUND'}")`);
-          }
-          
-          const allPassed = failedChecks.length === 0;
-          
-          return {
-            ready: allPassed,
-            reason: allPassed 
-              ? '✅ All validation checks passed' 
-              : failedChecks.join(' | '),
-            checks: checks,
-            debug: `Rows found: ${rows.length}, Data map keys: ${Object.keys(dataMap).join(', ')}`
-          };
-        });
+          return 0;
+        }, farm.name);
+
+        if (reportCount > 0) {
+          console.log(`  ⚠️  Report already sent (${reportCount} times). Skipping farm.\n`);
+          dashboard.log(`Farm ${farm.name} already has ${reportCount} reports sent. Skipping.`, 'warning');
+          reportsSkipped++;
+          runStats.farmsCompleted++;
+          continue; // Skip to next farm
+        } else {
+          console.log(`  ✅ Report count is 0. Proceeding with validation...`);
+        }
         
-        console.log(`     → Ready to send: ${validationResult.ready ? '✅ YES' : '❌ NO'}`);
-        console.log(`     → Reason: ${validationResult.reason}`);
-        console.log(`     → Debug: ${validationResult.debug}\n`);
+        // Step 5: DATA RECOVERY & VALIDATION LOOP
+        console.log('  📊 Checking for missing data and performing recovery...');
+        
+        let attempts = 0;
+        const maxAttempts = 3;
+        let dataReady = false;
+        let lastValidationResult = null;
+        
+        while (attempts < maxAttempts && !dataReady) {
+          attempts++;
+          console.log(`  🔄 Validation attempt ${attempts}/${maxAttempts}...`);
+          
+          const recoveryResult = await page.evaluate(async () => {
+            const sleep = ms => new Promise(res => setTimeout(res, ms));
+            
+            // Find the data table
+            const tables = Array.from(document.querySelectorAll('table'));
+            if (tables.length === 0) return { action: 'error', reason: 'No table found' };
+            
+            const table = tables[tables.length - 1];
+            const headers = Array.from(table.querySelectorAll('thead tr td')).map(td => td.textContent.trim());
+            const rows = Array.from(table.querySelectorAll('tbody tr'));
+            
+            if (rows.length === 0) return { action: 'error', reason: 'Table body empty' };
+            
+            // Find critical row indices
+            let nightMoistureRowIdx = -1;
+            let lastIrrigationRowIdx = -1;
+            let firstIrrigationRowIdx = -1;
+            
+            rows.forEach((row, idx) => {
+              const label = row.querySelector('td')?.textContent || '';
+              if (label.includes('야간 함수율 편차') || label.includes('야간함수율편차')) nightMoistureRowIdx = idx;
+              if (label.includes('마지막 급액 시간') || label.includes('마지막급액시간')) lastIrrigationRowIdx = idx;
+              if (label.includes('첫 급액 시간') || label.includes('첫급액시간')) firstIrrigationRowIdx = idx;
+            });
+            
+            // Scan columns (starting from index 1, skip label column)
+            // We focus on the last 2 columns (Today and Yesterday)
+            const colCount = headers.length;
+            let holeFoundAtIndex = -1;
+            let holeReason = '';
+            
+            for (let i = 1; i < colCount; i++) {
+              // 🧪 EXCEPTION: Skip validation for the very last column (Today/Submission Day)
+              // The user confirmed that "야간 함수율 편차" is okay to be "-" in the last column.
+              if (i === colCount - 1) continue;
+
+              const nightVal = nightMoistureRowIdx !== -1 ? rows[nightMoistureRowIdx].querySelectorAll('td')[i]?.textContent.trim() : 'N/A';
+              const lastVal = lastIrrigationRowIdx !== -1 ? rows[lastIrrigationRowIdx].querySelectorAll('td')[i]?.textContent.trim() : 'N/A';
+              
+              if (nightVal === '-' || nightVal === '—') {
+                holeFoundAtIndex = i;
+                holeReason = `Missing night moisture at ${headers[i]}`;
+                break;
+              }
+              
+              if (lastVal === '-' || lastVal === '—') {
+                holeFoundAtIndex = i;
+                holeReason = `Missing last irrigation time at ${headers[i]}`;
+                break;
+              }
+            }
+            
+            if (holeFoundAtIndex === -1) {
+              return { action: 'proceed', reason: 'All data fulfilled' };
+            }
+            
+            // HOLE DETECTED: Perform recovery
+            const nextColIndex = Math.min(holeFoundAtIndex + 1, colCount - 1);
+            const nextDateHeader = headers[nextColIndex]; // e.g., "02.20"
+            
+            // 1. Click the top cell of the NEXT column to focus
+            const topCell = rows[0].querySelectorAll('td')[nextColIndex];
+            if (topCell) {
+              topCell.click();
+              console.log(`[BROWSER] Clicked top cell of column ${nextColIndex} (${nextDateHeader})`);
+            }
+            
+            await sleep(1000);
+            
+            // 2. Find and click "계산 실행" button for that date
+            // Format: MM월 DD일 계산 실행
+            const [mm, dd] = nextDateHeader.split('.');
+            const calcBtnText = `${mm}월 ${dd}일 계산 실행`;
+            
+            const buttons = Array.from(document.querySelectorAll('button'));
+            const calcBtn = buttons.find(btn => btn.textContent.includes(calcBtnText));
+            
+            if (calcBtn) {
+              console.log(`[BROWSER] Found calculation button: "${calcBtnText}", clicking...`);
+              calcBtn.click();
+              await sleep(2000);
+              
+              // 3. Click "표 새로고침"
+              const refreshBtn = buttons.find(btn => btn.textContent.includes('표 새로고침'));
+              if (refreshBtn) {
+                console.log(`[BROWSER] Clicking "표 새로고침"...`);
+                refreshBtn.click();
+                return { action: 'retry', reason: `Triggered calculation for ${nextDateHeader} and refreshed` };
+              }
+              return { action: 'retry', reason: `Triggered calculation for ${nextDateHeader} but refresh button not found` };
+            }
+            
+            return { action: 'fail', reason: `Hole found at index ${holeFoundAtIndex} but calculation button "${calcBtnText}" not found` };
+          });
+          
+          console.log(`     → Result: ${recoveryResult.action.toUpperCase()} - ${recoveryResult.reason}`);
+          
+          if (recoveryResult.action === 'proceed') {
+            dataReady = true;
+          } else if (recoveryResult.action === 'retry') {
+            console.log('     ⏳ Waiting for table to update...');
+            await page.waitForTimeout(4000); // Wait for the refresh to take effect
+          } else {
+            console.log(`     ⚠️  Recovery failed: ${recoveryResult.reason}`);
+            lastValidationResult = { ready: false, reason: recoveryResult.reason };
+            break; 
+          }
+          
+          lastValidationResult = { 
+            ready: dataReady, 
+            reason: dataReady ? '✅ All data fulfilled' : recoveryResult.reason 
+          };
+        }
+        
+        const validationResult = lastValidationResult;
         
         if (validationResult.ready) {
           // Step 6: Click "리포트 생성" button
-          console.log('  📤 All checks passed! Clicking "리포트 생성" button...');
+          console.log('  📤 All data ready! Clicking "리포트 생성" button...');
           
           const buttonClicked = await page.evaluate(() => {
             const buttons = Array.from(document.querySelectorAll('button'));
@@ -794,18 +847,34 @@ async function main() {
   }
   console.log();
 
-  // 📤 ROUTE: If report-sending mode, use specialized function
-  if (config.mode === 'report-sending') {
-    await runReportSending(config, dashboard, runStats);
-    return;
-  }
-
-  // Launch browser with Universal Browser Launcher (cross-platform)
-  dashboard.updateStatus('🚀 Launching browser...', 'running');
-  dashboard.updateStep('Initializing browser', 5);
+  // 👥 SUPPORT MULTIPLE MANAGERS (both)
+  const managers = config.manager === 'both' ? ['승진', '진우'] : [config.manager];
   
-  const browser = await launchBrowser();
-  dashboard.log('Browser launched successfully', 'success');
+  for (const manager of managers) {
+    if (managers.length > 1) {
+      console.log(`\n👥 =================================================================`);
+      console.log(`👥   PROCESSING MANAGER: ${manager} (${managers.indexOf(manager) + 1}/${managers.length})`);
+      console.log(`👥 =================================================================\n`);
+      dashboard.log(`📋 Starting automation for manager: ${manager}`, 'info');
+    }
+    
+    // Update active manager in configuration
+    const currentConfig = { ...config, manager };
+    CONFIG.targetName = manager;
+    dashboard.setManager(manager);
+
+    // 📤 ROUTE: If report-sending mode, use specialized function
+    if (config.mode === 'report-sending') {
+      await runReportSending(currentConfig, dashboard, runStats);
+      continue; // Move to next manager
+    }
+
+    // Launch browser with Universal Browser Launcher (cross-platform)
+    dashboard.updateStatus(`🚀 Launching browser for ${manager}...`, 'running');
+    dashboard.updateStep('Initializing browser', 5);
+    
+    const browser = await launchBrowser();
+    dashboard.log('Browser launched successfully', 'success');
   
   const context = await browser.newContext({
     viewport: null,  // Use full window size (no fixed viewport)
@@ -1221,82 +1290,22 @@ async function main() {
       console.log(`📸 Error screenshot saved: ${errorScreenshot}\n`);
     }
     
-    // Step 4: Click manager radio button to select that manager
-    // ═══════════════════════════════════════════════════════════════════════════════
-    // 🎯 PRECISE TEXT TARGETING: Use Chakra UI segment group class with exact match
-    // ═══════════════════════════════════════════════════════════════════════════════
-    console.log(`🎯 Step 4: Selecting "${CONFIG.targetName}" manager (Precise Targeting)...`);
-    
-    try {
-      // Define precise locator using Chakra UI class + exact text match
-      const managerButton = page.locator('.chakra-segment-group__itemText', { hasText: new RegExp(`^${CONFIG.targetName}$`) });
-      
-      // Check if the button exists
-      const buttonCount = await managerButton.count();
-      console.log(`  → Found ${buttonCount} button(s) matching "${CONFIG.targetName}"`);
-      
-      if (buttonCount > 0) {
-        // Primary: Force click on the Playwright locator
-        console.log(`  → Attempting Playwright force-click...`);
-        try {
-          await managerButton.first().click({ force: true, timeout: 5000 });
-          console.log(`  ✅ Playwright click successful`);
-        } catch (clickError) {
-          // Fallback: Use native JavaScript click
-          console.log(`  ⚠️  Playwright click failed, using JS fallback...`);
-          const jsClicked = await page.evaluate((targetName) => {
-            const spans = Array.from(document.querySelectorAll('.chakra-segment-group__itemText'));
-            const targetSpan = spans.find(span => span.textContent.trim() === targetName);
-            if (targetSpan) {
-              // Click the span itself
-              targetSpan.click();
-              // Also try clicking parent label if exists
-              const parentLabel = targetSpan.closest('label');
-              if (parentLabel) parentLabel.click();
-              return true;
-            }
-            return false;
-          }, CONFIG.targetName);
-          
-          if (jsClicked) {
-            console.log(`  ✅ JavaScript fallback click successful`);
-          } else {
-            console.log(`  ❌ JavaScript fallback also failed`);
-          }
-        }
-        
-        // Wait for UI to acknowledge the change
-        console.log(`  → Waiting for UI state change...`);
-        try {
-          // Wait for the target input to become checked
-          await page.waitForFunction((targetName) => {
-            const spans = Array.from(document.querySelectorAll('.chakra-segment-group__itemText'));
-            const targetSpan = spans.find(span => span.textContent.trim() === targetName);
-            if (targetSpan) {
-              const parentLabel = targetSpan.closest('label');
-              if (parentLabel) {
-                return parentLabel.getAttribute('data-state') === 'checked';
-              }
-            }
-            return false;
-          }, CONFIG.targetName, { timeout: 3000 });
-          console.log(`  ✅ UI confirmed: "${CONFIG.targetName}" is now selected`);
-        } catch (waitError) {
-          console.log(`  ⚠️  UI state change not detected, adding safety buffer...`);
-        }
-        
-        // Safety buffer for AJAX reload
-        await page.waitForTimeout(2000);
-        
-        const step4Screenshot = path.join(CONFIG.screenshotDir, `4-selected-manager-${timestamp}.png`);
-        await page.screenshot({ path: step4Screenshot, fullPage: true });
-        console.log(`  📸 Screenshot: ${step4Screenshot}\n`);
-      } else {
-        console.log(`  ⚠️  Could not find "${CONFIG.targetName}" button using .chakra-segment-group__itemText\n`);
+    // Step 4 + farm processing: run sequentially for each manager
+    const allFarmData = [];
+    const managers = config.manager === 'both' ? ['승진', '진우'] : [config.manager];
+    for (const manager of managers) {
+      if (managers.length > 1) {
+        console.log(`
+${'\u2550'.repeat(70)}`);
+        console.log(`👤 SWITCHING TO MANAGER: ${manager}`);
+        console.log(`${'\u2550'.repeat(70)}
+`);
+        dashboard.log(`Processing manager: ${manager}`, 'info');
       }
-    } catch (error) {
-      console.log(`  ⚠️  Error selecting "${CONFIG.targetName}" manager: ${error.message}\n`);
-    }
+      CONFIG.targetName = manager;
+      await ensureAtReportPage(page);
+      await selectManager(page, manager, dashboard);
+
     
     // Step 5: Get all farms from the list and loop through them
     console.log('🏭 Step 5: Getting list of all farms...');
@@ -1367,8 +1376,6 @@ async function main() {
       farmList = [{ index: 1, name: 'First Farm (fallback)' }];
     }
     
-    // Array to store all farm data
-    const allFarmData = [];
     
     // 📅 EXPLICIT DATE CALCULATION: Define "Today" and calculate past 5 days
     const today = new Date();
@@ -1410,7 +1417,18 @@ async function main() {
     console.log(`   → Batch size: ${endIndex - startIndex} farms\n`);
     
     // Slice the array to get only the farms we want to process
-    const farmsToProcess = farmList.slice(startIndex, endIndex);
+    let farmsToProcess = farmList.slice(startIndex, endIndex);
+
+    // Apply day filter from setup page (e.g. '금' → only farms with [월수금], [금], etc.)
+    if (dashboardConfig.dayFilter) {
+      const filterDay = dashboardConfig.dayFilter;
+      const before = farmsToProcess.length;
+      farmsToProcess = farmsToProcess.filter(farm => {
+        const bracketMatch = farm.name.match(/\[(.*?)\]/);
+        return bracketMatch ? bracketMatch[1].includes(filterDay) : false;
+      });
+      console.log(`📅 Day filter '${filterDay}': ${before} → ${farmsToProcess.length} farms`);
+    }
     
     // Dynamic loop - checks maxFarms from config each iteration (allows adding farms mid-run)
     for (let farmIdx = 0; farmIdx < farmsToProcess.length; farmIdx++) {
@@ -1754,11 +1772,7 @@ async function main() {
           
           // Move to next date
           if (dayOffset > 0) {
-            await page.evaluate(() => {
-              const btn = document.querySelector('button[aria-label="다음 기간"]');
-              if (btn) btn.click();
-            });
-            await page.waitForTimeout(300);
+            await advanceToNextDate(page);
           }
           
           continue; // Visual confirmation handled everything - proceed to next date
@@ -1795,19 +1809,9 @@ async function main() {
           // Move to next date using "Next period" button (except for T-0, the last date)
           if (dayOffset > 0) {
             console.log(`     ⏭️  Moving to next date (T-${dayOffset} → T-${dayOffset - 1})...`);
-            const nextClicked = await page.evaluate(() => {
-              const nextButton = document.querySelector('button[aria-label="다음 기간"]');
-              if (nextButton) {
-                nextButton.click();
-                return true;
-              }
-              return false;
-            });
-            
+            const nextClicked = await advanceToNextDate(page);
             if (nextClicked) {
               console.log(`     ✅ Moved to next date`);
-              // ⚡ FAST: Brief wait for date picker (unavoidable UI)
-              await page.waitForTimeout(300);
             }
           }
           
@@ -1861,19 +1865,7 @@ async function main() {
             // Skip to next date (only if not at T-0)
             if (dayOffset > 0) {
               console.log(`     ⏭️  Moving to next date (T-${dayOffset} → T-${dayOffset - 1})...`);
-              const nextClicked = await page.evaluate(() => {
-                const nextButton = document.querySelector('button[aria-label="다음 기간"]');
-                if (nextButton) {
-                  nextButton.click();
-                  return true;
-                }
-                return false;
-              });
-              
-              if (nextClicked) {
-                // ⚡ FAST: Brief wait for date picker UI
-                await page.waitForTimeout(300);
-              }
+              await advanceToNextDate(page);
             }
             continue; // Skip to next date
           }
@@ -1991,19 +1983,7 @@ async function main() {
             // Skip to next date (only if not at T-0)
             if (dayOffset > 0) {
               console.log(`     ⏭️  Moving to next date (T-${dayOffset} → T-${dayOffset - 1})...`);
-              const nextClicked = await page.evaluate(() => {
-                const nextButton = document.querySelector('button[aria-label="다음 기간"]');
-                if (nextButton) {
-                  nextButton.click();
-                  return true;
-                }
-                return false;
-              });
-              
-              if (nextClicked) {
-                // ⚡ FAST: Brief wait for date picker UI
-                await page.waitForTimeout(300);
-              }
+              await advanceToNextDate(page);
             }
             continue;
           }
@@ -2073,10 +2053,6 @@ async function main() {
               return false;
             });
             
-            if (nextClicked) {
-              // ⚡ FAST: Brief wait for date picker UI
-              await page.waitForTimeout(300);
-            }
           }
           continue; // Skip to next date
         }
@@ -2545,8 +2521,6 @@ async function main() {
             });
             if (nextClicked) {
               console.log(`     ⏭️  Moving to next date...\n`);
-              // ⚡ FAST: Brief wait for date picker UI
-              await page.waitForTimeout(300);
             }
           }
           continue; // Skip to next date
@@ -3179,6 +3153,7 @@ async function main() {
     console.log(`     → Data found for ${farmData.datesWithData} dates\n`);
       
     } // End farm loop
+    } // End managers loop
     
     // Save all collected farm data
     console.log('\n💾 Saving all farm data...');
@@ -3317,14 +3292,21 @@ async function main() {
     console.log('   → Close terminal to stop everything\n');
     
     if (dashboard) {
-      dashboard.updateStatus('✅ Automation Complete', 'running');
+      dashboard.updateStatus(`✅ Automation Complete for ${manager}`, 'running');
       dashboard.updateStep('Completed successfully', 100);
-      dashboard.log('Automation finished. Browser staying open for inspection.', 'success');
+      dashboard.log(`Automation finished for ${manager}.`, 'success');
     }
     
-    // await browser.close(); // Commented out - close manually to inspect results
-    // Note: Dashboard server will keep running until terminal is closed
+    // If we have multiple managers, close this browser to prepare for the next one
+    if (managers.length > 1 && managers.indexOf(manager) < managers.length - 1) {
+      console.log(`🔒 Closing browser for ${manager} to prepare for next...`);
+      await browser.close().catch(() => {});
+    } else {
+      console.log('🔚 Final manager complete. Browser staying open for inspection.');
+      // await browser.close(); // Commented out - close manually to inspect results
+    }
   }
+}
 }
 
 // Run the automation
