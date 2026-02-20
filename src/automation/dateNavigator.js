@@ -10,6 +10,26 @@
 
 import { log } from '../utils.js';
 
+/**
+ * Wait until the displayed date changes from prevDate.
+ * Replaces fixed waitForTimeout(300) after each button click.
+ */
+async function waitForDateChange(page, prevDate, timeout = 2000) {
+  try {
+    await page.waitForFunction(
+      (prev) => {
+        const btn = Array.from(document.querySelectorAll('button.chakra-button'))
+          .find(b => b.textContent.includes('년') && b.textContent.includes('일'));
+        return btn && btn.textContent.trim() !== prev;
+      },
+      prevDate,
+      { timeout }
+    );
+  } catch {
+    // Fallback: date didn't change in time, continue anyway
+  }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // 📅 DATE NAVIGATION - BUTTON BASED ONLY
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -25,6 +45,7 @@ export async function navigateToStartDate(page, daysBack = 5) {
   
   try {
     for (let i = 0; i < daysBack; i++) {
+      const prevDate = await getCurrentDisplayedDate(page);
       const clicked = await page.evaluate(() => {
         const prevButton = document.querySelector('button[aria-label="이전 기간"]');
         if (prevButton) {
@@ -33,14 +54,13 @@ export async function navigateToStartDate(page, daysBack = 5) {
         }
         return false;
       });
-      
+
       if (!clicked) {
         log(`Failed to click "이전 기간" button on iteration ${i + 1}`, 'error');
         return false;
       }
-      
-      // Brief wait for date picker UI (unavoidable)
-      await page.waitForTimeout(300);
+
+      await waitForDateChange(page, prevDate);
     }
     
     log(`✅ Reached T-${daysBack} (${daysBack} clicks back)`, 'success');
@@ -59,6 +79,7 @@ export async function navigateToStartDate(page, daysBack = 5) {
  */
 export async function advanceToNextDate(page) {
   try {
+    const prevDate = await getCurrentDisplayedDate(page);
     const clicked = await page.evaluate(() => {
       const nextButton = document.querySelector('button[aria-label="다음 기간"]');
       if (nextButton) {
@@ -67,16 +88,15 @@ export async function advanceToNextDate(page) {
       }
       return false;
     });
-    
+
     if (clicked) {
-      // Brief wait for date picker UI (unavoidable)
-      await page.waitForTimeout(300);
+      await waitForDateChange(page, prevDate);
       return true;
     }
-    
+
     log('Failed to click "다음 기간" button', 'warning');
     return false;
-    
+
   } catch (error) {
     log(`Error advancing to next date: ${error.message}`, 'error');
     return false;

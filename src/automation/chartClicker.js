@@ -42,12 +42,15 @@ export async function clickFirstIrrigationPoint(page, coords, options = {}) {
     
     // Click chart at calculated position
     await page.mouse.click(finalCoords.x, finalCoords.y);
-    
-    // Brief wait for UI to register click
-    await page.waitForTimeout(500);
-    
+
+    // Wait until the first time input is populated (event-based, no fixed sleep)
+    await page.waitForFunction(
+      () => document.querySelector('input[type="time"]')?.value !== '',
+      { timeout: 1500 }
+    ).catch(() => {});
+
     return true;
-    
+
   } catch (error) {
     log(`Error clicking first irrigation point: ${error.message}`, 'error');
     return false;
@@ -88,12 +91,18 @@ export async function clickLastIrrigationPoint(page, coords, options = {}) {
     
     // Click chart at calculated position
     await page.mouse.click(finalCoords.x, finalCoords.y);
-    
-    // Brief wait for table update
-    await page.waitForTimeout(500);
-    
+
+    // Wait until the last time input is populated (event-based, no fixed sleep)
+    await page.waitForFunction(
+      () => {
+        const inputs = document.querySelectorAll('input[type="time"]');
+        return inputs.length > 1 && inputs[inputs.length - 1].value !== '';
+      },
+      { timeout: 1500 }
+    ).catch(() => {});
+
     return true;
-    
+
   } catch (error) {
     log(`Error clicking last irrigation point: ${error.message}`, 'error');
     return false;
@@ -142,9 +151,6 @@ export async function focusTimeInput(page, index = 0) {
  */
 export async function verifyClickRegistered(page, fieldType = 'first') {
   try {
-    // Wait a moment for table to update
-    await page.waitForTimeout(500);
-    
     const hasValue = await page.evaluate((type) => {
       const timeInputs = Array.from(document.querySelectorAll('input[type="time"]'));
       
