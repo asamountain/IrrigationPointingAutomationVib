@@ -34,9 +34,9 @@ import { trainAlgorithm } from './trainAlgorithm.js';  // ← ADD THIS LINE
 **Add this property**:
 ```javascript
 const CONFIG = {
-  url: 'https://admin.iofarm.com/report/',
-  username: 'admin@admin.com',
-  password: 'jojin1234!!',
+  url: process.env.ADMIN_URL || 'https://admin.iofarm.com/report/',
+  username: process.env.ADMIN_EMAIL || 'admin@admin.com',
+  password: process.env.ADMIN_PASSWORD || 'your-password',
   targetName: '승진',
   outputDir: './data',
   screenshotDir: './screenshots',

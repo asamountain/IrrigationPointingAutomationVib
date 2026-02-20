@@ -10,6 +10,7 @@
 import { chromium } from 'playwright';
 import fs from 'fs';
 import path from 'path';
+import 'dotenv/config'; // Load environment variables from .env file
 import { execSync } from 'child_process';
 import DashboardServer from './dashboard-server.js';
 import { setupNetworkInterception, waitForChartData, extractDataPoints, resetCapturedData } from './network-interceptor.js';
@@ -79,9 +80,9 @@ import {
 
 // Configuration (move to config.js later)
 const CONFIG = {
-  url: 'https://admin.iofarm.com/report/',
-  username: 'admin@admin.com',
-  password: 'jojin1234!!',
+  url: process.env.ADMIN_URL || 'https://admin.iofarm.com/report/',
+  username: process.env.ADMIN_EMAIL || 'admin@admin.com',
+  password: process.env.ADMIN_PASSWORD || 'jojin1234!!',
   targetName: '승진', // Will be set by dashboard
   outputDir: './data',
   screenshotDir: './screenshots',

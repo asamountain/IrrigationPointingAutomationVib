@@ -19,15 +19,16 @@ import { detectIrrigationEvents, getFirstAndLastEvents, waitForChartRender, clic
 import { log, logSection, delay, getDateRange, saveJSON, getTimestamp, ensureDir } from './src/utils.js';
 import fs from 'fs';
 import path from 'path';
+import 'dotenv/config'; // Load .env
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // ⚙️ CONFIGURATION
 // ═══════════════════════════════════════════════════════════════════════════════
 
 const CONFIG = {
-  baseUrl: 'https://admin.iofarm.com/report/',
-  username: 'admin@admin.com',
-  password: 'jojin1234!!',
+  baseUrl: process.env.ADMIN_URL || 'https://admin.iofarm.com/report/',
+  username: process.env.ADMIN_EMAIL || 'admin@admin.com',
+  password: process.env.ADMIN_PASSWORD || 'jojin1234!!',
   manager: '승진',  // Default manager - uses STRICT exact matching
   outputDir: './data',
   screenshotDir: './screenshots',
