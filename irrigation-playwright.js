@@ -1770,13 +1770,13 @@ ${'\u2550'.repeat(70)}`);
             lastTime: tableStatus.lastTime,
             learnedOffsets: learnedOffsets.count > 0 ? learnedOffsets : null
           });
-          
-          // Move to next date
-          if (dayOffset > 0) {
-            await advanceToNextDate(page);
+
+          if (dayOffset === 0) {
+            // Today is the last date — go straight to next farm
+            break;
           }
-          
-          continue; // Visual confirmation handled everything - proceed to next date
+          await advanceToNextDate(page);
+          continue; // proceed to next date
         }
         // ═══════════════════════════════════════════════════════════════════════
         

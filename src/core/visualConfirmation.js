@@ -88,9 +88,18 @@ export async function showClickOverlay(page, points, stats = null) {
     }, evalArg);
     
     console.log('  📋 createOverlay result:', JSON.stringify(createResult));
-    
-    if (!createResult.success) {
-      console.log('  ❌ createOverlay FAILED:', createResult.error);
+
+    // Retry once if overlay was not created (e.g. chart container not ready yet)
+    if (!createResult.overlayExists) {
+      console.log('  ⚠️  Overlay not found after first attempt — waiting 1.5s and retrying...');
+      await page.waitForTimeout(1500);
+      await page.evaluate((arg) => {
+        if (typeof createOverlay === 'function') {
+          createOverlay(arg.pts, arg.learningStats);
+        }
+      }, evalArg);
+      const retryExists = await page.evaluate(() => !!document.getElementById('irrigation-click-overlay'));
+      console.log('  📋 Retry overlay exists:', retryExists);
     }
     
     console.log('  📍 FIRST (RED) line at: ' + (points.first?.time || 'N/A'));
@@ -311,22 +320,40 @@ export async function handleVisualConfirmation(page, options = {}) {
       console.log(`  ⚠️  Chart not found, using default positions`);
     }
     
-    // Calculate default bar positions at 1/3 and 2/3 of chart
-    const defaultFirstX = chartBounds.left + chartBounds.width * 0.33;
-    const defaultLastX = chartBounds.left + chartBounds.width * 0.66;
+    // Convert time string to chart X screen position — handles "HH:MM" and "HH:MM AM/PM"
+    function timeToScreenX(timeStr) {
+      if (!timeStr) return null;
+      const parts = timeStr.match(/(\d{1,2}):(\d{2})/);
+      if (!parts) return null;
+      let hours = parseInt(parts[1]);
+      const minutes = parseInt(parts[2]);
+      if (/pm/i.test(timeStr) && hours < 12) hours += 12;
+      if (/am/i.test(timeStr) && hours === 12) hours = 0;
+      const startHour = 2, totalMinutes = (20 - 2) * 60;
+      const minutesFromStart = hours * 60 + minutes - startHour * 60;
+      const pct = Math.max(0, Math.min(1, minutesFromStart / totalMinutes));
+      return chartBounds.left + pct * chartBounds.width;
+    }
+
     const defaultY = chartBounds.top + chartBounds.height * 0.5;
-    
+
+    // Place bars at detected times if available; fall back to 1/3 and 2/3
+    const firstScreenX = timeToScreenX(firstTime) ?? (chartBounds.left + chartBounds.width * 0.33);
+    const lastScreenX  = timeToScreenX(lastTime)  ?? (chartBounds.left + chartBounds.width * 0.66);
+
+    console.log(`  📍 Bar positions from times — FIRST: ${firstTime} → X=${Math.round(firstScreenX)}, LAST: ${lastTime} → X=${Math.round(lastScreenX)}`);
+
     // Prepare overlay data
     const overlayData = {
       first: {
-        screenX: defaultFirstX,
+        screenX: firstScreenX,
         screenY: defaultY,
         time: firstTime || '??:??',
         x: 0,
         y: 0
       },
       last: {
-        screenX: defaultLastX,
+        screenX: lastScreenX,
         screenY: defaultY,
         time: lastTime || '??:??',
         x: 0,

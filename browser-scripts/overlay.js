@@ -58,11 +58,10 @@ function createOverlay(pts, stats) {
     last: { screenX: pts.last?.screenX, screenY: pts.last?.screenY }
   };
 
-  // Find chart container
+  // Find chart container — only used for disabling Highcharts clicks, not required for overlay
   const chartContainer = document.querySelector('.highcharts-container, .highcharts-root')?.parentElement;
   if (!chartContainer) {
-    debugLog('createOverlay', 'ERROR: Cannot find chart container');
-    return;
+    debugLog('createOverlay', 'WARNING: Chart container not found - continuing without disabling Highcharts clicks');
   }
 
   // CRITICAL: Disable ALL Highcharts click events by intercepting them
@@ -226,9 +225,9 @@ function createMarker(type, point, lineTop, lineHeight) {
   const marker = document.createElement('div');
   marker.id = `${type}-marker`;
   marker.style.cssText = `
-    position: fixed; left: ${point.screenX - 2}px; top: ${lineTop}px;
-    width: 4px; height: ${lineHeight}px; background: ${bgColor};
-    border-left: 2px solid ${color}; border-right: 2px solid ${color};
+    position: fixed; left: ${point.screenX}px; top: ${lineTop}px;
+    width: 1px; height: ${lineHeight}px; background: ${color};
+    border: none;
     cursor: ew-resize; pointer-events: auto;
   `;
 
@@ -238,7 +237,7 @@ function createMarker(type, point, lineTop, lineHeight) {
     position: fixed; left: ${point.screenX + 8}px; top: ${lineTop - 25}px;
     background: ${color}; color: white; padding: 3px 8px; border-radius: 4px;
     font-size: 12px; font-weight: bold; font-family: sans-serif;
-    pointer-events: none; white-space: nowrap;
+    pointer-events: auto; cursor: ew-resize; white-space: nowrap;
   `;
   label.textContent = `${isFirst ? 'FIRST' : 'LAST'}: ${point.time}`;
 
@@ -264,24 +263,25 @@ function makeDraggable(marker, label, markerType, xPositionToTime, pts) {
     return false;
   }
 
-  marker.addEventListener('mousedown', (e) => {
-    debugLog('makeDraggable.mousedown', `MOUSEDOWN on ${markerType} marker`, { 
-      clientX: e.clientX, 
+  function startDrag(e) {
+    debugLog('makeDraggable.mousedown', `MOUSEDOWN on ${markerType} marker/label`, {
+      clientX: e.clientX,
       clientY: e.clientY,
-      target: e.target.id 
+      target: e.target.id
     });
-    
+
     // CRITICAL: Block event from reaching Highcharts
     e.preventDefault();
     e.stopPropagation();
     e.stopImmediatePropagation();
-    
+
     marker.style.cursor = 'grabbing';
+    label.style.cursor = 'grabbing';
 
     const startX = e.clientX;
     const origLeft = parseFloat(marker.style.left);
     const labelOrigLeft = parseFloat(label.style.left);
-    
+
     debugLog('makeDraggable.mousedown', `Drag started`, { startX, origLeft, labelOrigLeft });
 
     // Temporarily block ALL clicks on the chart container
@@ -296,7 +296,7 @@ function makeDraggable(marker, label, markerType, xPositionToTime, pts) {
       moveCount++;
       e.preventDefault();
       e.stopPropagation();
-      
+
       const dx = e.clientX - startX;
       const newLeft = origLeft + dx;
       marker.style.left = newLeft + 'px';
@@ -307,15 +307,15 @@ function makeDraggable(marker, label, markerType, xPositionToTime, pts) {
       const newY = pts.first?.screenY || pts.last?.screenY || 0;
 
       label.textContent = `${markerType === 'first' ? 'FIRST' : 'LAST'}: ${timeStr}`;
-      
+
       // Log every 10th move to avoid flooding
       if (moveCount % 10 === 1) {
-        debugLog('makeDraggable.onMove', `DRAG MOVE #${moveCount} for ${markerType}`, { 
+        debugLog('makeDraggable.onMove', `DRAG MOVE #${moveCount} for ${markerType}`, {
           dx, newLeft, timeStr,
           markerType
         });
       }
-      
+
       // Update ONLY the correct input field
       debugLog('makeDraggable.onMove', `CALLING updateTimeInput("${markerType}", "${timeStr}")`);
       updateTimeInput(markerType, timeStr);
@@ -337,11 +337,12 @@ function makeDraggable(marker, label, markerType, xPositionToTime, pts) {
 
     function onUp(e) {
       debugLog('makeDraggable.onUp', `MOUSEUP on ${markerType} marker after ${moveCount} moves`);
-      
+
       e.preventDefault();
       e.stopPropagation();
-      
+
       marker.style.cursor = 'ew-resize';
+      label.style.cursor = 'ew-resize';
       document.removeEventListener('mousemove', onMove);
       document.removeEventListener('mouseup', onUp);
 
@@ -353,9 +354,9 @@ function makeDraggable(marker, label, markerType, xPositionToTime, pts) {
 
       const finalX = parseFloat(marker.style.left) + 2;
       const finalTime = xPositionToTime(finalX);
-      
+
       debugLog('makeDraggable.onUp', `Final position for ${markerType}`, { finalX, finalTime });
-      
+
       // Final update to the correct input field ONLY
       debugLog('makeDraggable.onUp', `FINAL CALL to updateTimeInput("${markerType}", "${finalTime}")`);
       updateTimeInput(markerType, finalTime);
@@ -363,14 +364,25 @@ function makeDraggable(marker, label, markerType, xPositionToTime, pts) {
       // DO NOT trigger Highcharts click - it updates BOTH inputs!
       // The website's Highcharts click handler fills both fields simultaneously
       // We only need to update our target input field directly
-      
+
       debugLog('makeDraggable.onUp', `✅ Drag COMPLETE for ${markerType}: ${finalTime}`);
       label.style.background = markerType === 'first' ? '#FF8800' : '#8888FF';
+
+      // Auto-save only after BOTH markers have been dragged
+      const firstDone = window.__irrigationCorrected?.first?.wasDragged;
+      const lastDone  = window.__irrigationCorrected?.last?.wasDragged;
+      if (firstDone && lastDone) {
+        document.body.focus();
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+      }
     }
 
     document.addEventListener('mousemove', onMove);
     document.addEventListener('mouseup', onUp);
-  });
+  }
+
+  marker.addEventListener('mousedown', startDrag);
+  label.addEventListener('mousedown', startDrag);
   
   // Also block click events on the marker (in case of accidental clicks)
   marker.addEventListener('click', (e) => {
