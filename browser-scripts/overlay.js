@@ -154,21 +154,64 @@ function createOverlay(pts, stats) {
 function createInfoBox(pts, stats) {
   const infoBox = document.createElement('div');
   infoBox.id = 'irrigation-info-box';
-  infoBox.style.cssText = `
-    position: fixed; bottom: 10px; left: 10px;
+  
+  // Base styles with transition for smooth expand/collapse
+  const collapsedStyles = `
+    position: fixed; bottom: 20px; left: 20px;
     background: rgba(0, 0, 0, 0.9); color: white;
-    padding: 15px 20px; border-radius: 8px;
+    padding: 10px; border-radius: 50%;
     font-family: 'Consolas', monospace; font-size: 14px;
-    z-index: 100000; pointer-events: auto; min-width: 300px;
-    border: 2px solid #4CAF50; cursor: move; user-select: none;
+    z-index: 100000; pointer-events: auto;
+    width: 45px; height: 45px; overflow: hidden;
+    border: 2px solid #4CAF50; cursor: pointer;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+    transition: all 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
   `;
 
-  // Make draggable
+  const expandedStyles = `
+    width: 320px; height: auto; border-radius: 12px;
+    padding: 15px 20px; cursor: move; align-items: flex-start;
+    justify-content: flex-start;
+  `;
+
+  infoBox.style.cssText = collapsedStyles;
+
+  // Add the floating icon content
+  const contentWrapper = document.createElement('div');
+  contentWrapper.style.cssText = 'width: 100%; opacity: 0; transition: opacity 0.2s; pointer-events: none;';
+  
+  const icon = document.createElement('div');
+  icon.id = 'info-box-icon';
+  icon.innerHTML = '🌱';
+  icon.style.cssText = 'font-size: 24px; position: absolute; transition: transform 0.3s;';
+  infoBox.appendChild(icon);
+
+  // Hover behaviors
+  infoBox.addEventListener('mouseenter', () => {
+    infoBox.style.cssText = collapsedStyles + expandedStyles;
+    icon.style.transform = 'scale(0)';
+    icon.style.opacity = '0';
+    setTimeout(() => { contentWrapper.style.opacity = '1'; contentWrapper.style.pointerEvents = 'auto'; }, 100);
+  });
+
+  infoBox.addEventListener('mouseleave', () => {
+    contentWrapper.style.opacity = '0';
+    contentWrapper.style.pointerEvents = 'none';
+    infoBox.style.cssText = collapsedStyles;
+    icon.style.transform = 'scale(1)';
+    icon.style.opacity = '1';
+  });
+
+  // Make draggable only when expanded and clicking the title
   infoBox.addEventListener('mousedown', (e) => {
-    if (e.target.tagName === 'BUTTON') return;
-    e.preventDefault();
+    if (infoBox.style.width === '45px') return; // Don't drag while collapsed
+    if (e.target.tagName === 'BUTTON' || e.target.closest('#info-box-shortcuts')) return;
+    
     const startX = e.clientX, startY = e.clientY;
-    const origLeft = infoBox.offsetLeft, origTop = infoBox.offsetTop;
+    const rect = infoBox.getBoundingClientRect();
+    const origLeft = rect.left, origTop = rect.top;
+    
     infoBox.style.bottom = 'auto';
     infoBox.style.top = origTop + 'px';
     infoBox.style.left = origLeft + 'px';
@@ -186,31 +229,34 @@ function createInfoBox(pts, stats) {
   });
 
   const learningInfo = stats ? `
-    <div style="margin-bottom: 10px; padding: 8px; background: rgba(76, 175, 80, 0.2); border-radius: 4px;">
+    <div style="margin-bottom: 10px; padding: 8px; background: rgba(76, 175, 80, 0.2); border-radius: 4px; width: 100%;">
       <div style="color: #4CAF50; font-size: 11px;">🧠 LEARNING MODE ACTIVE</div>
-      <div style="color: #888; font-size: 11px;">Corrections: ${stats.totalCorrections || 0} | Bias: ±${Math.round(stats.avgOffset || 0)}px</div>
+      <div style="color: #888; font-size: 11px;">Bias: ±${Math.round(stats.avgOffset || 0)}px</div>
     </div>
   ` : '';
 
-  infoBox.innerHTML = `
-    <div style="font-size: 16px; font-weight: bold; margin-bottom: 10px; color: #4CAF50; cursor: move;">
-      👁️ Visual Confirmation Mode <span style="font-size: 10px; color: #888;">(drag to move)</span>
+  contentWrapper.innerHTML = `
+    <div style="font-size: 16px; font-weight: bold; margin-bottom: 10px; color: #4CAF50; white-space: nowrap;">
+      🌱 Irrigation Assistant
     </div>
     ${learningInfo}
-    <div id="first-marker-info" style="margin-bottom: 8px;">
-      <span style="color: #FF4444; font-size: 18px;">|</span> FIRST: <span id="first-time">${pts.first?.time || 'N/A'}</span>
-      <span style="color: #888; font-size: 11px;" id="first-coords">(${Math.round(pts.first?.screenX || 0)}, ${Math.round(pts.first?.screenY || 0)})</span>
+    <div style="margin-bottom: 8px; width: 100%;">
+      <span style="color: #FF4444; font-weight: bold;">|</span> FIRST: <span id="first-time" style="color: #fff;">${pts.first?.time || 'N/A'}</span>
     </div>
-    <div id="last-marker-info" style="margin-bottom: 12px;">
-      <span style="color: #4444FF; font-size: 18px;">|</span> LAST: <span id="last-time">${pts.last?.time || 'N/A'}</span>
-      <span style="color: #888; font-size: 11px;" id="last-coords">(${Math.round(pts.last?.screenX || 0)}, ${Math.round(pts.last?.screenY || 0)})</span>
+    <div style="margin-bottom: 12px; width: 100%;">
+      <span style="color: #4444FF; font-weight: bold;">|</span> LAST: <span id="last-time" style="color: #fff;">${pts.last?.time || 'N/A'}</span>
     </div>
-    <div style="border-top: 1px solid #444; padding-top: 10px; margin-top: 5px;">
-      <div style="color: #FFD700; font-size: 12px; margin-bottom: 5px;">🖱️ Drag vertical lines to set time</div>
-      <div style="color: #4CAF50; font-weight: bold;">Press ENTER to save (저장)</div>
-      <div style="color: #FF9800;">Press ESC to skip this date</div>
+    <div id="info-box-shortcuts" style="border-top: 1px solid #444; padding-top: 10px; width: 100%;">
+      <div style="color: #FFD700; font-size: 12px; margin-bottom: 5px;">🖱️ Drag lines to set time</div>
+      <div style="color: #4CAF50; font-weight: bold; font-size: 13px;">ENTER: Save | ESC: Skip</div>
+      <div style="color: #AAAAAA; font-size: 11px; margin-top: 5px; line-height: 1.4;">
+        <span style="color: #00BFFF; font-weight: bold;">H/L</span>: Prev/Next Day<br>
+        <span style="color: #00BFFF; font-weight: bold;">J/K</span>: Prev/Next Farm
+      </div>
     </div>
   `;
+  
+  infoBox.appendChild(contentWrapper);
   return infoBox;
 }
 
@@ -372,6 +418,17 @@ function makeDraggable(marker, label, markerType, xPositionToTime, pts) {
       const firstDone = window.__irrigationCorrected?.first?.wasDragged;
       const lastDone  = window.__irrigationCorrected?.last?.wasDragged;
       if (firstDone && lastDone) {
+        debugLog('makeDraggable.onUp', 'Both markers dragged - ensuring save button is enabled');
+        
+        // Force-enable the save button just in case React is slow
+        const saveBtn = Array.from(document.querySelectorAll('button')).find(b => b.textContent.includes('저장'));
+        if (saveBtn) {
+          saveBtn.disabled = false;
+          saveBtn.removeAttribute('disabled');
+          saveBtn.style.opacity = '1';
+          saveBtn.style.pointerEvents = 'auto';
+        }
+        
         document.body.focus();
         document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
       }

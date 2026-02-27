@@ -236,20 +236,11 @@ async function runReportSending(config, dashboard, runStats) {
     const farmList = await extractFarmList(page, dashboard);
     
     // Step 5: Calculate Farm Range (using module)
-    let { farmsToProcess, startIndex, endIndex, totalFarms } = calculateFarmRange(farmList, config);
+    const dashboardConfig = dashboard.getConfig();
+    const rangeConfig = { ...config, dayFilter: dashboardConfig.dayFilter };
+    let { farmsToProcess, startIndex, endIndex, totalFarms } = calculateFarmRange(farmList, rangeConfig);
 
-    // Apply day filter (same logic as normal automation)
-    const filterDay = dashboard.getConfig().dayFilter;
-    if (filterDay) {
-      const before = farmsToProcess.length;
-      farmsToProcess = farmsToProcess.filter(farm => {
-        const bracketMatch = farm.name.match(/\[(.*?)\]/);
-        return bracketMatch ? bracketMatch[1].includes(filterDay) : false;
-      });
-      console.log(`📅 Day filter '${filterDay}': ${before} → ${farmsToProcess.length} farms`);
-    }
-
-    // Step 4: Process each farm
+    // Step 6: Process each farm
     let reportsCreated = 0;
     let reportsSkipped = 0;
     
@@ -258,7 +249,7 @@ async function runReportSending(config, dashboard, runStats) {
       const farmNumber = startIndex + farmIdx + 1;
       
       console.log(`\n${'═'.repeat(70)}`);
-      console.log(`🏭 Farm ${farmNumber}/${totalFarms}: ${farm.name}`);
+      console.log(`🏭 Farm ${farmNumber}/${totalFarms}: ${farm.name} (Original Farm #${farm.index})`);
       console.log(`${'═'.repeat(70)}\n`);
       
       dashboard.updateProgress(farmIdx + 1, farmsToProcess.length, farm.name);
@@ -1390,46 +1381,16 @@ ${'\u2550'.repeat(70)}`);
     // --- NEW FARM ITERATION LOGIC ---
     // Get configuration from dashboard
     const dashboardConfig = dashboard.getConfig();
-    const totalFarms = farmList.length;
+    const totalDaysToCheck = 6;
     
-    // Parse config (dashboard sends 1-based index for 'startFrom', 0 means 'all')
-    let startIndex = (dashboardConfig.startFrom > 0) ? (dashboardConfig.startFrom - 1) : 0;
-    let maxCount = dashboardConfig.maxFarms || totalFarms;
+    // Calculate range with Day Filter applied correctly
+    const rangeConfig = { 
+      startFrom: dashboardConfig.startFrom, 
+      maxFarms: dashboardConfig.maxFarms, 
+      dayFilter: dashboardConfig.dayFilter 
+    };
     
-    // 🛡️ SAFETY AUTO-CORRECT: Validate and clamp startIndex if invalid
-    if (startIndex >= totalFarms) {
-      const requestedFarm = startIndex + 1;
-      startIndex = totalFarms - 1; // Clamp to last available farm
-      const warningMsg = `⚠️ Request for Farm #${requestedFarm} exceeds limit (${totalFarms} farms exist). Auto-corrected to start from Farm #${startIndex + 1}.`;
-      console.warn(`\n${warningMsg}\n`);
-      if (dashboard) {
-        dashboard.log(warningMsg, 'warning');
-        dashboard.updateStatus('⚠️ Auto-corrected configuration', 'running');
-      }
-    }
-    
-    // 🛡️ SAFETY: Ensure endIndex never exceeds totalFarms
-    let endIndex = Math.min(startIndex + maxCount, totalFarms);
-    
-    console.log(`\n📋 Farm Processing Plan:`);
-    console.log(`   → Total available: ${totalFarms}`);
-    console.log(`   → Starting at: Farm #${startIndex + 1}`);
-    console.log(`   → Stopping at: Farm #${endIndex}`);
-    console.log(`   → Batch size: ${endIndex - startIndex} farms\n`);
-    
-    // Slice the array to get only the farms we want to process
-    let farmsToProcess = farmList.slice(startIndex, endIndex);
-
-    // Apply day filter from setup page (e.g. '금' → only farms with [월수금], [금], etc.)
-    if (dashboardConfig.dayFilter) {
-      const filterDay = dashboardConfig.dayFilter;
-      const before = farmsToProcess.length;
-      farmsToProcess = farmsToProcess.filter(farm => {
-        const bracketMatch = farm.name.match(/\[(.*?)\]/);
-        return bracketMatch ? bracketMatch[1].includes(filterDay) : false;
-      });
-      console.log(`📅 Day filter '${filterDay}': ${before} → ${farmsToProcess.length} farms`);
-    }
+    let { farmsToProcess, totalFarms } = calculateFarmRange(farmList, rangeConfig);
     
     // Dynamic loop - checks maxFarms from config each iteration (allows adding farms mid-run)
     for (let farmIdx = 0; farmIdx < farmsToProcess.length; farmIdx++) {
@@ -1470,10 +1431,14 @@ ${'\u2550'.repeat(70)}`);
       
       // Get current farm from the sliced array
       const currentFarm = farmsToProcess[farmIdx];
-      const actualFarmIndex = startIndex + farmIdx; // Calculate actual index in original farmList for clicking
+      
+      // CRITICAL FIX: Use the original index from the farm object
+      // This ensures we click the correct link even if filtering (dayFilter) 
+      // has changed the array indices.
+      const actualFarmIndex = currentFarm.index - 1; 
       
       console.log(`\n${'='.repeat(70)}`);
-      console.log(`🏭 Processing Farm ${farmIdx + 1}/${farmsToProcess.length}: ${currentFarm.name} (Farm #${actualFarmIndex + 1} of ${totalFarms})`);
+      console.log(`🏭 Processing Farm ${farmIdx + 1}/${farmsToProcess.length}: ${currentFarm.name} (Original Farm #${currentFarm.index} of ${totalFarms})`);
       console.log(`${'='.repeat(70)}\n`);
       
       // Update dashboard progress (reuse currentConfig from above)
@@ -1576,7 +1541,6 @@ ${'\u2550'.repeat(70)}`);
     
     // 📅 DATE LOOP: Process T-5 to T-0 (OLDEST to NEWEST - NEVER reverse!)
     // See IRRIGATION_RULES.md and DONT.md for why this direction is mandatory
-    const totalDaysToCheck = 6;
     let dateIdx = 0;
     const farmDateData = []; // Store data for all dates of this farm
     
@@ -1770,6 +1734,41 @@ ${'\u2550'.repeat(70)}`);
             lastTime: tableStatus.lastTime,
             learnedOffsets: learnedOffsets.count > 0 ? learnedOffsets : null
           });
+
+          // Handle navigation commands (H/L/J/K keys)
+          if (vcResult.nav === 'prev-farm') {
+            console.log(`     ⬅️  User requested PREVIOUS farm (J)`);
+            farmIdx -= 2; // -2 because the loop will increment by 1
+            if (farmIdx < -1) farmIdx = -1; 
+            break; // Exit date loop to change farm
+          } else if (vcResult.nav === 'next-farm') {
+            console.log(`     ➡️  User requested NEXT farm (K)`);
+            // farmIdx remains same, loop will increment to next
+            break; // Exit date loop to change farm
+          } else if (vcResult.nav === 'prev-day') {
+            console.log(`     🔙 User requested PREVIOUS day (H)`);
+            // Go back 1 day (increase dayOffset)
+            const targetOffset = Math.min(5, dayOffset + 1);
+            if (targetOffset !== dayOffset) {
+              await navigateToStartDate(page, targetOffset);
+              dayOffset = targetOffset + 1; // +1 because continue will decrement it
+              continue;
+            } else {
+              console.log('     ⚠️  Already at earliest date (T-5)');
+              continue;
+            }
+          } else if (vcResult.nav === 'next-day') {
+            console.log(`     🔜 User requested NEXT day (L)`);
+            // Go forward 1 day (decrease dayOffset)
+            if (dayOffset > 0) {
+              await advanceToNextDate(page);
+              // continue will decrement dayOffset automatically
+              continue;
+            } else {
+              console.log('     ⚠️  Already at latest date (T-0)');
+              continue;
+            }
+          }
 
           if (dayOffset === 0) {
             // Today is the last date — go straight to next farm
@@ -3259,6 +3258,12 @@ ${'\u2550'.repeat(70)}`);
       // 🧹 Clear checkpoint on successful completion
       clearCheckpoint();
       
+      // Update final status to Complete
+      if (dashboard) {
+        dashboard.updateStatus('✅ Complete', 'success');
+        dashboard.log('Automation process finished successfully', 'success');
+      }
+      
     } catch (err) {
       console.log(`   ⚠️  Could not save history: ${err.message}`);
     }
@@ -3333,4 +3338,3 @@ process.on('SIGTERM', () => {
   closeExecutionLog();
   process.exit(0);
 });
-

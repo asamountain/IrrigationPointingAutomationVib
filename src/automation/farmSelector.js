@@ -162,32 +162,42 @@ export async function extractFarmList(page, dashboard) {
  * Calculate farm processing range based on config
  * 
  * @param {Array} farmList - Full farm list
- * @param {Object} config - { startFrom, maxFarms }
- * @returns {Object} - { farmsToProcess, startIndex, endIndex, totalFarms }
+ * @param {Object} config - { startFrom, maxFarms, dayFilter }
+ * @returns {Object} - { farmsToProcess, startIndex, endIndex, totalFarms, originalCount }
  */
 export function calculateFarmRange(farmList, config) {
-  const totalFarms = farmList.length;
-  let startIndex = (config.startFrom > 0) ? (config.startFrom - 1) : 0;
-  let maxCount = config.maxFarms || totalFarms;
+  const originalCount = farmList.length;
   
-  // Auto-correct if needed
-  if (startIndex >= totalFarms) {
-    startIndex = totalFarms - 1;
-    console.warn(`⚠️  Auto-corrected start index to Farm #${startIndex + 1}\n`);
+  // 1. Determine starting point based on ORIGINAL list
+  let startIndex = (config.startFrom > 0) ? (config.startFrom - 1) : 0;
+  if (startIndex >= originalCount) startIndex = Math.max(0, originalCount - 1);
+  
+  // 2. Take the sublist starting from the user's choice
+  let workingList = farmList.slice(startIndex);
+  
+  // 3. Apply day filter if exists
+  if (config.dayFilter) {
+    const filterDay = config.dayFilter;
+    workingList = workingList.filter(farm => {
+      const bracketMatch = farm.name.match(/\[(.*?)\]/);
+      return bracketMatch ? bracketMatch[1].includes(filterDay) : false;
+    });
+    console.log(`📅 Day filter '${filterDay}' applied: ${originalCount - startIndex} farms remaining → ${workingList.length} matching farms`);
   }
   
-  let endIndex = Math.min(startIndex + maxCount, totalFarms);
-  const farmsToProcess = farmList.slice(startIndex, endIndex);
+  // 4. Limit by maxFarms
+  let maxCount = config.maxFarms || 999;
+  const farmsToProcess = workingList.slice(0, maxCount);
   
   console.log(`📋 Processing Plan:`);
-  console.log(`   → Total farms: ${totalFarms}`);
-  console.log(`   → Range: Farm #${startIndex + 1} to #${endIndex}`);
-  console.log(`   → Count: ${farmsToProcess.length}\n`);
+  console.log(`   → Start Index: ${startIndex + 1} (Original List)`);
+  console.log(`   → Filter: ${config.dayFilter || 'None'}`);
+  console.log(`   → Total matching farms to process: ${farmsToProcess.length}\n`);
   
   return {
     farmsToProcess,
     startIndex,
-    endIndex,
-    totalFarms
+    totalFarms: farmsToProcess.length,
+    originalCount
   };
 }

@@ -196,26 +196,45 @@ export async function waitForUserConfirmation(page, timeout = 300000) {
             window._overlayConfirmed = false;
             document.removeEventListener('keydown', handler);
             browserResolve(false);
+          } else if (e.key.toLowerCase() === 'j') {
+            console.log('[BROWSER] J pressed - previous farm');
+            window._overlayConfirmed = 'prev-farm';
+            document.removeEventListener('keydown', handler);
+            browserResolve('prev-farm');
+          } else if (e.key.toLowerCase() === 'k') {
+            console.log('[BROWSER] K pressed - next farm');
+            window._overlayConfirmed = 'next-farm';
+            document.removeEventListener('keydown', handler);
+            browserResolve('next-farm');
+          } else if (e.key.toLowerCase() === 'h') {
+            console.log('[BROWSER] H pressed - previous day');
+            window._overlayConfirmed = 'prev-day';
+            document.removeEventListener('keydown', handler);
+            browserResolve('prev-day');
+          } else if (e.key.toLowerCase() === 'l') {
+            console.log('[BROWSER] L pressed - next day');
+            window._overlayConfirmed = 'next-day';
+            document.removeEventListener('keydown', handler);
+            browserResolve('next-day');
           }
         };
         
         document.addEventListener('keydown', handler);
-        console.log('[BROWSER] Keyboard listener attached, waiting for ENTER or ESC...');
-        
-        // Timeout fallback - DO NOT auto-confirm, just skip
-        setTimeout(() => {
-          if (window._overlayConfirmed === null) {
-            console.log('[BROWSER] Timeout reached - skipping (no auto-confirm)');
-            document.removeEventListener('keydown', handler);
-            browserResolve(false); // Skip on timeout, don't auto-confirm
-          }
-        }, timeoutMs);
+        console.log('[BROWSER] Keyboard listener attached, waiting for ENTER, ESC, H/L, or J/K...');
       });
-    }, timeout).then((result) => {
-      if (result) {
+    }).then((result) => {
+      if (result === true) {
         console.log('  ✅ User pressed ENTER - confirmed');
+      } else if (result === 'prev-farm') {
+        console.log('  ⬅️  User pressed J - navigating to PREVIOUS farm');
+      } else if (result === 'next-farm') {
+        console.log('  ➡️  User pressed K - navigating to NEXT farm');
+      } else if (result === 'prev-day') {
+        console.log('  🔙 User pressed H - navigating to PREVIOUS day');
+      } else if (result === 'next-day') {
+        console.log('  🔜 User pressed L - navigating to NEXT day');
       } else {
-        console.log('  ⏭️  User pressed ESC or timeout - skipped');
+        console.log('  ⏭️  User pressed ESC - skipped');
       }
       resolve(result);
     }).catch((err) => {
@@ -259,6 +278,7 @@ export async function handleVisualConfirmation(page, options = {}) {
   const result = {
     confirmed: false,
     skipped: false,
+    nav: null,
     positions: null,
     clicked: false,
     error: null
@@ -364,8 +384,8 @@ export async function handleVisualConfirmation(page, options = {}) {
     
     // Step 3: Show draggable overlay
     console.log(`  ⏳ Step 3/5: Showing overlay bars...`);
-    console.log(`     📍 RED bar (FIRST): time=${overlayData.first.time}, X=${Math.round(defaultFirstX)}, Y=${Math.round(defaultY)}`);
-    console.log(`     📍 BLUE bar (LAST): time=${overlayData.last.time}, X=${Math.round(defaultLastX)}, Y=${Math.round(defaultY)}`);
+    console.log(`     📍 RED bar (FIRST): time=${overlayData.first.time}, X=${Math.round(overlayData.first.screenX)}, Y=${Math.round(defaultY)}`);
+    console.log(`     📍 BLUE bar (LAST): time=${overlayData.last.time}, X=${Math.round(overlayData.last.screenX)}, Y=${Math.round(defaultY)}`);
     
     try {
       const overlayResult = await showClickOverlay(page, overlayData, learnedOffsets);
@@ -381,10 +401,22 @@ export async function handleVisualConfirmation(page, options = {}) {
     console.log(`  ════════════════════════════════════════════════════════`);
     console.log(`     👉 Press ENTER to confirm and click the bar positions`);
     console.log(`     👉 Press ESC to skip this date`);
+    console.log(`     👉 Press H / L to navigate between DAYS`);
+    console.log(`     👉 Press J / K to navigate between FARMS`);
     console.log(`     👉 Or DRAG the bars first, then press ENTER`);
     console.log(`  ════════════════════════════════════════════════════════\n`);
     
     const userConfirmed = await waitForUserConfirmation(page, timeout);
+    
+    if (userConfirmed === 'prev-farm' || userConfirmed === 'next-farm' || userConfirmed === 'prev-day' || userConfirmed === 'next-day') {
+      if (userConfirmed === 'prev-farm') result.nav = 'prev-farm';
+      else if (userConfirmed === 'next-farm') result.nav = 'next-farm';
+      else if (userConfirmed === 'prev-day') result.nav = 'prev-day';
+      else if (userConfirmed === 'next-day') result.nav = 'next-day';
+      
+      await removeClickOverlay(page);
+      return result;
+    }
     
     if (!userConfirmed) {
       console.log(`  ⏭️  User pressed ESC - skipping`);
@@ -416,20 +448,16 @@ export async function handleVisualConfirmation(page, options = {}) {
     console.log(`  Clicking 저장 button to save...`);
     try {
       // Wait briefly for React to enable the button after our input updates
-      await page.waitForTimeout(300);
+      await page.waitForTimeout(500);
 
       const saveBtn = page.locator('button.chakra-button', { hasText: '저장' }).first();
-      const isEnabled = await saveBtn.isEnabled().catch(() => false);
-
-      if (isEnabled) {
-        await saveBtn.click();
-        console.log(`  ✅ 저장 button clicked - waiting for success tooltip...`);
-        // Wait for tooltip to appear
-        await page.waitForTimeout(2000);
-        result.clicked = true;
-      } else {
-        console.log(`  ⚠️  저장 button is still disabled - input update may not have reached React`);
-      }
+      
+      // Even if disabled, we try to click it with force: true
+      await saveBtn.click({ force: true, timeout: 5000 });
+      console.log(`  ✅ 저장 button clicked - waiting for success tooltip...`);
+      // Wait for tooltip to appear
+      await page.waitForTimeout(2000);
+      result.clicked = true;
     } catch (btnErr) {
       console.log(`  ❌  Could not click 저장 button: ${btnErr.message}`);
     }

@@ -128,8 +128,12 @@ class DashboardServer {
             manager: this.config.manager, 
             mode: this.config.mode, 
             maxFarms: this.config.maxFarms,
-            startFrom: this.config.startFrom
+            startFrom: this.config.startFrom,
+            dayFilter: this.config.dayFilter || 'none'
           });
+          if (this.config.dayFilter) {
+            logger.info(`Day filter active: ${this.config.dayFilter}`, { dayFilter: this.config.dayFilter });
+          }
           logger.functionExit(timerId, response);
         } catch (error) {
           const response = { success: false, error: error.message };
@@ -196,6 +200,17 @@ class DashboardServer {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(response));
       logger.apiResponse('POST', '/control/trigger-f9', response, 200);
+    }
+    else if (url.pathname === '/control/reset' && req.method === 'POST') {
+      logger.buttonClick('Reset Dashboard', { source: 'dashboard' });
+      this.isStarted = false;
+      this.shouldStop = false;
+      this.f9Triggered = false;
+      const response = { success: true, reset: true };
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(response));
+      logger.apiResponse('POST', '/control/reset', response, 200);
+      logger.info('Dashboard reset to initial state');
     }
     else if (url.pathname === '/control/check-f9' && req.method === 'GET') {
       // Playwright worker polls this to check if F9 was triggered

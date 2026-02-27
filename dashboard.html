@@ -704,6 +704,7 @@
                 <span class="status-label">Manager:</span>
                 <span class="status-value" id="manager">승진</span>
             </div>
+            <button id="btn-restart" onclick="resetDashboard()" class="btn-primary hidden" style="background: #4a9b3c; padding: 5px 15px; margin-left: auto;">🔄 Restart</button>
             <div class="progress-bar">
                 <div class="progress-fill" id="progress" style="width: 0%;">0%</div>
             </div>
@@ -891,6 +892,7 @@
             const startFrom = parseInt(document.getElementById('start-from-select').value);
             const mode = document.getElementById('mode-select').value;
             const maxFarms = parseInt(document.getElementById('max-farms-select').value);
+            const dayFilter = document.getElementById('day-filter-select').value; // NEW: Day filter
 
             if (!manager) {
                 alert('Please enter a manager name');
@@ -902,7 +904,7 @@
                 const response = await fetch('http://localhost:3456/control/start', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ manager, startFrom, mode, maxFarms })
+                    body: JSON.stringify({ manager, startFrom, mode, maxFarms, dayFilter })
                 });
 
                 if (response.ok) {
@@ -921,6 +923,13 @@
                     addLog(`Starting automation with manager: ${manager}`, 'success');
                     addLog(`Mode: ${mode}, Starting from: ${startFrom === 0 ? 'All farms' : 'Farm #' + startFrom}`, 'info');
                     addLog(`Max farms to process: ${maxFarms === 999 ? 'All' : maxFarms}`, 'info');
+                    
+                    // NEW: Log day filter
+                    if (dayFilter) {
+                        addLog(`📅 Day filter: ${dayFilter} (only farms with [${dayFilter}...] in name)`, 'info');
+                    } else {
+                        addLog(`📅 Day filter: None (processing all farms)`, 'info');
+                    }
                 } else {
                     alert('Failed to start automation. Server may already be running.');
                 }
@@ -1016,6 +1025,14 @@
             if (data.type === 'status') {
                 document.getElementById('status').textContent = data.status;
                 document.getElementById('status').className = `status-value status-${data.statusClass}`;
+                
+                // Show Restart button if Complete
+                const restartBtn = document.getElementById('btn-restart');
+                if (data.status === '✅ Complete' || data.statusClass === 'success') {
+                    if (restartBtn) restartBtn.classList.remove('hidden');
+                } else {
+                    if (restartBtn) restartBtn.classList.add('hidden');
+                }
             }
 
             if (data.type === 'step') {
@@ -1211,6 +1228,22 @@
                 } catch (error) {
                     addLog('Failed to stop automation', 'error');
                 }
+            }
+        }
+
+        async function resetDashboard() {
+            try {
+                const response = await fetch('http://localhost:3456/control/reset', { method: 'POST' });
+                if (response.ok) {
+                    // Force page reload to clear all states and show config panel
+                    window.location.reload();
+                } else {
+                    addLog('Failed to reset dashboard', 'error');
+                }
+            } catch (error) {
+                addLog('Error resetting dashboard: ' + error.message, 'error');
+                // Fallback: just reload anyway
+                window.location.reload();
             }
         }
 
