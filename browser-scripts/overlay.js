@@ -143,8 +143,17 @@ function createOverlay(pts, stats) {
   overlay.appendChild(infoBox);
   document.body.appendChild(overlay);
 
-  // DO NOT sync initial times - let user drag to set them
-  // The website already has its own values, we only update when user drags
+  // Sync React time inputs with initial predicted bar positions
+  // so pressing ENTER without dragging still enables and fires the 저장 button.
+  const initFirstTime = pts.first?.time;
+  const initLastTime  = pts.last?.time;
+  if (initFirstTime && /^\d{2}:\d{2}$/.test(initFirstTime)) {
+    updateTimeInput('first', initFirstTime);
+  }
+  if (initLastTime && /^\d{2}:\d{2}$/.test(initLastTime)) {
+    updateTimeInput('last', initLastTime);
+  }
+
   console.log('[BROWSER] Overlay created - chart clicks BLOCKED, drag vertical lines to set times');
 }
 
@@ -248,7 +257,7 @@ function createInfoBox(pts, stats) {
     </div>
     <div id="info-box-shortcuts" style="border-top: 1px solid #444; padding-top: 10px; width: 100%;">
       <div style="color: #FFD700; font-size: 12px; margin-bottom: 5px;">🖱️ Drag lines to set time</div>
-      <div style="color: #4CAF50; font-weight: bold; font-size: 13px;">ENTER: Save | ESC: Skip</div>
+      <div style="color: #4CAF50; font-weight: bold; font-size: 13px;">,: Save (stay) | ENTER: Save+next | ESC: Skip</div>
       <div style="color: #AAAAAA; font-size: 11px; margin-top: 5px; line-height: 1.4;">
         <span style="color: #00BFFF; font-weight: bold;">H/L</span>: Prev/Next Day<br>
         <span style="color: #00BFFF; font-weight: bold;">J/K</span>: Prev/Next Farm
@@ -414,24 +423,9 @@ function makeDraggable(marker, label, markerType, xPositionToTime, pts) {
       debugLog('makeDraggable.onUp', `✅ Drag COMPLETE for ${markerType}: ${finalTime}`);
       label.style.background = markerType === 'first' ? '#FF8800' : '#8888FF';
 
-      // Auto-save only after BOTH markers have been dragged
-      const firstDone = window.__irrigationCorrected?.first?.wasDragged;
-      const lastDone  = window.__irrigationCorrected?.last?.wasDragged;
-      if (firstDone && lastDone) {
-        debugLog('makeDraggable.onUp', 'Both markers dragged - ensuring save button is enabled');
-        
-        // Force-enable the save button just in case React is slow
-        const saveBtn = Array.from(document.querySelectorAll('button')).find(b => b.textContent.includes('저장'));
-        if (saveBtn) {
-          saveBtn.disabled = false;
-          saveBtn.removeAttribute('disabled');
-          saveBtn.style.opacity = '1';
-          saveBtn.style.pointerEvents = 'auto';
-        }
-        
-        document.body.focus();
-        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
-      }
+      // Re-focus body so keyboard shortcuts (H/J/K/L/Enter/,) work immediately after dragging
+      document.activeElement?.blur();
+      document.body.focus();
     }
 
     document.addEventListener('mousemove', onMove);
@@ -655,6 +649,17 @@ function setupConfirmationListener(timeoutMs) {
         window._overlayConfirmed = true;
         document.removeEventListener('keydown', handler);
         saveIrrigationData().then(() => resolve(true));
+      } else if (e.key === ',') {
+        // Click the 저장 button directly
+        const saveBtn = Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim() === '저장');
+        if (saveBtn) {
+          window._overlayConfirmed = true;
+          document.removeEventListener('keydown', handler);
+          saveBtn.click();
+          resolve(true);
+        } else {
+          console.warn('[BROWSER] , pressed but 저장 button not found');
+        }
       } else if (e.key === 'Escape') {
         window._overlayConfirmed = false;
         document.removeEventListener('keydown', handler);

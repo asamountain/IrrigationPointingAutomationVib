@@ -169,62 +169,70 @@ export async function waitForUserConfirmation(page, timeout = 300000) {
     console.log('  ⚠️  Could not bring page to front:', e.message);
   }
   
-  // Focus the page body to ensure keyboard events are captured
-  await page.evaluate(() => {
-    document.body.focus();
-    document.body.click();
-  });
+  // Focus the body to give the page keyboard focus without triggering website click handlers.
+  // page.mouse.click(x, y) was used here before but it fires a real click that can land on
+  // a website element (nav link, button, input) and change page state or steal focus.
+  // page.focus('body') sets activeElement without dispatching any click events.
+  try {
+    await page.focus('body');
+    console.log('  ✅ Body focused for keyboard input');
+  } catch (e) {
+    console.log('  ⚠️  Body focus failed:', e.message);
+  }
   
   return new Promise((resolve) => {
     console.log('  👁️  WAITING FOR USER INPUT (ENTER=confirm, ESC=skip)...');
-    
-    // Set up keyboard listener in browser
-    page.evaluate((timeoutMs) => {
-      return new Promise((browserResolve) => {
-        console.log('[BROWSER] Setting up keyboard listener, timeout:', timeoutMs, 'ms');
-        window._overlayConfirmed = null;
-        
-        const handler = (e) => {
-          console.log('[BROWSER] Key pressed:', e.key);
-          if (e.key === 'Enter') {
-            console.log('[BROWSER] ENTER pressed - confirming');
-            window._overlayConfirmed = true;
-            document.removeEventListener('keydown', handler);
-            browserResolve(true);
-          } else if (e.key === 'Escape') {
-            console.log('[BROWSER] ESC pressed - skipping');
-            window._overlayConfirmed = false;
-            document.removeEventListener('keydown', handler);
-            browserResolve(false);
-          } else if (e.key.toLowerCase() === 'j') {
-            console.log('[BROWSER] J pressed - previous farm');
-            window._overlayConfirmed = 'prev-farm';
-            document.removeEventListener('keydown', handler);
-            browserResolve('prev-farm');
-          } else if (e.key.toLowerCase() === 'k') {
-            console.log('[BROWSER] K pressed - next farm');
-            window._overlayConfirmed = 'next-farm';
-            document.removeEventListener('keydown', handler);
-            browserResolve('next-farm');
-          } else if (e.key.toLowerCase() === 'h') {
-            console.log('[BROWSER] H pressed - previous day');
-            window._overlayConfirmed = 'prev-day';
-            document.removeEventListener('keydown', handler);
-            browserResolve('prev-day');
-          } else if (e.key.toLowerCase() === 'l') {
-            console.log('[BROWSER] L pressed - next day');
-            window._overlayConfirmed = 'next-day';
-            document.removeEventListener('keydown', handler);
-            browserResolve('next-day');
+
+    // Step 1: Init flag + install capture-phase keyboard listener (non-blocking).
+    // Using fire-and-forget evaluate so we are NOT subject to Playwright's 30s evaluate() limit.
+    page.evaluate(() => {
+      window._overlayResult = null;
+      // Clean up any leftover listener from a previous call
+      if (window._overlayKeyHandler) {
+        document.removeEventListener('keydown', window._overlayKeyHandler, true);
+      }
+      window._overlayKeyHandler = (e) => {
+        console.log('[BROWSER] Key pressed:', e.key);
+        if (e.key === ',') {
+          // Click 저장 without dismissing overlay — automation stays put
+          const saveBtn = Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim() === '저장');
+          if (saveBtn) {
+            saveBtn.click();
+            console.log('[BROWSER] , pressed — clicked 저장 button, overlay stays open');
+          } else {
+            console.warn('[BROWSER] , pressed but 저장 button not found');
           }
-        };
-        
-        document.addEventListener('keydown', handler);
-        console.log('[BROWSER] Keyboard listener attached, waiting for ENTER, ESC, H/L, or J/K...');
-      });
+          return; // do NOT set _overlayResult
+        }
+
+        if (e.key === 'Enter')                  window._overlayResult = true;
+        else if (e.key === 'Escape')            window._overlayResult = false;
+        else if (e.key.toLowerCase() === 'j')  window._overlayResult = 'prev-farm';
+        else if (e.key.toLowerCase() === 'k')  window._overlayResult = 'next-farm';
+        else if (e.key.toLowerCase() === 'h')  window._overlayResult = 'prev-day';
+        else if (e.key.toLowerCase() === 'l')  window._overlayResult = 'next-day';
+
+        if (window._overlayResult !== null) {
+          document.removeEventListener('keydown', window._overlayKeyHandler, true);
+          window._overlayKeyHandler = null;
+        }
+      };
+      // Capture phase fires before React's bubble-phase handlers (which may stopImmediatePropagation)
+      document.addEventListener('keydown', window._overlayKeyHandler, true);
+      console.log('[BROWSER] Keyboard listener attached (waiting for ENTER/ESC/H/J/K/L or drag-complete)');
+    }).then(() => {
+      // Step 2: Poll until _overlayResult is set — no 30s limit, supports full timeout
+      return page.waitForFunction(
+        () => window._overlayResult !== null,
+        null,
+        { timeout }
+      );
+    }).then(() => {
+      // Step 3: Read the result
+      return page.evaluate(() => window._overlayResult);
     }).then((result) => {
       if (result === true) {
-        console.log('  ✅ User pressed ENTER - confirmed');
+        console.log('  ✅ Confirmed (ENTER or drag-complete)');
       } else if (result === 'prev-farm') {
         console.log('  ⬅️  User pressed J - navigating to PREVIOUS farm');
       } else if (result === 'next-farm') {
@@ -239,7 +247,7 @@ export async function waitForUserConfirmation(page, timeout = 300000) {
       resolve(result);
     }).catch((err) => {
       console.log('  ❌ Keyboard listener error:', err.message);
-      resolve(false); // On error, skip
+      resolve(false);
     });
   });
 }
@@ -272,7 +280,8 @@ export async function handleVisualConfirmation(page, options = {}) {
     firstTime = null,
     lastTime = null,
     learnedOffsets = null,
-    timeout = 300000
+    timeout = 300000,
+    onConfirm = null
   } = options;
   
   const result = {
@@ -438,6 +447,13 @@ export async function handleVisualConfirmation(page, options = {}) {
     });
     
     result.positions = correctedPositions;
+
+    // Fire TCN training callback (if provided) before removing the overlay
+    if (typeof onConfirm === 'function' && correctedPositions) {
+      await onConfirm(correctedPositions, chartBounds).catch(e =>
+        console.log('  ⚠️  TCN training failed:', e.message)
+      );
+    }
 
     // Remove overlay before clicking the save button
     await removeClickOverlay(page);

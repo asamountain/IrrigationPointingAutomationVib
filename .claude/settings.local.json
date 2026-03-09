@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(cd:*)"
+      "Bash(cd:*)",
+      "Bash(cd \"/mnt/c/Users/iocrops admin/Coding/IrrigationReportAutomation\" && npm install --save @tensorflow/tfjs-node 2>&1 | tail -20)"
     ]
   }
 }

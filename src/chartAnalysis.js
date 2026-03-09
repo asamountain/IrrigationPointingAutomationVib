@@ -526,10 +526,45 @@ export async function clickViaHighchartsAPI(page, firstIndex, lastIndex, options
   return { firstClicked: results.firstClicked, lastClicked: results.lastClicked };
 }
 
+/**
+ * Detect first/last irrigation times using TCN when trained, HSSP otherwise.
+ * Falls back to HSSP if the model is untrained (< 3 samples) or unavailable.
+ *
+ * @param {Array<{x: number, y: number}>} dataPoints
+ * @param {object|null} tcnModel - TF.js LayersModel or null
+ * @param {number} trainingCount - Number of confirmed corrections so far
+ * @returns {Promise<{ firstTime: string|null, lastTime: string|null, method: string }>}
+ */
+export async function detectWithTCN(dataPoints, tcnModel, trainingCount) {
+  if (!tcnModel || trainingCount < 3) {
+    const events = detectIrrigationEvents(dataPoints);
+    const { first, last } = getFirstAndLastEvents(events);
+    return {
+      firstTime: first?.time ?? null,
+      lastTime: last?.time ?? null,
+      method: 'hssp'
+    };
+  }
+
+  const { prepareSequence, normToTimeString } = await import('./ml/tcnModel.js');
+  const xs = prepareSequence(dataPoints);
+  const pred = tcnModel.predict(xs);
+  const values = await pred.data();
+  xs.dispose();
+  pred.dispose();
+
+  return {
+    firstTime: normToTimeString(values[0]),
+    lastTime: normToTimeString(values[1]),
+    method: 'tcn'
+  };
+}
+
 export default {
   HSSP_PARAMS,
   detectIrrigationEvents,
   getFirstAndLastEvents,
+  detectWithTCN,
   clickChartPoint,
   getChartBounds,
   waitForChartRender,

@@ -1,210 +1,209 @@
 # Irrigation Report Automation
 
-**Purpose:** Automate browser-based data extraction from IoTCrops admin.iocrops.com 관수리포트 (irrigation report) menu.
+Automates browser-based data extraction from the IoTCrops admin portal (관수리포트 menu).
+Built with Playwright + Node.js. Runs a local dashboard to control everything.
 
-**Strategic Value:**
-- Portfolio asset for AgTech job applications
-- Learning experiment with browser automation (Vibium)
-- Reusable framework for future farm monitoring
+---
 
-## Quick Start
+## Mac Setup (First Time Only)
 
-### 1. Install Dependencies
+### 1. Install Node.js
+
+If you don't have Node.js yet, install it via [Homebrew](https://brew.sh/):
+
+```bash
+# Install Homebrew if you don't have it
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+
+# Then install Node.js
+brew install node
+```
+
+Verify it works:
+
+```bash
+node --version   # should be v18 or higher
+npm --version
+```
+
+---
+
+### 2. Get the Code
+
+```bash
+git clone <repo-url>
+cd IrrigationReportAutomation
+```
+
+Or if you received the folder directly, just `cd` into it.
+
+---
+
+### 3. Create the `.env` File
+
+The script needs login credentials. Create a file named `.env` in the project root:
+
+```bash
+touch .env
+open -e .env   # opens in TextEdit, or use any text editor
+```
+
+Paste in the following (ask your supervisor for the actual values):
+
+```
+ADMIN_EMAIL=your_email_here
+ADMIN_PASSWORD=your_password_here
+ADMIN_URL=https://admin.iofarm.com/report/
+```
+
+Save and close. This file is gitignored and never committed.
+
+---
+
+### 4. Install Dependencies
 
 ```bash
 npm install
 ```
 
-This will install Playwright and other required packages.
+---
 
-### 2. Run the Automation
+### 5. Install the Browser (Playwright)
+
+```bash
+npx playwright install chromium
+```
+
+This downloads a bundled Chromium browser that the script controls. You only need to do this once.
+
+---
+
+### 6. Run It
 
 ```bash
 npm start
 ```
 
-### 3. Configure via Dashboard
-
-A browser will open to the **Dashboard** at `http://localhost:3456`
-
-Configure your automation:
-- **👤 Manager**: Select 승진 (Seungjin), 진우 (Jinwoo), or enter custom name
-- **🏭 Start From**: Choose which farm to start processing from
-- **📊 Mode**: 
-  - **Normal**: Extract irrigation data automatically
-  - **Watch Mode**: Observe without clicking (debugging)
-  - **Learning Mode**: Train the AI by correcting detection errors
-- **🔢 Max Farms**: How many farms to process (3 for testing, or All)
-
-### 4. Click "🚀 Start Automation"
-
-The automation will:
-- Login to admin.iofarm.com
-- Select your chosen manager
-- Process each farm's irrigation data
-- Extract first and last irrigation times
-- Save results to `data/` folder
-
-### 5. Monitor Progress
-
-The dashboard shows:
-- ✅ Real-time status and logs
-- 📸 Live screenshots
-- 🎓 Learning progress (if in Learning Mode)
-- ⏸️ Pause/Resume/Stop controls
-
-### 6. Review Results
-
-Check the `./data/` folder for JSON files with extracted irrigation data
-
-## Features
-
-### ✅ Core Features
-- 🎛️ **Dashboard Control Panel** - Configure everything from a web interface
-- 🤖 **Automated Data Extraction** - Extract irrigation times from Highcharts
-- 📊 **HSSP Algorithm** - Highest Slope Start Point detection for irrigation events
-- 🎓 **Learning Mode** - Train AI to improve accuracy with your corrections
-- 🏭 **Multi-Farm Processing** - Process multiple farms automatically
-- 📅 **Date Range Iteration** - Check last 5 days of data per farm
-- ⏸️ **Real-time Control** - Pause/Resume/Stop anytime via dashboard
-- 📸 **Live Monitoring** - See screenshots and logs in real-time
-- 💾 **JSON Export** - All data saved in structured format
-
-### 🎓 Learning System
-The automation learns from your corrections:
-- **🌱 Ready to learn** (0 sessions) - No training yet
-- **🌿 Early learning** (1-4 sessions) - Just starting
-- **🌳 Improving** (5-19 sessions) - Getting better
-- **🏆 Well trained** (20+ sessions) - Highly accurate
-
-See `LEARNING_MODE_GUIDE.md` for detailed instructions.
-
-## Usage Modes
-
-### Normal Mode (Default)
-Extract irrigation data automatically with learned corrections applied.
-
-### Watch Mode
-Observe the automation without clicking anything. Useful for:
-- Debugging chart detection
-- Verifying manager/farm selection
-- Understanding the workflow
-
-### Learning Mode
-Train the AI by showing it correct irrigation points:
-1. System shows where it thinks irrigation starts/ends (🟢🔴)
-2. If wrong, you click the correct spots (🟡🟠)
-3. System learns from your corrections
-4. After 20+ sessions, accuracy is excellent!
-
-**Full guide:** See `LEARNING_MODE_GUIDE.md`
-
-## Technology Stack
-
-- **Browser Automation:** [Playwright](https://playwright.dev/) - Industry-standard automation
-- **Runtime:** Node.js with ES Modules
-- **Dashboard:** HTTP server with Server-Sent Events (SSE)
-- **Chart Interaction:** SVG path parsing + Bézier curve analysis
-- **Algorithm:** HSSP (Highest Slope Start Point) detection
-- **Learning:** JSON-based training data storage
-- **Data Export:** Structured JSON files
-
-## File Structure
-
-```
-IrrigationPointingAutomationVib/
-├── irrigation-playwright.js     # Main automation script
-├── dashboard-server.js          # Dashboard HTTP server + SSE
-├── dashboard.html               # Dashboard web interface
-├── package.json                 # Dependencies
-├── README.md                    # This file
-├── LEARNING_MODE_GUIDE.md       # Detailed learning mode instructions
-├── .gitignore                   # Ignore sensitive files
-├── data/                        # Extracted data (gitignored)
-│   └── all-farms-data-*.json
-├── training/                    # Learning data (gitignored)
-│   └── training-data.json
-└── screenshots/                 # Debug screenshots (gitignored)
-    └── *.png
-```
-
-## Troubleshooting
-
-### Dashboard won't open
-- Check if port 3456 is available
-- Server will auto-retry on port 3457, 3458, etc.
-- Look for "Dashboard server started at http://localhost:XXXX" in console
-
-### Manager selection not working
-- Make sure you clicked "Start Automation" button in dashboard
-- Check console logs for "Clicked [manager] radio button"
-- Verify the manager exists in the dropdown
-
-### Learning Mode: Can't see markers
-- Ensure "Learning Mode (Train)" is selected in dashboard
-- Browser window must be visible
-- Look for purple banner at top: "🎓 LEARNING MODE ACTIVE"
-
-### Irrigation times not extracted
-- Check if chart has visible data (not empty)
-- Enable Learning Mode to verify detection accuracy
-- Check `screenshots/` folder for debugging
-- Review `training/training-data.json` for patterns
-
-### "Port EADDRINUSE" error
-- Dashboard server will automatically try next port
-- If issue persists, kill other Node processes:
-  ```bash
-  # macOS/Linux
-  killall node
-  
-  # Windows
-  taskkill /F /IM node.exe
-  ```
-
-## Output Data Format
-
-Extracted data is saved to `data/all-farms-data-{timestamp}.json`:
-
-```json
-{
-  "extractedAt": "2026-01-03T12:00:00.000Z",
-  "manager": "승진",
-  "totalFarms": 10,
-  "farmsWithData": 8,
-  "dateRange": {
-    "description": "5 days ago to today",
-    "totalDays": 6
-  },
-  "farms": [
-    {
-      "farmName": "Farm A",
-      "dates": [
-        {
-          "date": "2026-01-01",
-          "firstIrrigationTime": "10:38 AM",
-          "lastIrrigationTime": "10:45 AM",
-          "hasSingleEvent": false
-        }
-      ]
-    }
-  ]
-}
-```
-
-## Portfolio Value
-
-When interviewing at AgTech companies, you can say:
-
-> "I built an automated irrigation monitoring system using Playwright for browser automation. The system uses SVG path parsing and machine learning to extract irrigation timing data from Highcharts visualizations. I implemented a training system where the AI learns from corrections, improving accuracy from baseline to 95%+ through iterative feedback. The dashboard provides real-time control and monitoring, demonstrating my ability to build production-ready automation for agricultural IoT systems."
-
-## Documentation
-
-- **LEARNING_MODE_GUIDE.md** - Complete guide to training the AI
-- **PRD.md** - Project requirements and specifications
+A browser window will open, and the **Dashboard** will appear at `http://localhost:3456` in your default browser.
 
 ---
 
-**Last Updated:** January 3, 2026  
-**Status:** Production-Ready with AI Learning
+## Using the Dashboard
 
+When the dashboard opens, configure and start the run:
+
+| Setting | What it does |
+|---------|-------------|
+| **Manager** | Select 승진 or 진우 (or type a custom name) |
+| **Start From** | Which farm to begin processing from |
+| **Mode** | Normal / Watch / Learning (see below) |
+| **Max Farms** | How many farms to process (use 3 for testing) |
+
+Click **"Start Automation"** when ready.
+
+The dashboard shows live logs, screenshots, and pause/stop controls while it runs.
+
+Results are saved to the `data/` folder as JSON files.
+
+---
+
+## Modes
+
+### Normal Mode (Default)
+Runs fully automatically. Extracts irrigation times from charts and saves results.
+
+### Watch Mode
+Same as Normal but doesn't click anything. Use this to verify the script navigates correctly without changing data.
+
+### Learning Mode
+Shows the script's detection on each chart and pauses for your review:
+- Green circle = detected first irrigation point
+- Red circle = detected last irrigation point
+
+If the detection is **correct**: press **F8** to continue
+If the detection is **wrong**: click the correct points on the chart, then press **F8**
+
+After 10–20 corrections the algorithm noticeably improves.
+
+---
+
+## Daily Usage (after setup)
+
+```bash
+# Standard run
+npm start
+
+# Run for a specific manager
+MANAGER="진우" npm start
+MANAGER="승진" npm start
+
+# Run with learning mode active
+CHART_LEARNING="true" npm start
+
+# Run learning mode for a specific manager
+MANAGER="진우" CHART_LEARNING="true" npm start
+
+# Analyze what the algorithm learned from your corrections
+npm run analyze
+```
+
+---
+
+## Typical Workflow
+
+```
+1. npm start                          → check if data looks right
+
+2. CHART_LEARNING="true" npm start   → if detection is off, correct it 10–20 times
+
+3. npm run analyze                    → see what improved
+
+4. npm start                          → now runs with better accuracy
+```
+
+---
+
+## Troubleshooting
+
+**Dashboard doesn't open**
+Check the terminal for a line like `Dashboard server started at http://localhost:XXXX`.
+If port 3456 is taken, the server picks the next available port automatically.
+
+**Script hangs and does nothing**
+You're probably in Learning Mode and need to press **F8** to continue.
+
+**"Cannot find module" or import errors**
+Run `npm install` again — a dependency is missing.
+
+**Browser opens but login fails**
+Double-check your `.env` file has the correct email, password, and URL with no extra spaces.
+
+**Kill all Node processes if something is stuck**
+```bash
+killall node
+```
+
+---
+
+## Project Structure
+
+```
+IrrigationReportAutomation/
+├── irrigation-playwright.js   # Main automation script
+├── src/                       # Core modules (auth, navigation, chart analysis)
+├── training/                  # Saved learning data (gitignored)
+├── data/                      # Extracted results (gitignored)
+├── .env                       # Credentials (gitignored, you create this)
+├── package.json
+└── README.md
+```
+
+---
+
+## Tech Stack
+
+- **Playwright** — browser automation
+- **Node.js** (ES Modules) — runtime
+- **TensorFlow.js** — TCN model for irrigation detection
+- **HSSP Algorithm** — baseline chart analysis (Highest Slope Start Point)
+- **Dashboard** — HTTP server with Server-Sent Events for real-time UI

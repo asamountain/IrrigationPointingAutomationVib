@@ -77,6 +77,9 @@ import {
   closeExecutionLog,
   logSeparator
 } from './src/core/executionLogger.js';
+import { loadOrCreateModel } from './src/ml/tcnModel.js';
+import { trainOnCorrection, getTrainingCount } from './src/ml/tcnTrainer.js';
+import { detectWithTCN } from './src/chartAnalysis.js';
 
 // Configuration (move to config.js later)
 const CONFIG = {
@@ -360,12 +363,14 @@ async function runReportSending(config, dashboard, runStats) {
             let nightMoistureRowIdx = -1;
             let lastIrrigationRowIdx = -1;
             let firstIrrigationRowIdx = -1;
-            
+            let sunriseMoistureRowIdx = -1;
+
             rows.forEach((row, idx) => {
               const label = row.querySelector('td')?.textContent || '';
               if (label.includes('야간 함수율 편차') || label.includes('야간함수율편차')) nightMoistureRowIdx = idx;
               if (label.includes('마지막 급액 시간') || label.includes('마지막급액시간')) lastIrrigationRowIdx = idx;
               if (label.includes('첫 급액 시간') || label.includes('첫급액시간')) firstIrrigationRowIdx = idx;
+              if (label.includes('일출첫급액 함수율') || label.includes('일출첫급액함수율')) sunriseMoistureRowIdx = idx;
             });
             
             // Scan columns (starting from index 1, skip label column)
@@ -381,16 +386,25 @@ async function runReportSending(config, dashboard, runStats) {
 
               const nightVal = nightMoistureRowIdx !== -1 ? rows[nightMoistureRowIdx].querySelectorAll('td')[i]?.textContent.trim() : 'N/A';
               const lastVal = lastIrrigationRowIdx !== -1 ? rows[lastIrrigationRowIdx].querySelectorAll('td')[i]?.textContent.trim() : 'N/A';
-              
+              const sunriseVal = sunriseMoistureRowIdx !== -1
+                ? rows[sunriseMoistureRowIdx].querySelectorAll('td')[i]?.textContent.trim()
+                : 'N/A';
+
               if (nightVal === '-' || nightVal === '—') {
                 holeFoundAtIndex = i;
                 holeReason = `Missing night moisture at ${headers[i]}`;
                 break;
               }
-              
+
               if (lastVal === '-' || lastVal === '—') {
                 holeFoundAtIndex = i;
                 holeReason = `Missing last irrigation time at ${headers[i]}`;
+                break;
+              }
+
+              if (sunriseVal === '-' || sunriseVal === '—') {
+                holeFoundAtIndex = i;
+                holeReason = `Missing sunrise moisture at ${headers[i]}`;
                 break;
               }
             }
@@ -814,6 +828,10 @@ async function main() {
   dashboard.log('Automation starting with user configuration...', 'success');
   
   // Load learned offsets from previous training
+  // Initialize TCN model (loads saved weights or creates fresh on cold start)
+  const tcnModel = await loadOrCreateModel();
+  console.log(`  🧠 TCN training samples so far: ${getTrainingCount()}`);
+
   const learnedOffsets = loadLearningOffsets();
   if (learnedOffsets.count > 0) {
     console.log(`🎓 Loaded learning data from ${learnedOffsets.count} training sessions`);
@@ -1728,22 +1746,50 @@ ${'\u2550'.repeat(70)}`);
         console.log(`\n     🔍 DEBUG: CONFIG.visualConfirmationMode = ${CONFIG.visualConfirmationMode}`);
         if (CONFIG.visualConfirmationMode) {
           console.log(`     👁️ ENTERING VISUAL CONFIRMATION MODE...\n`);
+
+          // --- TCN detection: get chart data + predict first/last times ---
+          let vcFirstTime = tableStatus.firstTime;
+          let vcLastTime  = tableStatus.lastTime;
+          let vcDataPoints = null;
+          try {
+            const vcChartData = await waitForChartData(networkData, 10000);
+            vcDataPoints = extractDataPoints(vcChartData);
+            if (vcDataPoints && vcDataPoints.length >= 10) {
+              const trainingCount = getTrainingCount();
+              const detection = await detectWithTCN(vcDataPoints, tcnModel, trainingCount);
+              console.log(`  🧠 Detection method: ${detection.method} (${trainingCount} training samples)`);
+              // Use TCN/HSSP prediction only when table fields are empty
+              if (!vcFirstTime || vcFirstTime === '--:--' || vcFirstTime === '-') {
+                vcFirstTime = detection.firstTime;
+              }
+              if (!vcLastTime || vcLastTime === '--:--' || vcLastTime === '-') {
+                vcLastTime = detection.lastTime;
+              }
+            }
+          } catch (tcnErr) {
+            console.log(`  ⚠️  TCN detection failed (${tcnErr.message}), using table values`);
+          }
+
           const vcResult = await handleVisualConfirmation(page, {
             nodeId: currentFarm.nodeId || currentFarm.name,
-            firstTime: tableStatus.firstTime,
-            lastTime: tableStatus.lastTime,
-            learnedOffsets: learnedOffsets.count > 0 ? learnedOffsets : null
+            firstTime: vcFirstTime,
+            lastTime: vcLastTime,
+            learnedOffsets: learnedOffsets.count > 0 ? learnedOffsets : null,
+            onConfirm: vcDataPoints ? async (correctedPositions, chartBounds) => {
+              await trainOnCorrection(tcnModel, vcDataPoints, correctedPositions, chartBounds);
+            } : null
           });
 
           // Handle navigation commands (H/L/J/K keys)
           if (vcResult.nav === 'prev-farm') {
             console.log(`     ⬅️  User requested PREVIOUS farm (J)`);
-            farmIdx -= 2; // -2 because the loop will increment by 1
-            if (farmIdx < -1) farmIdx = -1; 
+            // -2 because the loop will do farmIdx++ after break; wrap using modulo
+            farmIdx = (farmIdx - 1 + farmsToProcess.length) % farmsToProcess.length - 1;
             break; // Exit date loop to change farm
           } else if (vcResult.nav === 'next-farm') {
             console.log(`     ➡️  User requested NEXT farm (K)`);
-            // farmIdx remains same, loop will increment to next
+            // farmIdx will be incremented by loop; wrap to -1 when at last farm so it becomes 0
+            if (farmIdx >= farmsToProcess.length - 1) farmIdx = -1;
             break; // Exit date loop to change farm
           } else if (vcResult.nav === 'prev-day') {
             console.log(`     🔙 User requested PREVIOUS day (H)`);
